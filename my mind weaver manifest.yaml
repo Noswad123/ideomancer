@@ -1,0 +1,42 @@
+schemaVersion: 0.1.0
+id: mindweaver
+name: Mind Weaver
+kind: cosmic-being
+summary: Curates notes and links ideas (graph knowledge)
+owner: noswad-lamaj
+version: 0.3.2
+platforms: [{ os: macos, arch: arm64 }, { os: linux, arch: x64 }]
+runtimes:
+  - { name: core, lang: go, entrypoint: ./bin/mindweaver }
+  - { name: ui,   lang: python, entrypoint: python ./ui/main.py }
+capabilities:
+  resources:
+    - { name: Note, operations: [create, read, update, delete, link, search], schemaRef: ./schemas/note.json }
+    - { name: Topic, operations: [create, attach, list], schemaRef: ./schemas/topic.json }
+  events:
+    - { name: note.woven, payloadRef: ./schemas/note-event.json }
+interfaces:
+  http: { openapi: ./apis/mindweaver.openapi.yaml, audience: local-only }
+  cli:
+    commands:
+      - name: notes:create
+        args: [{ name: title, type: string, required: true }, { name: body, type: string }]
+        stdout: json
+      - name: notes:search
+        args: [{ name: query, type: string }]
+        stdout: json
+  rpc:
+    - protocol: jsonrpc-2.0
+      transport: stdio
+      methods: [{ name: weaveNote }, { name: linkTopics }]
+ui:
+  type: desktop
+  framework: pyqt
+  controlChannel: http://127.0.0.1:7878
+extensions:
+  plugins:
+    mechanism: jsonrpc-2.0
+    discovery: exec:$PATH/mindweaver-plugin-*
+    contracts:
+      - name: onNoteSaved
+        requestRef: ./schemas/hooks/onNoteSaved.request.json

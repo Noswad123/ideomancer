@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/schemas/manifest.schema.json",
+  "type": "object",
+  "required": ["schemaVersion", "id", "name", "version", "capabilities", "interfaces", "ports", "compatibility"],
+  "properties": {
+    "schemaVersion": { "type": "string" },
+    "id": { "type": "string", "pattern": "^[a-z0-9-_]+$" },
+    "name": { "type": "string" },
+    "version": { "type": "string" },
+    "summary": { "type": "string" },
+    "lore": {
+      "type": "object",
+      "properties": {
+        "aliases": { "type": "array", "items": { "type": "string" } },
+        "epithet": { "type": "string" },
+        "description": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "capabilities": {
+      "type": "object",
+      "properties": {
+        "resources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "operations"],
+            "properties": {
+              "name": { "type": "string" },
+              "operations": { "type": "array", "items": { "type": "string" } },
+              "schemaRef": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+              "name": { "type": "string" },
+              "payloadRef": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "interfaces": {
+      "type": "object",
+      "properties": {
+        "cli": {
+          "type": "object",
+          "properties": {
+            "commands": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["name", "stdout"],
+                "properties": {
+                  "name": { "type": "string" },
+                  "stdin": {
+                    "type": "object",
+                    "properties": {
+                      "accepts": { "type": "array", "items": { "type": "string" } },
+                      "schemaRef": { "type": "string" }
+                    },
+                    "additionalProperties": false
+                  },
+                  "args": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["name", "type"],
+                      "properties": {
+                        "name": { "type": "string" },
+                        "type": { "type": "string" },
+                        "required": { "type": "boolean" }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "stdout": {
+                    "type": "object",
+                    "required": ["emits"],
+                    "properties": {
+                      "emits": { "type": "array", "items": { "type": "string" } },
+                      "schemaRef": { "type": "string" }
+                    },
+                    "additionalProperties": false
+                  },
+                  "exitCodes": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["code", "meaning"],
+                      "properties": {
+                        "code": { "type": "integer" },
+                        "meaning": { "type": "string" }
+                      },
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "http": {
+          "type": "object",
+          "properties": { "openapi": { "type": "string" } },
+          "additionalProperties": false
+        },
+        "rpc": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "protocol": { "type": "string" },
+              "transport": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ports": {
+      "type": "object",
+      "required": ["inputs", "outputs"],
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "accepts"],
+            "properties": {
+              "name": { "type": "string" },
+              "accepts": { "type": "array", "items": { "type": "string" } }
+            },
+            "additionalProperties": false
+          }
+        },
+        "outputs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "emits"],
+            "properties": {
+              "name": { "type": "string" },
+              "emits": { "type": "array", "items": { "type": "string" } }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "compatibility": {
+      "type": "object",
+      "required": ["consumes", "produces"],
+      "properties": {
+        "consumes": { "type": "array", "items": { "type": "string" } },
+        "produces": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

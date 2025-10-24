@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "0.2.0",
+  "id": "x",
+  "name": "x",
+  "version": "0.1.0",
+  "resources": [
+    {"name":"Manifest","kind":"consumable","mimeTypes":["application/json"],"defaultMime":"application/json"}
+  ],
+  "ops": [
+    {"name":"systemMap.generate","consumes":[{"resource":"Manifest"}],"produces":[{"resource":"SystemMap"}]}
+  ],
+  "interfaces": {"cli":{"commands":[{"name":"generate:map","op":"systemMap.generate"}]}}
+}

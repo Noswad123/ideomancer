@@ -1,0 +1,24 @@
+{
+  "schemaVersion": "0.2.0",
+  "id": "ideomancer",
+  "name": "Ideomancer",
+  "version": "0.1.0",
+  "summary": "Test",
+  "resources": [
+    {"name":"Manifest","kind":"consumable","mimeTypes":["application/json"],"defaultMime":"application/json"},
+    {"name":"SystemMap","kind":"consumable","mimeTypes":["application/json"],"defaultMime":"application/json"}
+  ],
+  "ops": [
+    {"name":"manifest.create","produces":[{"resource":"Manifest"}]},
+    {"name":"systemMap.generate","consumes":[{"resource":"Manifest"}],"produces":[{"resource":"SystemMap"}]}
+  ],
+  "interfaces": {
+    "cli": {
+      "commands": [
+        {"name":"manifest:init","op":"manifest.create"},
+        {"name":"generate:map","op":"systemMap.generate"}
+      ]
+    }
+  }
+}
+
