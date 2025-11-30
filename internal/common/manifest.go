@@ -1,7 +1,7 @@
 package common
 
 import (
-	"json"
+	"encoding/json"
 )
 
 type Lore struct {

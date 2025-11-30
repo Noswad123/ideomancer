@@ -2,31 +2,35 @@ package runner
 
 import (
 	"strings"
+	"encoding/json"
 	"os"
 	"fmt"
 	"path/filepath"
 	"time"
+  "gopkg.in/yaml.v3"
 
 	"github.com/urfave/cli/v2"
 	"github.com/Noswad123/ideomancer/internal/helper"
 	"github.com/Noswad123/ideomancer/internal/common"
 )
-func RunCreateManifestCommand(c *cli.Context) {
-
-	if strings.TrimSpace(*name) == "" {
+func RunCreateManifestCommand(c *cli.Context) error {
+	name := c.String("name")
+	id := c.String("id")
+	out := c.String("out")
+	if strings.TrimSpace(name) == "" {
 		fmt.Fprintln(os.Stderr, "error: --name is required")
 		os.Exit(2)
 	}
-	mID := *id
+	mID := id
 	if strings.TrimSpace(mID) == "" {
-		mID = helper.Kebab(*name)
+		mID = helper.Kebab(name)
 	}
 
 	// Skeleton manifest aligned with your spec
 	m := common.Manifest{
 		SchemaVersion: "0.2.0",
 		ID:            mID,
-		Name:          *name,
+		Name:          name,
 		Version:       "0.1.0",
 		Summary:       "Ideomancer manifest",
 		Lore: &common.Lore{
@@ -83,40 +87,40 @@ func RunCreateManifestCommand(c *cli.Context) {
 	}
 
 	// If --out is provided, enforce extension and non-existence
-	if strings.TrimSpace(*out) != "" {
-		extOK := strings.HasSuffix(*out, ".idman.json") || strings.HasSuffix(*out, ".idman.yaml")
+	if strings.TrimSpace(out) != "" {
+		extOK := strings.HasSuffix(out, ".idman.json") || strings.HasSuffix(out, ".idman.yaml")
 		if !extOK {
 			fmt.Fprintln(os.Stderr, "error: --out must end with .idman.json or .idman.yaml")
 			os.Exit(2)
 		}
-		if exists(*out) {
-			fmt.Fprintf(os.Stderr, "error: file already exists: %s\n", *out)
+		if helper.Exists(out) {
+			fmt.Fprintf(os.Stderr, "error: file already exists: %s\n", out)
 			os.Exit(2)
 		}
 
-		dir := filepath.Dir(*out)
+		dir := filepath.Dir(out)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			helper.FailIO(err)
-			return
+			return nil
 		}
 
 		var bytes []byte
 		var err error
-		if strings.HasSuffix(*out, ".idman.yaml") {
+		if strings.HasSuffix(out, ".idman.yaml") {
 			bytes, err = yaml.Marshal(m)
 		} else {
 			bytes, err = json.MarshalIndent(m, "", "  ")
 		}
 		if err != nil {
 			helper.FailIO(err)
-			return
+			return nil
 		}
-		if err := os.WriteFile(*out, bytes, 0o644); err != nil {
+		if err := os.WriteFile(out, bytes, 0o644); err != nil {
 			helper.FailIO(err)
-			return
+			return nil
 		}
-		fmt.Fprintf(os.Stderr, "wrote %s\n", *out)
-		return
+		fmt.Fprintf(os.Stderr, "wrote %s\n", out)
+		return nil
 	}
 
 	// No --out → print JSON to stdout
@@ -126,6 +130,8 @@ func RunCreateManifestCommand(c *cli.Context) {
 	if err := enc.Encode(m); err != nil {
 		helper.FailIO(err)
 	}
+
+	return nil
 }
 
 

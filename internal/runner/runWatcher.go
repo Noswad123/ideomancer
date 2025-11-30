@@ -8,30 +8,27 @@ import (
   "bytes"
 	"strings"
 	"os"
-	"flag"
 
 	"github.com/urfave/cli/v2"
 	"github.com/Noswad123/ideomancer/internal/common"
 	"github.com/Noswad123/ideomancer/internal/helper"
 )
 
-func RunWatcherCommand(c *cli.Context) {
-    fs := flag.NewFlagSet("watcher:run", flag.ExitOnError)
-    typesCSV := fs.String("types", "", "comma-separated list of event types to match (optional)")
-    fromFile := fs.String("from-file", "", "read NDJSON CloudEvents from file instead of stdin")
-    printMode := fs.String("print", "summary", "summary|full|data (stderr output for humans)")
-    _ = fs.Parse(c.args)
+func RunWatcherCommand(c *cli.Context) error {
+    typesCSV := c.String("types")
+    fromFile := c.String("from-file")
+    printMode := c.String("print")
 
     var r io.Reader = os.Stdin
-    if strings.TrimSpace(*fromFile) != "" {
-        f, err := os.Open(*fromFile)
+    if strings.TrimSpace(fromFile) != "" {
+        f, err := os.Open(fromFile)
         if err != nil { helper.FailIO(err) }
         defer f.Close()
         r = f
     }
 
     typeSet := map[string]bool{}
-    if t := strings.TrimSpace(*typesCSV); t != "" {
+    if t := strings.TrimSpace(typesCSV); t != "" {
         for _, s := range strings.Split(t, ",") {
             s = strings.TrimSpace(s)
             if s != "" { typeSet[s] = true }
@@ -60,8 +57,7 @@ func RunWatcherCommand(c *cli.Context) {
             continue // filtered out
         }
 
-        // Human-facing stderr
-        switch *printMode {
+        switch printMode {
         case "summary":
             fmt.Fprintf(os.Stderr, "event %s id=%s source=%s\n", ce.Type, ce.ID, ce.Source)
         case "data":
@@ -70,7 +66,7 @@ func RunWatcherCommand(c *cli.Context) {
             b, _ := json.MarshalIndent(ce, "", "  ")
             fmt.Fprintf(os.Stderr, "%s\n", string(b))
         default:
-            fmt.Fprintf(os.Stderr, "watcher: unknown --print mode %q (use summary|full|data)\n", *printMode)
+            fmt.Fprintf(os.Stderr, "watcher: unknown --print mode %q (use summary|full|data)\n", printMode)
         }
 
         // Machine-facing stdout: re-emit matched events (so you can pipe)
@@ -80,4 +76,5 @@ func RunWatcherCommand(c *cli.Context) {
     if err := sc.Err(); err != nil {
         helper.FailIO(err)
     }
+	return nil
 }

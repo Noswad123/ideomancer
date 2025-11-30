@@ -1,23 +1,32 @@
-
 # Ideomancer
 
 ![Ideomancer](img/ideomancer.png)
 
-API Manifest (IETF draft / Microsoft)
-# build
+## What is Ideomancer?
+It is a program to help plan software projects.
+### Ideal feature set:
+    - generate boilerplat manifest
+    - From the manifest, generate Mermaid and or UML diagrams
+
+## Development
+### build
 go mod tidy
 go build -o ideomancer .
 
-# 1) init as YAML with your naming convention
+### init as YAML with your naming convention
 ./ideomancer manifest:init --name "Ideomancer" --id ideomancer --out examples/ideomancer.idman.yaml
-# -> writes file; refuses to overwrite if already exists
+### writes file; refuses to overwrite if already exists
 
-# 2) validate YAML directly (stdin)
+### validate YAML directly (stdin)
 cat examples/ideomancer.idman.yaml | ./ideomancer manifest:validate
-# -> {"valid":true,"errors":[]}
+### {"valid":true,"errors":[]}
 
-# 3) init to JSON on stdout (no --out)
+### init to JSON on stdout (no --out)
 ./ideomancer manifest:init --name "Test App" --id test-app > test.idman.json
 
-# 4) validate JSON file
+### validate JSON file
 cat test.idman.json | ./ideomancer manifest:validate
+## Todo
+- Finalize manifest structure
+- Generate mermaid files from manifest
+- generate UML from manifest

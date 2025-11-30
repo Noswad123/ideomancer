@@ -3,7 +3,6 @@ package runner
 import (
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -25,41 +24,40 @@ type ValidateErr struct {
 	Message string `json:"message"`
 	Code    int    `json:"code,omitempty"`
 }
-func RunValidateManifestCommand(c *cli.Context) {
-	fs := flag.NewFlagSet("manifest:validate", flag.ExitOnError)
-	schemaOnly := fs.Bool("schema-only", false, "only check required fields (no cross-references)")
-	_ = fs.Parse(c.args)
+func RunValidateManifestCommand(c *cli.Context) error {
+	schemaOnly := c.Bool("schema-only")
 
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		helper.FailIO(err)
-		return
+		return nil
 	}
 	if len(strings.TrimSpace(string(data))) == 0 {
 		helper.FailIO(errors.New("no input on stdin"))
-		return
+		return nil
 	}
 
 	var m common.Manifest
 	if err := helper.DecodeManifest(data, &m); err != nil {
 		helper.FailIO(fmt.Errorf("parse error: %w", err))
-		return
+		return nil
 	}
 
-	errs := validateManifest(&m, *schemaOnly)
+	errs := validateManifest(&m, schemaOnly)
 
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(ValidateResult{Valid: len(errs) == 0, Errors: errs}); err != nil {
 		helper.FailIO(err)
-		return
+		return nil
 	}
 	if len(errs) == 0 {
 		os.Exit(0)
 	} else {
 		os.Exit(2)
 	}
+	return nil
 }
 
 func contains(ss []string, s string) bool {

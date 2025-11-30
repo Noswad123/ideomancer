@@ -15,10 +15,8 @@ import (
 	"github.com/Noswad123/ideomancer/internal/common"
 )
 
-func RunGenerateMapCommand(c *cli.Context) {
-	fs := flag.NewFlagSet("generate:map", flag.ExitOnError)
-	format := fs.String("format", "json", "output format: json|mermaid")
-	_ = fs.Parse(c.args)
+func RunGenerateMapCommand(c *cli.Context) error {
+	format := c.String("format")
 
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil { helper.FailIO(err) }
@@ -33,7 +31,7 @@ func RunGenerateMapCommand(c *cli.Context) {
 			"edges": []map[string]any{},
 	}
 
-	switch *format {
+	switch format {
 	case "json":
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
@@ -42,6 +40,7 @@ func RunGenerateMapCommand(c *cli.Context) {
 			fmt.Println("graph TD")
 			fmt.Printf("  %s[%s]\n", m.ID, m.Name)
 	default:
-			helper.FailIO(fmt.Errorf("unsupported format: %s", *format))
+			helper.FailIO(fmt.Errorf("unsupported format: %s", format))
 	}
+	return nil
 }

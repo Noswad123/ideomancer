@@ -1,18 +1,17 @@
 package main
 
 import (
-    "os"
-		"log"
+	"log"
+	"os"
 
-		"github.com/Noswad123/ideomancer/internal/runner"
-		"github.com/urfave/cli/v2"
+	"github.com/Noswad123/ideomancer/internal/runner"
+	"github.com/urfave/cli/v2"
 )
-
 
 func main() {
 
 	app := &cli.App{
-		Name:  "ideomancer",
+		Name: "ideomancer",
 		Usage: `
 		A system planning tool
 		Usage:
@@ -43,33 +42,33 @@ func main() {
 					&cli.StringFlag{Name: "id"},
 					&cli.StringFlag{Name: "out"},
 				},
-				Action: func(c *cli.Context) error {
-					return runner.RunCreateManifestCommand(c)
-				},
+				Action: runner.RunCreateManifestCommand,
 			},
 			{
 				Name:  "validate",
 				Usage: "Validate manifest",
-				Flags: []cli.Flag{},
-				Action: func(c *cli.Context) error {
-					return runner.RunValidateManifestCommand(c)
+				Flags: []cli.Flag{
+					&cli.BoolFlag{Name: "schema-only"},
 				},
+				Action: runner.RunValidateManifestCommand,
 			},
 			{
 				Name:  "generate",
 				Usage: "Generate a system map file based off manifest",
-				Flags: []cli.Flag{},
-				Action: func(c *cli.Context) error {
-					return runner.RunGenerateMap(c)
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "format", Value: "json", Usage: "json|mermaid"},
 				},
-				// flag.NewFlagSet("generate:map", flag.ExitOnError)
+				Action: runner.RunGenerateMapCommand,
 			},
 			{
 				Name:  "watcher",
 				Usage: "Watch manifest file for changes",
-				Action: func(c *cli.Context) error {
-					return runner.RunWatchManifest(c)
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "types"},
+					&cli.StringFlag{Name: "from-file"},
+					&cli.StringFlag{Name: "print", Value: "summary", Usage: "summary|full|data"},
 				},
+				Action: runner.RunWatcherCommand,
 			},
 		},
 	}
@@ -78,5 +77,3 @@ func main() {
 		log.Fatal(err)
 	}
 }
-
-
