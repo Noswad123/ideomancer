@@ -24,7 +24,8 @@ type ValidateErr struct {
 	Message string `json:"message"`
 	Code    int    `json:"code,omitempty"`
 }
-func RunValidateManifestCommand(c *cli.Context) error {
+
+func ValidateManifest(c *cli.Context) error {
 	schemaOnly := c.Bool("schema-only")
 
 	data, err := io.ReadAll(os.Stdin)

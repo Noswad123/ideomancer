@@ -13,7 +13,7 @@ import (
 	"github.com/Noswad123/ideomancer/internal/helper"
 	"github.com/Noswad123/ideomancer/internal/common"
 )
-func RunCreateManifestCommand(c *cli.Context) error {
+func CreateManifest(c *cli.Context) error {
 	name := c.String("name")
 	id := c.String("id")
 	out := c.String("out")

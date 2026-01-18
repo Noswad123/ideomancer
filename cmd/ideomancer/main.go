@@ -42,7 +42,7 @@ func main() {
 					&cli.StringFlag{Name: "id"},
 					&cli.StringFlag{Name: "out"},
 				},
-				Action: runner.RunCreateManifestCommand,
+				Action: runner.CreateManifest,
 			},
 			{
 				Name:  "validate",
@@ -50,25 +50,19 @@ func main() {
 				Flags: []cli.Flag{
 					&cli.BoolFlag{Name: "schema-only"},
 				},
-				Action: runner.RunValidateManifestCommand,
+				Action: runner.ValidateManifest,
 			},
 			{
-				Name:  "generate",
-				Usage: "Generate a system map file based off manifest",
+				Name:  "graph",
+				Usage: "Generate a graph JSON file based off a graph spec",
 				Flags: []cli.Flag{
-					&cli.StringFlag{Name: "format", Value: "json", Usage: "json|mermaid"},
+					&cli.StringFlag{Name: "in", Usage: "path to graph spec file", Required: true},
+					&cli.StringFlag{Name: "out", Usage: "path to output JSON (default: stdout)"},
+					&cli.Float64Flag{Name: "width", Value: 700, Usage: "layout width in pixels"},
+					&cli.Float64Flag{Name: "height", Value: 400, Usage: "layout height in pixels"},
+					&cli.BoolFlag{Name: "no-render", Usage: "do not open the GUI preview window"},
 				},
-				Action: runner.RunGenerateMapCommand,
-			},
-			{
-				Name:  "watcher",
-				Usage: "Watch manifest file for changes",
-				Flags: []cli.Flag{
-					&cli.StringFlag{Name: "types"},
-					&cli.StringFlag{Name: "from-file"},
-					&cli.StringFlag{Name: "print", Value: "summary", Usage: "summary|full|data"},
-				},
-				Action: runner.RunWatcherCommand,
+				Action: runner.GenerateGraph,
 			},
 		},
 	}

@@ -1,0 +1,4 @@
+graph
+A["Service A"]
+B["Service B"]
+A --> B : "calls"
