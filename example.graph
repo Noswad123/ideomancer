@@ -1,4 +1,4 @@
 graph
-A["Service A"]
-B["Service B"]
+A["BAP"]
+B["Benchling"]
 A --> B : "calls"

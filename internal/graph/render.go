@@ -6,6 +6,7 @@ import (
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
+	"github.com/hajimehoshi/ebiten/v2/vector"
 )
 
 // RenderConfig controls preview sizing and node visuals.
@@ -220,8 +221,7 @@ func (g *ebitenGame) Draw(screen *ebiten.Image) {
 			continue
 		}
 
-		// draw main line
-		ebitenutil.DrawLine(screen, startX, startY, endX, endY, color.White)
+		drawLine(screen, startX, startY, endX, endY, color.White)
 
 		// Arrowhead (visible at low zoom too)
 		arrowLen := math.Max(12.0, 18.0*g.zoom)
@@ -245,9 +245,9 @@ func (g *ebitenGame) Draw(screen *ebiten.Image) {
 		}
 
 		// draw arrowhead outline
-		ebitenutil.DrawLine(screen, endX, endY, leftX, leftY, color.White)
-		ebitenutil.DrawLine(screen, endX, endY, rightX, rightY, color.White)
-		ebitenutil.DrawLine(screen, leftX, leftY, rightX, rightY, color.White)
+		drawLine(screen, endX, endY, leftX, leftY, color.White)
+		drawLine(screen, endX, endY, rightX, rightY, color.White)
+		drawLine(screen, leftX, leftY, rightX, rightY, color.White)
 
 		// optional: edge label at midpoint
 		if e.Label != "" {
@@ -279,12 +279,12 @@ func (g *ebitenGame) Draw(screen *ebiten.Image) {
 		}
 
 		// Fill
-		ebitenutil.DrawRect(screen, x, y, nodeW, nodeH, color.RGBA{30, 30, 30, 255})
+		drawRect(screen, x, y, nodeW, nodeH, color.RGBA{30, 30, 30, 255})
 		// Border
-		ebitenutil.DrawLine(screen, x, y, x+nodeW, y, color.White)
-		ebitenutil.DrawLine(screen, x+nodeW, y, x+nodeW, y+nodeH, color.White)
-		ebitenutil.DrawLine(screen, x+nodeW, y+nodeH, x, y+nodeH, color.White)
-		ebitenutil.DrawLine(screen, x, y+nodeH, x, y, color.White)
+		drawLine(screen, x, y, x+nodeW, y, color.White)
+		drawLine(screen, x+nodeW, y, x+nodeW, y+nodeH, color.White)
+		drawLine(screen, x+nodeW, y+nodeH, x, y+nodeH, color.White)
+		drawLine(screen, x, y+nodeH, x, y, color.White)
 
 		// Text
 		tx := int(x + nodeW/2 - float64(len(label))*3)
@@ -411,4 +411,27 @@ func rayRectIntersection(sx, sy, dx, dy, minX, minY, maxX, maxY float64) (ix, iy
 		return ix, iy, finitePoint(ix, iy)
 	}
 	return 0, 0, false
+}
+
+func drawLine(dst *ebiten.Image, x1, y1, x2, y2 float64, clr color.Color) {
+	vector.StrokeLine(
+		dst,
+		float32(x1), float32(y1),
+		float32(x2), float32(y2),
+		1.5, // stroke width
+		clr,
+		false,
+	)
+}
+
+func drawRect(dst *ebiten.Image, x, y, w, h float64, clr color.Color) {
+	vector.FillRect(
+		dst,
+		float32(x),
+		float32(y),
+		float32(w),
+		float32(h),
+		clr,
+		false,
+	)
 }
