@@ -1,7 +1,7 @@
 APP_NAME=ide
 CMD_PATH = ./cmd/ideomancer/
 BIN_DIR = ./bin
-INSTALL_DIR = ~/.dotfiles/bin
+INSTALL_DIR = ~/.local/bin
 
 .PHONY: all build
 
