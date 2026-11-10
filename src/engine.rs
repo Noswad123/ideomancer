@@ -33,6 +33,10 @@ pub mod v1 {
         Python {
             python: PathBuf,
         },
+        /// Compiled-in Tree-sitter grammars; no runtime/tool settings are accepted.
+        #[serde(rename = "javascript_typescript_native")]
+        NativeJavaScriptTypeScript {},
+        /// Retained request shape only; discovery rejects retired external tools.
         #[serde(rename = "javascript_typescript")]
         JavaScriptTypeScript {
             node: PathBuf,
@@ -377,9 +381,16 @@ pub mod v1 {
     }
 
     pub fn discover(request: &DiscoverRequest) -> Result<DiscoveryReport, EngineError> {
+        if matches!(request.toolchain, Toolchain::JavaScriptTypeScript { .. }) {
+            return Err(error(
+                ErrorCode::InvalidRequest,
+                "JavaScript/TypeScript discovery is native Tree-sitter; use NativeJavaScriptTypeScript {} (javascript_typescript_native) without node/typescript settings",
+            ));
+        }
         let tools: Vec<&Path> = match &request.toolchain {
             Toolchain::Python { python } => vec![python],
-            Toolchain::JavaScriptTypeScript { node, typescript } => vec![node, typescript],
+            Toolchain::NativeJavaScriptTypeScript {} => vec![],
+            Toolchain::JavaScriptTypeScript { .. } => unreachable!("retired toolchain rejected"),
         };
         if tools.iter().any(|path| path.as_os_str().is_empty()) {
             return Err(error(
@@ -395,12 +406,10 @@ pub mod v1 {
                 &request.output_container,
                 &trusted_tool(python, &source_root)?,
             ),
-            Toolchain::JavaScriptTypeScript { node, typescript } => discovery::discover_javascript(
-                &request.source_root,
-                &request.output_container,
-                &trusted_tool(node, &source_root)?,
-                typescript,
-            ),
+            Toolchain::NativeJavaScriptTypeScript {} => {
+                discovery::discover_javascript(&request.source_root, &request.output_container)
+            }
+            Toolchain::JavaScriptTypeScript { .. } => unreachable!("retired toolchain rejected"),
         }
         .map_err(|e| error(ErrorCode::DiscoveryFailed, e))?;
         Ok(DiscoveryReport {

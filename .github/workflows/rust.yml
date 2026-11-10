@@ -13,18 +13,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    env:
-      IDEOMANCER_TEST_NODE: node
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24.11.1'
-      - name: Provision the trusted syntax parser outside the checkout
-        working-directory: ${{ runner.temp }}
-        run: |
-          npm install --prefix "$RUNNER_TEMP/ideomancer-tools" --ignore-scripts --no-audit --no-fund typescript@5.8.3
-          printf 'IDEOMANCER_TEST_TYPESCRIPT=%s/ideomancer-tools/node_modules/typescript/lib/typescript.js\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'

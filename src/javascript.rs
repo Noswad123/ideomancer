@@ -1,14 +1,13 @@
-//! Static JS/TS extraction using an explicitly selected, operator-trusted compiler.
-//! The child is isolated from target loaders/configuration, not OS-sandboxed.
+//! Native static JS/TS extraction from the scanner's captured source bytes.
+//! No target code, runtime, configuration, or compiler plugins are executed.
 
-use crate::analysis::{self, Diagnostic, Evidence, Fact, LanguageMetadata};
-use serde::Deserialize;
-use std::fs;
-use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use crate::analysis::{self, Evidence, LanguageMetadata};
+use crate::javascript_native::{self, NativeSource};
+use std::path::Path;
 
-pub const EXTRACTOR_VERSION: &str = "javascript-typescript-static-6-generic-facts";
+pub const EXTRACTOR_VERSION: &str = "javascript-typescript-tree-sitter-1";
+pub const STRUCTURAL_EXTRACTOR_VERSION: &str = "javascript-typescript-static-6-generic-facts";
+pub const PARSER_VERSION: &str = "tree-sitter-0.25.10;javascript-0.25.0;typescript-0.23.2";
 pub const CLASS_MODULE_EXTRACTOR_VERSION: &str = "javascript-typescript-static-5-class-modules";
 pub const CLASS_RELATION_EXTRACTOR_VERSION: &str = "javascript-typescript-static-4-class-relations";
 pub const OPERATION_EXTRACTOR_VERSION: &str = "javascript-typescript-static-3-operations";
@@ -19,6 +18,7 @@ pub fn supported_version(version: &str) -> bool {
     matches!(
         version,
         EXTRACTOR_VERSION
+            | STRUCTURAL_EXTRACTOR_VERSION
             | CLASS_MODULE_EXTRACTOR_VERSION
             | CLASS_RELATION_EXTRACTOR_VERSION
             | OPERATION_EXTRACTOR_VERSION
@@ -31,6 +31,7 @@ pub fn supports_modules(version: &str) -> bool {
     matches!(
         version,
         EXTRACTOR_VERSION
+            | STRUCTURAL_EXTRACTOR_VERSION
             | CLASS_MODULE_EXTRACTOR_VERSION
             | CLASS_RELATION_EXTRACTOR_VERSION
             | OPERATION_EXTRACTOR_VERSION
@@ -41,191 +42,51 @@ pub fn supports_modules(version: &str) -> bool {
 pub fn supports_class_relations(version: &str) -> bool {
     matches!(
         version,
-        EXTRACTOR_VERSION | CLASS_MODULE_EXTRACTOR_VERSION | CLASS_RELATION_EXTRACTOR_VERSION
+        EXTRACTOR_VERSION
+            | STRUCTURAL_EXTRACTOR_VERSION
+            | CLASS_MODULE_EXTRACTOR_VERSION
+            | CLASS_RELATION_EXTRACTOR_VERSION
     )
 }
 
 pub fn supports_class_module_targets(version: &str) -> bool {
-    matches!(version, EXTRACTOR_VERSION | CLASS_MODULE_EXTRACTOR_VERSION)
+    matches!(
+        version,
+        EXTRACTOR_VERSION | STRUCTURAL_EXTRACTOR_VERSION | CLASS_MODULE_EXTRACTOR_VERSION
+    )
 }
 
 /// Structural factory/return receipts were introduced in v6. Legacy evidence
 /// remains generically readable, but cannot supply this capability retroactively.
 pub fn supports_structural_facts(version: &str) -> bool {
-    version == EXTRACTOR_VERSION
+    matches!(version, STRUCTURAL_EXTRACTOR_VERSION | EXTRACTOR_VERSION)
 }
 // This is a fixed source policy, never loaded from target configuration.
 pub const SCAN_POLICY: &str = "javascript-typescript-scope-1-nofollow:src-else-root;js,jsx,ts,tsx;exclude=operator-dirs,dotfolders,node_modules,bower_components,assets,vendor,generated,coverage,init,migrations,config,configs,environments;skip=*.spec.*,*.test.*,*.min.js,*.bundle.js,*.d.ts;modules=root-relative-path-with-extension-dotjoined";
-const HELPER: &str = include_str!("javascript_extract.cjs");
-const MAX_COMPILER: u64 = 32 * 1024 * 1024;
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Response {
-    protocol_version: String,
-    node_version: String,
-    typescript_version: String,
-    typescript_sha256: String,
-    facts: Vec<Fact>,
-    diagnostics: Vec<Diagnostic>,
-    complete: bool,
-}
-
-fn trust_boundary(source_root: &Path) -> Result<PathBuf, String> {
-    for ancestor in source_root.ancestors() {
-        // Git worktree files and even dangling marker symlinks count. Never
-        // follow the marker or read repository metadata/configuration.
-        match fs::symlink_metadata(ancestor.join(".git")) {
-            Ok(_) => return Ok(ancestor.into()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(format!("Inspect target repository boundary: {error}")),
-        }
-    }
-    Ok(source_root.into())
-}
-
-fn outside(path: &Path, root: &Path, label: &str) -> Result<PathBuf, String> {
-    let resolved = fs::canonicalize(path)
-        .map_err(|e| format!("Cannot resolve {label} {}: {e}", path.display()))?;
-    if resolved.starts_with(root) {
-        return Err(format!(
-            "{label} must be outside the target repository/source root (including symlink destinations)"
-        ));
-    }
-    if !fs::metadata(&resolved)
-        .map_err(|e| e.to_string())?
-        .is_file()
-    {
-        return Err(format!("{label} must be a regular file"));
-    }
-    Ok(resolved)
-}
-
-fn runtime(node: &Path, root: &Path) -> Result<PathBuf, String> {
-    let candidate = if node.components().count() == 1 && node.is_relative() {
-        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-            .map(|dir| dir.join(node))
-            .find(|p| {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    fs::metadata(p)
-                        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-                }
-                #[cfg(not(unix))]
-                {
-                    p.is_file()
-                }
-            })
-            .ok_or("Cannot find Node on the operator PATH; select an installed Node executable")?
-    } else {
-        node.into()
-    };
-    // Resolve before changing cwd. A trusted global shim is allowed, but no
-    // executable (or symlink destination) within the target is ever launched.
-    outside(&candidate, root, "Node executable")
-}
-
-#[cfg(not(unix))]
-pub fn extract(_root: &Path, _node: &Path, _typescript: &Path) -> Result<Evidence, String> {
-    Err(
-        "JavaScript extraction requires Unix descriptor-relative no-follow filesystem support"
-            .into(),
-    )
-}
-
-#[cfg(unix)]
-pub fn extract(root: &Path, node: &Path, typescript: &Path) -> Result<Evidence, String> {
-    if !typescript.is_absolute() {
-        return Err("Select a trusted compiler with --typescript ABSFILE (typescript/lib/typescript.js); target resolution, installation, and fallback are disabled".into());
-    }
+pub fn extract(root: &Path) -> Result<Evidence, String> {
     let scan = analysis::scan_javascript(root)?;
-    let canonical_root =
-        fs::canonicalize(&scan.root).map_err(|e| format!("Resolve target root: {e}"))?;
-    let boundary = trust_boundary(&canonical_root)?;
-    let compiler = outside(
-        typescript,
-        &boundary,
-        "TypeScript compiler (--typescript ABSFILE)",
-    )?;
-    let executable = runtime(node, &boundary)?;
-    let mut compiler_bytes = Vec::new();
-    let anchor = fs::File::open("/").map_err(|e| e.to_string())?;
-    let compiler_file = analysis::open_anchored(
-        &anchor,
-        compiler.strip_prefix("/").map_err(|e| e.to_string())?,
-        false,
-    )
-    .map_err(|e| format!("Open trusted TypeScript compiler without following symlinks: {e}"))?;
-    let metadata = compiler_file.metadata().map_err(|e| e.to_string())?;
-    if !metadata.is_file() || metadata.len() > MAX_COMPILER {
-        return Err(
-            "Trusted TypeScript compiler must be a regular file no larger than 32 MiB".into(),
-        );
-    }
-    compiler_file
-        .take(MAX_COMPILER + 1)
-        .read_to_end(&mut compiler_bytes)
-        .map_err(|e| format!("Read trusted TypeScript compiler: {e}"))?;
-    if compiler_bytes.len() as u64 > MAX_COMPILER {
-        return Err("Trusted TypeScript compiler exceeds the 32 MiB limit".into());
-    }
-    let compiler_hash = analysis::hash(&compiler_bytes);
-    let neutral = tempfile::tempdir().map_err(|e| format!("Create neutral Node cwd: {e}"))?;
-    if fs::canonicalize(neutral.path())
-        .map_err(|e| e.to_string())?
-        .starts_with(&boundary)
-    {
-        return Err(
-            "Neutral Node cwd must be outside the target repository/source root; select an external TMPDIR".into(),
-        );
-    }
-    let mut command = Command::new(executable);
-    command
-        .args(["--no-addons", "--max-old-space-size=512", "--eval", HELPER])
-        .arg(&compiler)
-        .arg(&compiler_hash)
-        .current_dir(neutral.path())
-        .env_clear()
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    for key in ["PATH", "SYSTEMROOT", "WINDIR"] {
-        if let Some(value) = std::env::var_os(key) {
-            command.env(key, value);
-        }
-    }
-    let input = serde_json::to_vec(&serde_json::json!({ "sources": scan.sources }))
-        .map_err(|e| e.to_string())?;
-    let output = analysis::run_bounded(command, input, "JavaScript/TypeScript")?;
-    let response: Response = serde_json::from_slice(&output)
-        .map_err(|_| "Invalid JavaScript/TypeScript helper response (body withheld)".to_string())?;
-    if response.protocol_version != "ideomancer.js-extractor.v1"
-        || response.typescript_sha256 != compiler_hash
-        || response.node_version.is_empty()
-        || response.typescript_version.is_empty()
-    {
-        return Err(
-            "JavaScript/TypeScript helper protocol or trusted compiler fingerprint mismatch".into(),
-        );
-    }
+    let sources: Vec<_> = scan
+        .sources
+        .into_iter()
+        .map(|source| NativeSource {
+            path: source.path,
+            module: source.module,
+            bytes: source.bytes,
+        })
+        .collect();
+    let response = javascript_native::extract_sources(&sources)?;
     let language = LanguageMetadata {
         name: "javascript-typescript".into(),
-        parser: "typescript".into(),
-        parser_version: response.typescript_version,
-        parser_sha256: compiler_hash,
-        runtime: "node".into(),
-        runtime_version: response.node_version,
+        parser: "tree-sitter".into(),
+        parser_version: PARSER_VERSION.into(),
+        parser_sha256: javascript_native::fingerprint(),
+        runtime: "native".into(),
+        runtime_version: env!("CARGO_PKG_VERSION").into(),
         scan_policy: SCAN_POLICY.into(),
     };
-    let snapshot = serde_json::to_vec(&(
-        SCAN_POLICY,
-        EXTRACTOR_VERSION,
-        analysis::hash(HELPER.as_bytes()),
-        &language,
-        &scan.files,
-    ))
-    .map_err(|e| e.to_string())?;
+    let snapshot = serde_json::to_vec(&(SCAN_POLICY, EXTRACTOR_VERSION, &language, &scan.files))
+        .map_err(|e| e.to_string())?;
     let mut diagnostics = scan.diagnostics;
     diagnostics.extend(response.diagnostics);
     diagnostics.sort_by(|a, b| (&a.path, &a.code, &a.message).cmp(&(&b.path, &b.code, &b.message)));
@@ -249,6 +110,7 @@ pub fn extract(root: &Path, node: &Path, typescript: &Path) -> Result<Evidence, 
 mod tests {
     use super::*;
     use crate::analysis::Language;
+    use std::fs;
 
     #[test]
     fn capabilities_preserve_legacy_generic_evidence() {
@@ -258,6 +120,7 @@ mod tests {
             (OPERATION_EXTRACTOR_VERSION, true, false, false, false),
             (CLASS_RELATION_EXTRACTOR_VERSION, true, true, false, false),
             (CLASS_MODULE_EXTRACTOR_VERSION, true, true, true, false),
+            (STRUCTURAL_EXTRACTOR_VERSION, true, true, true, true),
             (EXTRACTOR_VERSION, true, true, true, true),
         ] {
             assert!(supported_version(version));
@@ -274,9 +137,6 @@ mod tests {
 
     #[test]
     fn capability_omissions_survive_diagnostic_floods() {
-        let Some((node, compiler)) = tools() else {
-            return;
-        };
         let noise = "({[key]: 0});\n".repeat(5000);
         let factories = (0..8000)
             .map(|i| format!("export function f{i}() {{}}\n"))
@@ -300,7 +160,7 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             fs::write(root.path().join("noise.js"), &noise).unwrap();
             fs::write(root.path().join("z.ts"), source).unwrap();
-            let evidence = extract(root.path(), &node, &compiler).unwrap();
+            let evidence = extract(root.path()).unwrap();
             assert!(evidence.complete, "{:?}", evidence.diagnostics);
             assert!(evidence.diagnostics.len() <= 5000);
             assert_eq!(
@@ -325,9 +185,6 @@ mod tests {
 
     #[test]
     fn factory_return_forms_have_exact_utf16_identity() {
-        let Some((node, compiler)) = tools() else {
-            return;
-        };
         let root = tempfile::tempdir().unwrap();
         let cases = [
             (
@@ -393,7 +250,7 @@ mod tests {
             )
             .unwrap();
         }
-        let evidence = extract(root.path(), &node, &compiler).unwrap();
+        let evidence = extract(root.path()).unwrap();
         assert!(evidence.complete, "{:?}", evidence.diagnostics);
         for (name, source, form, expected) in cases {
             let path = format!("{name}.js");
@@ -454,9 +311,6 @@ mod tests {
 
     #[test]
     fn generic_factory_results_are_grounded_and_literal_free() {
-        let Some((node, compiler)) = tools() else {
-            return;
-        };
         let root = tempfile::tempdir().unwrap();
         let cases = [
             ("class", "module.exports = (Base, model) => { class C extends Base { constructor() { super(model); } method(x) { return model.call(x); } } return C; };", "class", true),
@@ -477,7 +331,7 @@ mod tests {
             fs::write(root.path().join(format!("{name}.ts")), text).unwrap();
         }
         fs::write(root.path().join("privacy.js"), "module.exports = (router, resolve, Model) => { router.use(resolve('PRIVATE_PROVIDER_VALUE')); router.get('/ok', () => Model.scope('PRIVATE_QUERY_VALUE').findAll({where: 'PRIVATE_WHERE_VALUE'})); router.getAsync('/PRIVATE_ASYNC_VALUE', () => {}); };").unwrap();
-        let evidence = extract(root.path(), &node, &compiler).unwrap();
+        let evidence = extract(root.path()).unwrap();
         assert!(evidence.complete, "{:?}", evidence.diagnostics);
         for (name, _, kind, safe) in cases {
             let receipts: Vec<_> = evidence
@@ -533,11 +387,11 @@ mod tests {
             extractor_version: EXTRACTOR_VERSION.into(),
             language: Some(LanguageMetadata {
                 name: "javascript-typescript".into(),
-                parser: "typescript".into(),
-                parser_version: "5.8.3".into(),
+                parser: "tree-sitter".into(),
+                parser_version: PARSER_VERSION.into(),
                 parser_sha256: "a".repeat(64),
-                runtime: "node".into(),
-                runtime_version: "v24.11.1".into(),
+                runtime: "native".into(),
+                runtime_version: "0.1.0".into(),
                 scan_policy: SCAN_POLICY.into(),
             }),
             ..Evidence::default()
@@ -581,205 +435,8 @@ mod tests {
         assert!(python.validate_language().is_err());
     }
 
-    fn tools() -> Option<(PathBuf, PathBuf)> {
-        let Some(compiler) = std::env::var_os("IDEOMANCER_TEST_TYPESCRIPT") else {
-            eprintln!("SKIP: set IDEOMANCER_TEST_TYPESCRIPT to a trusted compiler ABSFILE");
-            return None;
-        };
-        let compiler = PathBuf::from(compiler);
-        assert!(
-            compiler.is_absolute() && compiler.is_file(),
-            "IDEOMANCER_TEST_TYPESCRIPT must name an existing absolute compiler file"
-        );
-        let node = std::env::var_os("IDEOMANCER_TEST_NODE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("node"));
-        Some((node, compiler))
-    }
-
     #[test]
-    fn compiler_swap_between_rust_hash_and_helper_load_never_executes() {
-        use std::os::unix::fs::PermissionsExt;
-        let Some((node, _)) = tools() else {
-            return;
-        };
-        let source = tempfile::tempdir().unwrap();
-        let external = tempfile::tempdir().unwrap();
-        let node = runtime(&node, &fs::canonicalize(source.path()).unwrap()).unwrap();
-        let compiler = external.path().join("compiler.js");
-        let marker = external.path().join("executed");
-        let original = b"module.exports = {};";
-        fs::write(&compiler, original).unwrap();
-        let replacement = format!("require('node:fs').writeFileSync({:?}, 'COMPILER_EXECUTED'); throw new Error('changed compiler executed');", marker.to_str().unwrap());
-        fs::write(external.path().join("compiler.js.swap"), &replacement).unwrap();
-        // This operator-trusted shim runs only after Rust has read the compiler.
-        // Keep every Node argument intact while replacing the file before load.
-        let shim = external.path().join("node-shim");
-        let quoted_node = format!("'{}'", node.to_str().unwrap().replace('\'', "'\\''"));
-        fs::write(&shim, format!("#!/bin/sh\ncp \"$5.swap\" \"$5\" || exit 90\nprintf '%s' \"$6\" >\"$5.expected\"\nexec {quoted_node} \"$@\"\n")).unwrap();
-        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
-        let error = extract(source.path(), &shim, &compiler).unwrap_err();
-        assert!(error.contains("fingerprint mismatch"), "{error}");
-        assert_eq!(
-            fs::read_to_string(external.path().join("compiler.js.expected")).unwrap(),
-            analysis::hash(original)
-        );
-        assert_eq!(fs::read_to_string(&compiler).unwrap(), replacement);
-        assert!(!marker.exists());
-    }
-
-    #[test]
-    fn missing_compiler_is_actionable_and_target_tools_are_rejected() {
-        use std::os::unix::fs::symlink;
-        let root = tempfile::tempdir().unwrap();
-        let error = extract(root.path(), Path::new("node"), Path::new("")).unwrap_err();
-        assert!(error.contains("--typescript ABSFILE"));
-        let parser = root.path().join("compiler.js");
-        fs::write(&parser, "throw new Error('must not execute')").unwrap();
-        assert!(extract(root.path(), Path::new("node"), &parser)
-            .unwrap_err()
-            .contains("outside the target"));
-        let external = tempfile::tempdir().unwrap();
-        let link = external.path().join("compiler.js");
-        symlink(&parser, &link).unwrap();
-        assert!(extract(root.path(), Path::new("node"), &link)
-            .unwrap_err()
-            .contains("outside the target"));
-        assert!(runtime(&parser, &fs::canonicalize(root.path()).unwrap()).is_err());
-    }
-
-    #[test]
-    fn monorepo_sibling_compiler_and_node_are_rejected_before_execution() {
-        use std::os::unix::fs::{symlink, PermissionsExt};
-        let repo = tempfile::tempdir().unwrap();
-        fs::create_dir(repo.path().join(".git")).unwrap();
-        let source = repo.path().join("apps/server");
-        fs::create_dir_all(&source).unwrap();
-        let client = repo.path().join("client/node_modules/typescript/lib");
-        fs::create_dir_all(&client).unwrap();
-        let marker = repo.path().join("executed");
-        let compiler = client.join("typescript.js");
-        fs::write(
-            &compiler,
-            format!(
-                "require('fs').writeFileSync({:?}, 'executed')",
-                marker.to_str().unwrap()
-            ),
-        )
-        .unwrap();
-        let node = repo.path().join("client/node");
-        fs::write(&node, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
-        fs::set_permissions(&node, fs::Permissions::from_mode(0o755)).unwrap();
-        let external = tempfile::tempdir().unwrap();
-        let external_compiler = external.path().join("compiler.js");
-        fs::write(&external_compiler, "throw new Error('must not execute')").unwrap();
-        let compiler_link = external.path().join("compiler-link.js");
-        let node_link = external.path().join("node-link");
-        symlink(&compiler, &compiler_link).unwrap();
-        symlink(&node, &node_link).unwrap();
-        for parser in [&compiler, &compiler_link] {
-            let error = extract(&source, Path::new("node"), parser).unwrap_err();
-            assert!(error.contains("TypeScript compiler"));
-            assert!(error.contains("outside the target repository/source root"));
-        }
-        for executable in [&node, &node_link] {
-            let error = extract(&source, executable, &external_compiler).unwrap_err();
-            assert!(error.contains("Node executable"));
-            assert!(error.contains("outside the target repository/source root"));
-        }
-        assert!(!marker.exists());
-    }
-
-    #[test]
-    fn repository_boundary_uses_nearest_marker_without_following_it() {
-        use std::os::unix::fs::symlink;
-        let repo = tempfile::tempdir().unwrap();
-        let repo = fs::canonicalize(repo.path()).unwrap();
-        fs::create_dir(repo.join(".git")).unwrap();
-        let nested = repo.join("nested");
-        let source = nested.join("apps/server");
-        fs::create_dir_all(&source).unwrap();
-        assert_eq!(trust_boundary(&source).unwrap(), repo);
-        fs::write(nested.join(".git"), "gitdir: DO_NOT_READ").unwrap();
-        assert_eq!(trust_boundary(&source).unwrap(), nested);
-        fs::remove_file(nested.join(".git")).unwrap();
-        symlink(
-            repo.join("nonexistent-private-metadata"),
-            nested.join(".git"),
-        )
-        .unwrap();
-        assert_eq!(trust_boundary(&source).unwrap(), nested);
-    }
-
-    #[test]
-    fn standalone_source_allows_explicit_external_tools() {
-        let source = tempfile::tempdir().unwrap();
-        let source = fs::canonicalize(source.path()).unwrap();
-        assert_eq!(trust_boundary(&source).unwrap(), source);
-        let external = tempfile::tempdir().unwrap();
-        let compiler = external.path().join("compiler.js");
-        let node = external.path().join("node");
-        fs::write(&compiler, "trusted fixture").unwrap();
-        fs::write(&node, "trusted fixture").unwrap();
-        assert_eq!(
-            outside(&compiler, &source, "TypeScript compiler").unwrap(),
-            fs::canonicalize(&compiler).unwrap()
-        );
-        assert_eq!(
-            runtime(&node, &source).unwrap(),
-            fs::canonicalize(&node).unwrap()
-        );
-    }
-
-    #[test]
-    fn node_environment_loaders_never_execute() {
-        let Some((node, compiler)) = tools() else {
-            return;
-        };
-        if let Some(root) = std::env::var_os("IDEOMANCER_NODE_ENV_TEST_ROOT") {
-            let root = PathBuf::from(root);
-            let evidence = extract(&root, &node, &compiler).unwrap();
-            assert!(evidence.complete);
-            assert!(!root.join("executed").exists());
-            return;
-        }
-        // A subprocess avoids mutating the environment of parallel tests.
-        let root = tempfile::tempdir().unwrap();
-        fs::write(root.path().join("app.ts"), "export class App {}").unwrap();
-        let loader = root.path().join("loader.cjs");
-        fs::write(
-            &loader,
-            format!(
-                "require('fs').writeFileSync({:?}, 'LOADER_EXECUTED')",
-                root.path().join("executed").to_str().unwrap()
-            ),
-        )
-        .unwrap();
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "javascript::tests::node_environment_loaders_never_execute",
-                "--nocapture",
-            ])
-            .env("IDEOMANCER_NODE_ENV_TEST_ROOT", root.path())
-            .env("NODE_OPTIONS", format!("--require={}", loader.display()))
-            .env("NODE_PATH", root.path())
-            .env("HOME", root.path())
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(!root.path().join("executed").exists());
-    }
-
-    #[test]
-    fn static_identity_and_language_metadata_are_deterministic() {
-        let Some((node, compiler)) = tools() else {
-            return;
-        };
+    fn native_identity_and_language_metadata_are_deterministic() {
         let root = tempfile::tempdir().unwrap();
         let marker = root.path().join("executed");
         fs::write(
@@ -809,9 +466,15 @@ mod tests {
             ),
         )
         .unwrap();
-        let first = extract(root.path(), &node, &compiler).unwrap();
-        let second = extract(root.path(), &node, &compiler).unwrap();
+        let first = extract(root.path()).unwrap();
+        let second = extract(root.path()).unwrap();
+        assert!(first.complete, "{:?}", first.diagnostics);
+        assert_eq!(first.extractor_version, EXTRACTOR_VERSION);
         assert_eq!(first.snapshot_id, second.snapshot_id);
+        assert_eq!(
+            serde_json::to_string(&first).unwrap(),
+            serde_json::to_string(&second).unwrap()
+        );
         assert_eq!(
             first.validate_language(),
             Ok(Language::JavaScriptTypeScript)
@@ -824,13 +487,37 @@ mod tests {
         assert!(!serialized.contains("pythonVersion"));
         assert_eq!(
             first.language.as_ref().unwrap().parser_sha256,
-            analysis::hash(&fs::read(&compiler).unwrap())
+            javascript_native::fingerprint()
         );
-        fs::write(root.path().join("app.ts"), "export class Changed {}").unwrap();
+        let language = first.language.as_ref().unwrap();
+        assert_eq!(language.parser, "tree-sitter");
+        assert_eq!(language.parser_version, PARSER_VERSION);
+        assert_eq!(language.runtime, "native");
+        assert_eq!(language.runtime_version, env!("CARGO_PKG_VERSION"));
+        let snapshot = |version: &str, metadata: &LanguageMetadata| {
+            analysis::hash(
+                &serde_json::to_vec(&(SCAN_POLICY, version, metadata, &first.files)).unwrap(),
+            )
+        };
+        assert_eq!(first.snapshot_id, snapshot(EXTRACTOR_VERSION, language));
         assert_ne!(
             first.snapshot_id,
-            extract(root.path(), &node, &compiler).unwrap().snapshot_id
+            snapshot(STRUCTURAL_EXTRACTOR_VERSION, language)
         );
+        let mut changed_metadata = language.clone();
+        changed_metadata.parser_sha256 = "c".repeat(64);
+        assert_ne!(
+            first.snapshot_id,
+            snapshot(EXTRACTOR_VERSION, &changed_metadata)
+        );
+        changed_metadata = language.clone();
+        changed_metadata.parser_version.push_str(";changed-grammar");
+        assert_ne!(
+            first.snapshot_id,
+            snapshot(EXTRACTOR_VERSION, &changed_metadata)
+        );
+        fs::write(root.path().join("app.ts"), "export class Changed {}").unwrap();
+        assert_ne!(first.snapshot_id, extract(root.path()).unwrap().snapshot_id);
         let mut invalid = first;
         invalid.python_version = "24.11.1".into();
         assert!(invalid.validate_language().is_err());
@@ -838,5 +525,126 @@ mod tests {
         invalid.python_version.clear();
         invalid.language.as_mut().unwrap().name = "python".into();
         assert!(invalid.validate_language().is_err());
+    }
+
+    #[test]
+    fn jsx_and_tsx_use_native_grammars_without_configuration() {
+        let root = tempfile::tempdir().unwrap();
+        for (path, text) in [
+            ("view.jsx", "export class View { render() { return <section><span /></section>; } }"),
+            ("typed.tsx", "export class Typed { render(value: string): JSX.Element { return <section>{value}</section>; } }"),
+        ] {
+            fs::write(root.path().join(path), text).unwrap();
+        }
+        let evidence = extract(root.path()).unwrap();
+        assert!(evidence.complete, "{:?}", evidence.diagnostics);
+        assert_eq!(evidence.files.len(), 2);
+        for path in ["view.jsx", "typed.tsx"] {
+            assert!(
+                evidence
+                    .facts
+                    .iter()
+                    .any(|f| f.path == path && f.kind == "js_declaration"),
+                "{path}"
+            );
+            assert!(
+                evidence
+                    .facts
+                    .iter()
+                    .any(|f| f.path == path && f.kind == "js_module_export"),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_parser_uses_captured_bytes_after_path_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let original = b"export class Captured {}";
+        fs::write(root.path().join("app.js"), original).unwrap();
+        let scan = analysis::scan_javascript(root.path()).unwrap();
+        fs::write(root.path().join("app.js"), "INVALID REPLACEMENT SOURCE").unwrap();
+        let sources: Vec<_> = scan
+            .sources
+            .into_iter()
+            .map(|source| NativeSource {
+                path: source.path,
+                module: source.module,
+                bytes: source.bytes,
+            })
+            .collect();
+        assert_eq!(scan.files[0].sha256, analysis::hash(&sources[0].bytes));
+        assert_eq!(sources[0].bytes, original);
+        let result = javascript_native::extract_sources(&sources).unwrap();
+        assert!(result.complete, "{:?}", result.diagnostics);
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "js_declaration" && f.symbol.ends_with("Captured")));
+    }
+
+    #[test]
+    fn invalid_utf8_and_parse_errors_fail_closed_without_source_leaks() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("bad.js"), b"// PRIVATE_INVALID_UTF8\n\xff").unwrap();
+        fs::write(
+            root.path().join("broken.ts"),
+            "export class Broken { PRIVATE_PARSE_TEXT = ;",
+        )
+        .unwrap();
+        fs::write(root.path().join("good.js"), "export class Good {}").unwrap();
+        let evidence = extract(root.path()).unwrap();
+        assert!(!evidence.complete);
+        for path in ["bad.js", "broken.ts"] {
+            assert!(
+                evidence.diagnostics.iter().any(|d| d.path == path),
+                "{path}"
+            );
+        }
+        assert!(evidence
+            .facts
+            .iter()
+            .filter(|f| f.path == "bad.js")
+            .all(|f| f.kind == "module"));
+        assert!(evidence
+            .facts
+            .iter()
+            .any(|f| f.path == "good.js" && f.kind == "js_declaration"));
+        let encoded = serde_json::to_string(&evidence).unwrap();
+        assert!(!encoded.contains("PRIVATE_INVALID_UTF8"));
+        assert!(!encoded.contains("PRIVATE_PARSE_TEXT"));
+    }
+
+    #[test]
+    fn native_extraction_preserves_scanner_safety_and_resource_limits() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        fs::write(
+            external.path().join("secret.js"),
+            "export class PrivateOutside {}",
+        )
+        .unwrap();
+        symlink(
+            external.path().join("secret.js"),
+            root.path().join("linked.js"),
+        )
+        .unwrap();
+        let evidence = extract(root.path()).unwrap();
+        assert!(!evidence.complete);
+        assert!(evidence.files.is_empty());
+        assert!(evidence.facts.is_empty());
+        assert!(evidence
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "symlink_skipped"));
+        fs::write(
+            root.path().join("oversized.js"),
+            vec![b' '; 1024 * 1024 + 1],
+        )
+        .unwrap();
+        assert!(extract(root.path())
+            .unwrap_err()
+            .contains("1 MiB file limit"));
     }
 }

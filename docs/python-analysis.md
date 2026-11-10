@@ -107,8 +107,10 @@ No eligible Python files is an error.
 `evidence.json` uses `ideomancer.evidence.v1`, separate from the graph schema.
 Python retains that schema: legacy `language: None` omits the language field on
 serialization, preserving existing serialized evidence and old snapshot validation.
-JS/TS instead uses evidence v2 with explicit parser/runtime metadata; Node versions
-are never stored in `pythonVersion`. See [JS/TS evidence](javascript-typescript-analysis.md#data-flow).
+JS/TS instead uses evidence v2 with explicit parser/runtime metadata; its native
+Tree-sitter migration does not repurpose `pythonVersion`. Python Tree-sitter is a
+roadmap milestone, not a replacement for this Python >=3.12 AST helper today.
+See [JS/TS evidence](javascript-typescript-analysis.md#data-flow).
 It records extractor/Python versions, file hashes, facts, diagnostics, completeness,
 and `snapshotId`. Facts have root-relative paths, line/end-line ranges, symbols,
 and stable IDs; file-content hashes live in the file inventory. Rust reads each

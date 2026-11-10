@@ -16,11 +16,14 @@ The public [JavaScript worker](../examples/javascript-worker/README.md) is the
 distributable example. Runtime activation, DI, network proof,
 and JS/TS agent interpretation remain deferred; Python/FastAPI behavior is unchanged.
 
+The native parser is an implemented local candidate, still uncommitted/unpublished.
+The full local normal suite and applicable optional rendering/browser checks pass
+on Rust 1.89. Hosted supported-platform validation remains a separate release gate.
+
 ## API / Interfaces
 
 ```text
 discover ROOT --lang javascript-typescript [--out BASE]
-         [--node PROGRAM] --typescript ABSFILE
 catalog SAVEDDIR [--kind api|workflow|class] [--query TEXT] [--path PREFIX]
 diagram SAVEDDIR --kind api|class [--no-render]
 diagram SAVEDDIR --entry ID --view services|network [--no-render]
@@ -29,16 +32,20 @@ diagram SAVEDDIR --entry ID --view services|network [--no-render]
 
 - `--language` aliases `--lang`; `js`, `javascript`, `ts`, and `typescript` all
   select `javascript-typescript`. Omitting the language still selects Python.
-- `--node` overrides `IDEOMANCER_NODE`, default `node` on the operator's `PATH`.
-- `--typescript ABSFILE` overrides `IDEOMANCER_TYPESCRIPT` and is required. Supply
-  a trusted standalone `typescript/lib/typescript.js` artifact; only built-in
-  `require` dependencies are allowed. There is no auto-install or `npx` fallback.
-- Node and compiler must resolve outside the target repository/source root,
-  including symlink destinations and siblings inside a containing monorepo. The
-  nearest ancestor `.git` marker defines the repository boundary; without one,
-  the supplied source root is the boundary. Markers are not loaded as configuration.
-- Tested tools are Node **24.11.1** and TypeScript **5.8.3**, independent of versions
-  declared by the target. This is a tested pair, not a target-version compatibility guarantee.
+- No Node runtime or TypeScript compiler is needed for discovery. Tree-sitter
+  **0.25.10**, JavaScript grammar **0.25.0**, and TypeScript/TSX grammar **0.23.2**
+  are exactly pinned native compiled C dependencies with Rust bindings. Building
+  requires a native C compiler, not npm or target dependencies.
+- The language ABI bridge `tree-sitter-language` is directly pinned to **0.1.5**
+  alongside the declared Rust **1.89** MSRV, protecting downstream dependency
+  resolutions rather than relying only on this repository's lockfile.
+- Hidden obsolete `--node` / `--typescript` and `IDEOMANCER_NODE` /
+  `IDEOMANCER_TYPESCRIPT` are rejected with an actionable error for JS/TS discovery,
+  not ignored. Remove the flags and unset both variables.
+- Engine callers use `Toolchain::NativeJavaScriptTypeScript {}` with strict wire
+  object `{"language":"javascript_typescript_native"}`. The legacy Node/compiler
+  variant remains readable but discovery returns `invalid_request` before source
+  access. See the [engine contract](engine-api.md).
 - `diagram SAVEDDIR --kind class` with no entry/query/path or explicit limit/offset
   selects grouped actual UML at `views/class`. Any such selector, including
   `--limit 12` or `--offset 0`, selects the independent, paginated `views/class-focus`
@@ -47,12 +54,12 @@ diagram SAVEDDIR --entry ID --view services|network [--no-render]
 
 Discovery never loads target `node_modules`, tsconfig, plugins, package scripts,
 or imported modules. It does not install tooling or infer the language from target
-configuration. The TypeScript API is `createSourceFile` only: no type checker,
-project construction, or compiler module resolver. The selected-evidence resolver
-described below does not use TypeScript project resolution.
+configuration. Parsing uses Tree-sitter syntax trees only: no type checker,
+project construction, compiler module resolver, or source side effects. The
+selected-evidence resolver below does not use TypeScript project resolution.
 
 Catalog browsing and native API/class/callable projections work from saved artifacts
-without the extraction Node runtime, compiler, Python, agent, model, or authentication.
+without an extraction runtime, compiler, Python, agent, model, or authentication.
 With `--no-render`, no Node/browser toolchain is needed. SVG rendering uses a
 separately trusted `mmdc`, which normally has its own Node/Chromium requirements.
 JS/TS workflow analysis **without `--view`**, including `--extract-only`, is rejected
@@ -62,24 +69,24 @@ before Python or model invocation. Use `--view services|network`, not a Python f
 ## Data Flow
 
 1. Rust selects, opens, and hashes source bytes through the shared Unix
-   descriptor-anchored no-follow scanner. The helper receives bounded source bytes
-   on stdin, not target files to open.
-2. The external compiler is limited to 32 MiB. Rust fingerprints it; the helper
-   hashes the exact bytes again **before executing those compiler bytes**, allowing
-   only built-in requires. Rust verifies the returned compiler fingerprint and
-   protocol/runtime/parser metadata.
-3. The trusted Node process runs the bundled helper in a neutral external temporary
-   cwd, with a cleared environment except path/platform essentials, `--no-addons`,
-   and a 512 MiB old-space setting. Target code is never executed or imported;
-   target credentials and environment files are not read.
-4. TypeScript syntax yields declarations, call shapes, guarded import/export bindings,
+   descriptor-anchored no-follow scanner. Native parsing receives these bounded
+   bytes; it does not reopen target files or load target configuration.
+2. The compiled-in JavaScript, TypeScript, or TSX grammar parses the selected file.
+   No Node process, compiler artifact, target imports, macros, or source code runs.
+3. Tree-sitter byte offsets are converted to the existing UTF-16 code-unit offsets
+   used by JS proof receipts. Astral Unicode characters count as two UTF-16 units;
+   treating byte offsets as receipt offsets would invalidate guards and ordering.
+4. Native syntax traversal yields declarations, call shapes, guarded import/export bindings,
    module dependency summaries, members, source references, and diagnostics. Saved
    evidence and catalog receipts bind artifacts; later views verify saved data,
    not live source freshness.
 
 Evidence keeps the outer schema `ideomancer.evidence.v2`, with extractor
-`javascript-typescript-static-6-generic-facts` and a `language` metadata object.
-Legacy static-1 through static-5 remain accepted for supported generic views.
+`javascript-typescript-tree-sitter-1` and a `language` metadata object.
+Legacy static-1 through static-6 remain accepted for supported generic views.
+They are not rewritten or upgraded to new fact capabilities, including static-6
+generic factory claims. Rediscover explicitly for native facts; the new extractor
+identity invalidates old snapshot-bound claims and derived-output reuse.
 Static-2 and newer support module navigation; static-4/5/6 support class relations.
 Static-5/6 resolve selected relative
 named-class targets. Static-4 local relations still render; static-1/2/3 render observed
@@ -90,16 +97,28 @@ or inconsistent language/schema metadata are rejected.
 | Field | Meaning |
 | --- | --- |
 | `name` | `javascript-typescript` |
-| `parser` / `parserVersion` | `typescript` and the selected artifact's version |
-| `parserSha256` | Hash of the compiler bytes |
-| `runtime` / `runtimeVersion` | `node` and the reported Node version |
+| `parser` / `parserVersion` | `tree-sitter` and `tree-sitter-0.25.10;javascript-0.25.0;typescript-0.23.2` |
+| `parserSha256` | Hash binding exact runtime/grammar versions, grammar node-type JSON and all native extractor implementation source |
+| `runtime` / `runtimeVersion` | `native` and the Ideomancer package version, not an installed Node version |
 | `scanPolicy` | Fixed versioned JS/TS scope policy |
 
-`pythonVersion` is absent, never repurposed for Node. Snapshot identity includes
-the bundled helper hash, extractor, parser/runtime metadata, scope policy, and
+`pythonVersion` is absent, never repurposed for JS/TS. Snapshot identity includes
+the native parser policy, extractor, parser/runtime metadata, scope policy, and
 selected paths/content hashes. Dirty and untracked selected files count. Legacy
 Python evidence v1 with `language: None` still serializes without a language field,
 and old Python snapshots retain validation under their existing identity rules.
+The native fingerprint includes JavaScript `NODE_TYPES`, TypeScript
+`TYPESCRIPT_NODE_TYPES`, TSX `TSX_NODE_TYPES`, and the full text of both
+`src/javascript_native.rs` and `src/javascript_native/optional.rs`, alongside exact
+runtime/grammar versions and native policy identity. It is not a hash of a local
+compiler installation or a claim to authenticate the target source.
+
+The parser migration preserves the fact/proof/output contracts: generic facts,
+binding/scope guards, atomic module/class proof, redaction, saved view receipts,
+and adapter ownership remain in force. It is not permission to infer more runtime
+behavior from a more permissive syntax tree. Tree-sitter `ERROR` or missing nodes,
+including failures in files containing only module syntax, mark extraction incomplete;
+recovered syntax is not complete evidence or permission to promote module links.
 
 ### Declaration and call candidates
 
@@ -381,13 +400,15 @@ incomplete catalogs can be saved but discovery/catalog exit 1. Completeness desc
 selected source availability/parsing, not runtime coverage. Excluded entries and
 static-resolution limitations are not automatically failed scans.
 
-Bounds are 5000 files, 1 MiB/file, 16 MiB total source, 40 MiB helper request,
-32 MiB helper output, and a 60-second deadline. Source resource limits fail closed.
-Nonblocking stdio pumping includes request writes, child completion, and EOF in
-the deadline; a child exiting while a helper holds a pipe open cannot wait forever.
-Cleanup targets the owned process group and reaps the child; it does not kill
-arbitrary detached processes. The runtime and compiler are trusted executable
-code, **not OS-sandboxed**, and these controls are not a malicious-tool sandbox.
+Source bounds remain 5000 files, 1 MiB/file and 16 MiB total source. Parsing and
+traversal share a cooperative **60-second** extraction deadline; tree traversal is
+bounded to **200000 nodes** and **depth 256**. Baseline fact/output bounds are
+100000 facts and 32 MiB, with separate optional-fact budgets and rollback.
+These in-process controls are **not a hard memory sandbox** or an OS-enforced
+preemption guarantee; native C parsing can allocate before cancellation is observed.
+Legacy helper stdin/stdout and Node heap settings do not describe native limits.
+Budget exhaustion must fail closed with explicit incomplete/error reporting, not
+partially promoted proof. Python retains its separate AST-helper process controls.
 
 ### Unsupported execution and resolution
 
@@ -444,11 +465,9 @@ that any whole private application is completely understood.
 
 ## Example usage
 
-With trusted tools provisioned externally:
+With the native candidate built:
 
 ```sh
-export IDEOMANCER_NODE=/absolute/path/to/trusted/node
-export IDEOMANCER_TYPESCRIPT=/absolute/path/to/trusted/typescript/lib/typescript.js
 ideomancer discover examples/javascript-worker --language ts
 ideomancer catalog .ideomancer/catalogs/javascript-worker --kind workflow
 ideomancer diagram .ideomancer/catalogs/javascript-worker --kind class --no-render
@@ -535,16 +554,27 @@ Use either pair independently to keep extensionless paths unambiguous. See the
 
 ### Validation tooling
 
-Tests use synthetic fixtures and explicitly selected external tools, not hardcoded
-global paths or target installations. Set `IDEOMANCER_TEST_TYPESCRIPT` to the
-absolute trusted compiler and `IDEOMANCER_TEST_NODE` to trusted Node (default `node`).
-Tool-dependent tests skip when prerequisites are unavailable; no downloads occur.
-CI explicitly provisions Node 24.11.1 and TypeScript 5.8.3 outside the checkout,
-with npm lifecycle scripts disabled, so these cases run rather than silently skip.
+Native extraction tests use synthetic fixtures and compiled-in pinned grammars,
+without Node/compiler provisioning or tool-availability skips. CI keeps Python
+3.12, Rustfmt, Clippy, tests, package-policy/inventory checks, package verification,
+and the release build. It does not install Node, TypeScript, Mermaid, or browsers.
+The declared MSRV is Rust **1.89**, with direct exact dependency pins protecting
+downstream resolution. Record Rust 1.89 and current-stable matrix results separately
+before release. The package review must retain applicable runtime/grammar licenses
+and notices, including compiled C grammar code in binary distributions.
+
+Local validation on Rust 1.89: the full normal suite has **563 passing tests**
+(13 optional tests ignored in that run), including 44 JS/TS view tests, 25 class
+UML tests, 13 adapter API tests and 8 engine API tests. All **nine applicable
+non-agent optional checks** also pass with existing trusted render/browser tools
+and a synthetic saved catalog, plus six package-policy tests. The four optional
+agent-bridge tests remain unrun, not reported as fixed. Independent review's six
+soundness/resource findings have regression fixes and a clean focused re-review.
+These local results are not a claim of hosted matrix success or release approval.
 
 ```sh
-IDEOMANCER_TEST_NODE=/absolute/path/to/trusted/node IDEOMANCER_TEST_TYPESCRIPT=/absolute/path/to/trusted/typescript/lib/typescript.js cargo test --locked --test javascript_views
-IDEOMANCER_TEST_NODE=/absolute/path/to/trusted/node IDEOMANCER_TEST_TYPESCRIPT=/absolute/path/to/trusted/typescript/lib/typescript.js cargo test js_focus::tests::real_mermaid_accepts_javascript_members -- --ignored
+cargo test --locked --test javascript_views
+cargo test js_focus::tests::real_mermaid_accepts_javascript_members -- --ignored
 ```
 
 The ignored real-Mermaid check requires existing `mmdc` and Chromium; it installs
@@ -562,9 +592,9 @@ IDEOMANCER_TEST_NODE=/absolute/trusted/node IDEOMANCER_PUPPETEER_MODULE=/absolut
 
 ## Related files
 
-- `src/main.rs`: explicit discovery language/tool flags and environment precedence.
+- `src/cli.rs`: explicit discovery language selection and retired tool-setting errors.
 - `src/analysis.rs`: shared evidence types, language validation, scanner, bounded child I/O.
-- `src/javascript.rs`, `src/javascript_extract.cjs`: compiler trust, fingerprinting,
+- `src/javascript.rs`, `src/javascript_native.rs`, `src/javascript_native/optional.rs`: native parser dispatch,
   syntax extraction, lexical guards, and route candidate metadata.
 - `src/js_modules.rs`: selected relative paths, summary validation, cycles, and module proof.
 - `src/js_focus.rs`, `src/focus.rs`: atomic local/module proof selection and shared focus dispatch.

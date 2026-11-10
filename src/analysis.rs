@@ -74,8 +74,13 @@ impl Evidence {
                 if self.python_version.is_empty()
                     && crate::javascript::supported_version(&self.extractor_version)
                     && metadata.name == "javascript-typescript"
-                    && metadata.parser == "typescript"
-                    && metadata.runtime == "node"
+                    && if self.extractor_version == crate::javascript::EXTRACTOR_VERSION {
+                        metadata.parser == "tree-sitter"
+                            && metadata.runtime == "native"
+                            && metadata.parser_version == crate::javascript::PARSER_VERSION
+                    } else {
+                        metadata.parser == "typescript" && metadata.runtime == "node"
+                    }
                     && metadata.scan_policy == crate::javascript::SCAN_POLICY
                     && !metadata.parser_version.is_empty()
                     && !metadata.runtime_version.is_empty()
@@ -125,9 +130,11 @@ pub struct Diagnostic {
 
 #[derive(Serialize)]
 pub(crate) struct Source {
-    path: String,
-    module: String,
+    pub(crate) path: String,
+    pub(crate) module: String,
     hex: String,
+    #[serde(skip)]
+    pub(crate) bytes: Vec<u8>,
 }
 
 #[derive(Deserialize)]
@@ -210,7 +217,6 @@ impl Language {
 }
 
 pub(crate) struct Scan {
-    pub root: PathBuf,
     pub files: Vec<SourceFile>,
     pub sources: Vec<Source>,
     pub diagnostics: Vec<Diagnostic>,
@@ -231,8 +237,8 @@ pub(crate) fn scan_javascript(root: &Path) -> Result<Scan, String> {
     extract_with_policy(root, Language::JavaScriptTypeScript)
 }
 
-pub fn extract_javascript(root: &Path, node: &Path, typescript: &Path) -> Result<Evidence, String> {
-    crate::javascript::extract(root, node, typescript)
+pub fn extract_javascript(root: &Path) -> Result<Evidence, String> {
+    crate::javascript::extract(root)
 }
 
 fn diagnostic(diagnostics: &mut Vec<Diagnostic>, code: &str, path: String, message: String) {
@@ -578,7 +584,7 @@ fn extract_with_policy(root: &Path, policy: Language) -> Result<Scan, String> {
             sha256: hash(&bytes),
         });
         let mut hex = String::with_capacity(bytes.len() * 2);
-        for byte in bytes {
+        for byte in &bytes {
             use std::fmt::Write;
             write!(hex, "{byte:02x}").expect("write to String");
         }
@@ -586,11 +592,11 @@ fn extract_with_policy(root: &Path, policy: Language) -> Result<Scan, String> {
             path: rel,
             module,
             hex,
+            bytes,
         });
     }
     let root_package = root_package.into();
     Ok(Scan {
-        root,
         files,
         sources,
         diagnostics,
@@ -997,6 +1003,107 @@ mod tests {
             .err()
             .unwrap()
             .contains("1 MiB"));
+    }
+
+    #[test]
+    fn captured_source_bytes_preserve_python_hex_transport() {
+        let root = tempfile::tempdir().unwrap();
+        let bytes = b"# captured\n\x00\xff";
+        source(root.path(), "app.py", bytes);
+        let scan = extract_with_policy(root.path(), Language::Python).unwrap();
+        assert_eq!(scan.sources[0].bytes, bytes);
+        assert_eq!(scan.files[0].sha256, hash(&scan.sources[0].bytes));
+        assert_eq!(
+            serde_json::to_string(&scan.sources[0]).unwrap(),
+            r#"{"path":"app.py","module":"app","hex":"232063617074757265640a00ff"}"#
+        );
+        source(root.path(), "app.py", "changed after capture");
+        assert_eq!(scan.sources[0].bytes, bytes);
+    }
+
+    #[test]
+    fn javascript_scan_enforces_aggregate_limits() {
+        let root = tempfile::tempdir().unwrap();
+        for index in 0..17 {
+            source(root.path(), &format!("{index}.js"), vec![b' '; MAX_FILE]);
+        }
+        assert!(scan_javascript(root.path())
+            .err()
+            .unwrap()
+            .contains("16 MiB total limit"));
+        let root = tempfile::tempdir().unwrap();
+        for index in 0..=MAX_FILES {
+            source(root.path(), &format!("{index}.ts"), "");
+        }
+        assert!(scan_javascript(root.path())
+            .err()
+            .unwrap()
+            .contains("5000 file limit"));
+    }
+
+    #[test]
+    fn javascript_metadata_families_cannot_be_mixed_or_forged() {
+        use crate::javascript as js;
+        let mut evidence = Evidence {
+            schema_version: "ideomancer.evidence.v2".into(),
+            extractor_version: js::EXTRACTOR_VERSION.into(),
+            language: Some(LanguageMetadata {
+                name: "javascript-typescript".into(),
+                parser: "tree-sitter".into(),
+                parser_version: js::PARSER_VERSION.into(),
+                // Saved native evidence need not match the current implementation.
+                parser_sha256: "b".repeat(64),
+                runtime: "native".into(),
+                runtime_version: "old-native-build".into(),
+                scan_policy: js::SCAN_POLICY.into(),
+            }),
+            ..Evidence::default()
+        };
+        assert!(evidence.is_javascript());
+        for version in [
+            js::LEGACY_EXTRACTOR_VERSION,
+            js::MODULE_EXTRACTOR_VERSION,
+            js::OPERATION_EXTRACTOR_VERSION,
+            js::CLASS_RELATION_EXTRACTOR_VERSION,
+            js::CLASS_MODULE_EXTRACTOR_VERSION,
+            js::STRUCTURAL_EXTRACTOR_VERSION,
+        ] {
+            evidence.extractor_version = version.into();
+            assert!(evidence.validate_language().is_err(), "{version}");
+            let meta = evidence.language.as_mut().unwrap();
+            meta.parser = "typescript".into();
+            meta.parser_version = "5.8.3".into();
+            meta.runtime = "node".into();
+            meta.runtime_version = "v24.11.1".into();
+            assert!(evidence.is_javascript(), "{version}");
+            evidence.extractor_version = js::EXTRACTOR_VERSION.into();
+            assert!(evidence.validate_language().is_err());
+            let meta = evidence.language.as_mut().unwrap();
+            meta.parser = "tree-sitter".into();
+            meta.parser_version = js::PARSER_VERSION.into();
+            meta.runtime = "native".into();
+            assert!(evidence.is_javascript());
+        }
+        for version in [
+            "unknown",
+            "javascript-typescript-static-7",
+            "javascript-typescript-tree-sitter-2",
+        ] {
+            evidence.extractor_version = version.into();
+            assert!(evidence.validate_language().is_err());
+        }
+        evidence.extractor_version = js::EXTRACTOR_VERSION.into();
+        for (parser, runtime, bundle) in [
+            ("typescript", "native", js::PARSER_VERSION),
+            ("tree-sitter", "node", js::PARSER_VERSION),
+            ("tree-sitter", "native", "tree-sitter-unknown"),
+        ] {
+            let meta = evidence.language.as_mut().unwrap();
+            meta.parser = parser.into();
+            meta.runtime = runtime.into();
+            meta.parser_version = bundle.into();
+            assert!(evidence.validate_language().is_err());
+        }
     }
 
     fn python() -> Option<PathBuf> {

@@ -659,7 +659,7 @@ pub(crate) mod tests {
         let mut e = Evidence {
             schema_version: "ideomancer.evidence.v2".into(),
             snapshot_id: "js-fixture".into(),
-            extractor_version: crate::javascript::EXTRACTOR_VERSION.into(),
+            extractor_version: crate::javascript::STRUCTURAL_EXTRACTOR_VERSION.into(),
             python_version: String::new(),
             language: Some(LanguageMetadata {
                 name: "javascript-typescript".into(),
@@ -1025,22 +1025,9 @@ pub(crate) mod tests {
     }
 
     fn extract_source(code: &str) -> Option<Evidence> {
-        use std::path::PathBuf;
-        let Some(compiler) = std::env::var_os("IDEOMANCER_TEST_TYPESCRIPT").map(PathBuf::from)
-        else {
-            eprintln!("SKIP: set IDEOMANCER_TEST_TYPESCRIPT to an existing trusted compiler file");
-            return None;
-        };
-        assert!(
-            compiler.is_absolute() && compiler.is_file(),
-            "Invalid trusted test compiler path"
-        );
-        let node = PathBuf::from(
-            std::env::var_os("IDEOMANCER_TEST_NODE").unwrap_or_else(|| "node".into()),
-        );
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("app.ts"), code).unwrap();
-        let e = crate::javascript::extract(root.path(), &node, &compiler).unwrap();
+        let e = crate::javascript::extract(root.path()).unwrap();
         assert!(e.complete);
         Some(e)
     }
@@ -1328,7 +1315,7 @@ module.exports = (router, deps: Context) => router.post('/x', req => { work(); d
     }
 
     #[test]
-    #[ignore = "requires explicitly provisioned TypeScript, Node, mmdc, and Chromium; no downloads"]
+    #[ignore = "requires explicitly provisioned mmdc and Chromium; no downloads"]
     fn real_mermaid_accepts_javascript_members() {
         let Some(e) = extract_source("export class Service extends ExternalBase { constructor(private dependency: unknown) {} protected field: unknown; #secret: unknown; _public() {} $execute() {} arrow = () => {}; }") else { return };
         let catalog = crate::catalog::build(&e, "local").unwrap();

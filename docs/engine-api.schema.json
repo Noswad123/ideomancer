@@ -24,10 +24,15 @@
     "Toolchain": {
       "oneOf": [
         {
+          "type": "object", "additionalProperties": false, "required": ["language"],
+          "properties": { "language": { "const": "javascript_typescript_native" } }
+        },
+        {
           "type": "object", "additionalProperties": false, "required": ["language", "python"],
           "properties": { "language": { "const": "python" }, "python": { "$ref": "#/$defs/Path" } }
         },
         {
+          "description": "Legacy readable request shape; discover rejects it with invalid_request before source access. Use javascript_typescript_native.",
           "type": "object", "additionalProperties": false, "required": ["language", "node", "typescript"],
           "properties": { "language": { "const": "javascript_typescript" }, "node": { "$ref": "#/$defs/Path" }, "typescript": { "$ref": "#/$defs/Path" } }
         }

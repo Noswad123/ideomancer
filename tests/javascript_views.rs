@@ -2,13 +2,11 @@
 #![cfg(unix)]
 
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::OnceLock;
 use std::time::SystemTime;
 use tempfile::{tempdir, TempDir};
 
@@ -40,43 +38,6 @@ module.exports = (router, deps) => {
   router.post('/lookup', req => req.contextService.lookup(req.body));
 };
 "#;
-
-struct Tools {
-    node: PathBuf,
-    compiler: PathBuf,
-}
-
-fn tools() -> Option<&'static Tools> {
-    static TOOLS: OnceLock<Option<Tools>> = OnceLock::new();
-    let tools = TOOLS.get_or_init(|| {
-        let compiler = PathBuf::from(std::env::var_os("IDEOMANCER_TEST_TYPESCRIPT")?);
-        if !compiler.is_absolute() || !compiler.is_file() {
-            return None;
-        }
-        let executable = std::env::var_os("IDEOMANCER_TEST_NODE").unwrap_or_else(|| "node".into());
-        let output = Command::new(executable)
-            .args(["--eval", "process.stdout.write(process.execPath)"])
-            .env_remove("NODE_OPTIONS")
-            .env_remove("NODE_PATH")
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let node = PathBuf::from(String::from_utf8(output.stdout).ok()?);
-        if !node.is_absolute() || !node.is_file() {
-            return None;
-        }
-        Some(Tools {
-            node,
-            compiler: fs::canonicalize(compiler).ok()?,
-        })
-    });
-    if tools.is_none() {
-        eprintln!("SKIP javascript_views: set IDEOMANCER_TEST_TYPESCRIPT to an absolute trusted typescript/lib/typescript.js outside fixtures and IDEOMANCER_TEST_NODE to trusted Node (default: node)");
-    }
-    tools.as_ref()
-}
 
 fn success(output: Output) -> Value {
     assert!(output.status.success(), "{output:?}");
@@ -163,18 +124,15 @@ struct Fixture {
     _temp: TempDir,
     cwd: PathBuf,
     root: PathBuf,
-    tools: &'static Tools,
     forbidden: PathBuf,
 }
 
 impl Fixture {
     fn new() -> Option<Self> {
-        let tools = tools()?;
         let temp = tempdir().unwrap();
         let cwd = fs::canonicalize(temp.path()).unwrap();
         let root = cwd.join("source app");
         fs::create_dir(&root).unwrap();
-        assert!(!tools.node.starts_with(&root) && !tools.compiler.starts_with(&root));
         let forbidden = cwd.join("forbidden tool");
         fs::write(&forbidden, "#!/bin/sh\n: > \"$JS_TOOL_MARKER\"\nprintf 'FORBIDDEN_TOOL_EXECUTED\\n' >&2\nexit 97\n").unwrap();
         fs::set_permissions(&forbidden, fs::Permissions::from_mode(0o755)).unwrap();
@@ -182,7 +140,6 @@ impl Fixture {
             _temp: temp,
             cwd,
             root,
-            tools,
             forbidden,
         };
         let source = format!(
@@ -198,11 +155,9 @@ impl Fixture {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ideomancer"));
         command
             .current_dir(&self.cwd)
-            .env("IDEOMANCER_NODE", &self.forbidden)
-            .env(
-                "IDEOMANCER_TYPESCRIPT",
-                self.cwd.join("missing compiler.js"),
-            )
+            .env_remove("IDEOMANCER_NODE")
+            .env_remove("IDEOMANCER_TYPESCRIPT")
+            .env("PATH", &self.cwd)
             .env("IDEOMANCER_PYTHON", &self.forbidden)
             .env("IDEOMANCER_AGENT", &self.forbidden)
             .env("IDEOMANCER_MMDC", &self.forbidden)
@@ -220,11 +175,7 @@ impl Fixture {
             .arg(&self.root)
             .args(["--lang", "javascript-typescript", "--json", "--limit", "30"])
             .arg("--out")
-            .arg(self.cwd.join("catalog output"))
-            .arg("--node")
-            .arg(&self.tools.node)
-            .arg("--typescript")
-            .arg(&self.tools.compiler);
+            .arg(self.cwd.join("catalog output"));
         command
     }
 
@@ -317,7 +268,7 @@ fn discovery_is_stable_redacted_complete_and_explicitly_language_tagged() {
     assert_eq!(evidence["schemaVersion"], "ideomancer.evidence.v2");
     assert_eq!(
         evidence["extractorVersion"],
-        "javascript-typescript-static-6-generic-facts"
+        "javascript-typescript-tree-sitter-1"
     );
     for fact in evidence["facts"].as_array().unwrap() {
         assert!(
@@ -329,12 +280,17 @@ fn discovery_is_stable_redacted_complete_and_explicitly_language_tagged() {
         );
     }
     assert_eq!(evidence["language"]["name"], "javascript-typescript");
-    assert_eq!(evidence["language"]["parser"], "typescript");
-    assert_eq!(evidence["language"]["runtime"], "node");
+    assert_eq!(evidence["language"]["parser"], "tree-sitter");
+    assert_eq!(evidence["language"]["runtime"], "native");
     assert_eq!(
-        evidence["language"]["parserSha256"],
-        format!("{:x}", Sha256::digest(fs::read(&f.tools.compiler).unwrap()))
+        evidence["language"]["parserVersion"],
+        "tree-sitter-0.25.10;javascript-0.25.0;typescript-0.23.2"
     );
+    let hash = evidence["language"]["parserSha256"].as_str().unwrap();
+    assert_eq!(hash.len(), 64);
+    assert!(hash
+        .bytes()
+        .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)));
     for key in ["parserVersion", "runtimeVersion", "scanPolicy"] {
         assert!(!evidence["language"][key].as_str().unwrap().is_empty());
     }
@@ -677,7 +633,7 @@ fn retired_profile_values_fail_before_catalog_or_tool_access() {
 }
 
 #[test]
-fn missing_parser_is_actionable_and_target_tools_including_symlinks_are_rejected() {
+fn retired_tools_including_symlinks_are_rejected_before_root_or_storage_access() {
     let temp = tempdir().unwrap();
     fs::write(temp.path().join("app.js"), "export function run() {}").unwrap();
     let missing = Command::new(env!("CARGO_BIN_EXE_ideomancer"))
@@ -688,7 +644,7 @@ fn missing_parser_is_actionable_and_target_tools_including_symlinks_are_rejected
         .env("IDEOMANCER_NODE", "/usr/bin/false")
         .output()
         .unwrap();
-    rejected(missing, "--typescript");
+    rejected(missing, "native");
     let Some(f) = Fixture::new() else { return };
     let target_node = f.root.join("node");
     fs::copy(&f.forbidden, &target_node).unwrap();
@@ -711,17 +667,28 @@ fn missing_parser_is_actionable_and_target_tools_including_symlinks_are_rejected
             let mut command = f.command();
             command
                 .arg("discover")
-                .arg(&f.root)
+                .arg(f.cwd.join("missing-source"))
                 .args(["--lang", "js", "--json"])
-                .env("IDEOMANCER_NODE", &f.tools.node)
-                .env("IDEOMANCER_TYPESCRIPT", &f.tools.compiler)
                 .arg(flag)
                 .arg(selected);
-            rejected(command.output().unwrap(), "outside the target");
+            rejected(command.output().unwrap(), "native");
             assert!(!f.cwd.join("tool.executed").exists());
             assert!(!f.cwd.join("module.executed").exists());
             assert!(!f.cwd.join(".ideomancer/analyses").exists());
         }
+    }
+    for setting in ["IDEOMANCER_NODE", "IDEOMANCER_TYPESCRIPT"] {
+        let output = f
+            .command()
+            .arg("discover")
+            .arg(f.cwd.join("missing-source"))
+            .args(["--lang", "js", "--json"])
+            .env(setting, &f.forbidden)
+            .output()
+            .unwrap();
+        rejected(output, "native");
+        assert!(!f.cwd.join("tool.executed").exists());
+        assert!(!f.cwd.join(".ideomancer").exists());
     }
 }
 
@@ -1018,8 +985,6 @@ fn malformed_sources_are_incomplete_without_fake_bodies_and_language_aliases_pre
                 .args(["--language", alias, "--json", "--limit", "30"])
                 .arg("--out")
                 .arg(f.cwd.join("catalog output"))
-                .env("IDEOMANCER_NODE", &f.tools.node)
-                .env("IDEOMANCER_TYPESCRIPT", &f.tools.compiler)
                 .output()
                 .unwrap(),
         );

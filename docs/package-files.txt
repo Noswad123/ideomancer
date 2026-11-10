@@ -48,7 +48,8 @@ src/engine.rs
 src/extensions.rs
 src/focus.rs
 src/javascript.rs
-src/javascript_extract.cjs
+src/javascript_native/optional.rs
+src/javascript_native.rs
 src/js_focus.rs
 src/js_modules.rs
 src/lib.rs

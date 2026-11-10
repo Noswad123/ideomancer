@@ -1702,7 +1702,7 @@ mod tests {
         let out = root.path().join("run");
         let js = Evidence {
             schema_version: "ideomancer.evidence.v2".into(),
-            extractor_version: crate::javascript::EXTRACTOR_VERSION.into(),
+            extractor_version: crate::javascript::STRUCTURAL_EXTRACTOR_VERSION.into(),
             language: Some(analysis::LanguageMetadata {
                 name: "javascript-typescript".into(),
                 parser: "typescript".into(),

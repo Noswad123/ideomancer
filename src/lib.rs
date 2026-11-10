@@ -8,6 +8,7 @@ mod discovery;
 mod extensions;
 mod focus;
 mod javascript;
+mod javascript_native;
 mod js_focus;
 mod js_modules;
 mod manifest;

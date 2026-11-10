@@ -794,7 +794,7 @@ mod tests {
 
     fn class_source(commonjs: bool) -> Evidence {
         let mut e = source();
-        e.extractor_version = crate::javascript::EXTRACTOR_VERSION.into();
+        e.extractor_version = crate::javascript::STRUCTURAL_EXTRACTOR_VERSION.into();
         for id in ["run", "work"] {
             e.facts.iter_mut().find(|f| f.id == id).unwrap().kind = "class".into();
             mutate(&mut e, &format!("{id}-meta"), "kind", json!("class"));
@@ -1156,7 +1156,7 @@ mod tests {
             .to_string()
             .contains("legacy"));
         for version in [
-            crate::javascript::EXTRACTOR_VERSION,
+            crate::javascript::STRUCTURAL_EXTRACTOR_VERSION,
             crate::javascript::LEGACY_EXTRACTOR_VERSION,
             "javascript-typescript-static-999",
         ] {
@@ -1259,7 +1259,7 @@ mod tests {
             crate::javascript::MODULE_EXTRACTOR_VERSION,
             crate::javascript::OPERATION_EXTRACTOR_VERSION,
             crate::javascript::CLASS_RELATION_EXTRACTOR_VERSION,
-            crate::javascript::EXTRACTOR_VERSION,
+            crate::javascript::STRUCTURAL_EXTRACTOR_VERSION,
         ] {
             let current = crate::javascript::supports_class_module_targets(version);
             let mut e = source();
@@ -1321,14 +1321,6 @@ mod tests {
 
     #[test]
     fn helper_named_class_exports_resolve_without_source_reads() {
-        use std::path::PathBuf;
-        let Some(compiler) = std::env::var_os("IDEOMANCER_TEST_TYPESCRIPT").map(PathBuf::from)
-        else {
-            return;
-        };
-        let node = PathBuf::from(
-            std::env::var_os("IDEOMANCER_TEST_NODE").unwrap_or_else(|| "node".into()),
-        );
         for (app, target) in [
             ("import {PublicClass as LocalClass} from './work'; export class App extends LocalClass {}", "class Work {} export {Work as PublicClass};"),
             ("const {PublicClass: LocalClass} = require('./work'); class App extends LocalClass {} module.exports = {App};", "class Work {} module.exports = {PublicClass: Work};"),
@@ -1336,7 +1328,7 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             std::fs::write(root.path().join("app.ts"), app).unwrap();
             std::fs::write(root.path().join("work.ts"), target).unwrap();
-            let e = crate::javascript::extract(root.path(), &node, &compiler).unwrap();
+            let e = crate::javascript::extract(root.path()).unwrap();
             assert!(e.complete);
             root.close().unwrap();
             let index = Index::new(e.facts.iter().collect()).unwrap();
@@ -1354,14 +1346,6 @@ mod tests {
 
     #[test]
     fn helper_module_contract_reaches_generic_renderer_without_source_reads() {
-        use std::path::PathBuf;
-        let Some(compiler) = std::env::var_os("IDEOMANCER_TEST_TYPESCRIPT").map(PathBuf::from)
-        else {
-            return;
-        };
-        let node = PathBuf::from(
-            std::env::var_os("IDEOMANCER_TEST_NODE").unwrap_or_else(|| "node".into()),
-        );
         for (app, target) in [
             ("import {work as task} from './work'; export function run(){ task(); }", "export function work(){ return 1; }"),
             ("const {work: task} = require('./work'); function run(){ task(); } module.exports = {run};", "function work(){ return 1; } module.exports = {work};"),
@@ -1369,7 +1353,7 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             std::fs::write(root.path().join("app.ts"), app).unwrap();
             std::fs::write(root.path().join("work.ts"), target).unwrap();
-            let e = crate::javascript::extract(root.path(), &node, &compiler).unwrap();
+            let e = crate::javascript::extract(root.path()).unwrap();
             assert!(e.complete);
             let catalog = crate::catalog::build(&e, "local").unwrap();
             let item = catalog.items.iter().find(|i| i.kind == crate::catalog::Kind::Workflow && i.symbol.ends_with(".run")).unwrap();

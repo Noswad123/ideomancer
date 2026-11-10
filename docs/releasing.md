@@ -49,6 +49,27 @@ Binary distribution bundles must retain `LICENSE` and applicable third-party
 notices. The developer-local `make install` copies only the executable and is not
 a complete release-bundle/notice-generation workflow.
 
+The native JS/TS migration pins Tree-sitter 0.25.10, JavaScript grammar 0.25.0,
+and TypeScript/TSX grammar 0.23.2, plus a direct language ABI bridge pin at 0.1.5
+to protect downstream Rust 1.89 resolution compatibility. Review the runtime,
+Rust bindings, generated C parsers/scanners and transitive dependency licenses and retain their applicable
+notices in binary distributions. Compiled-in parsing removes the discovery
+Node/compiler prerequisite, not license obligations or the optional Mermaid
+Node/Chromium renderer. Builds need a native C compiler. The declared MSRV is
+Rust **1.89**; record actual validation for that baseline and current stable,
+since current stable alone is insufficient. Python remains a trusted Python >=3.12
+AST-helper path;
+Python/Rust Tree-sitter and Rust source analysis are not delivered by this migration.
+
+Native parser code, schemas, CLI migration errors, UTF-16 receipts, incomplete
+module-only parse handling and cooperative resource controls must be validated
+together. The native implementation passes the full local regression suite on
+Rust 1.89; packaging/consumer acceptance must be checked separately, and hosted
+platform validation remains pending. Local docs/CI edits are not proof of release
+completion. The reviewed inventory includes `src/javascript_native.rs`
+and `src/javascript_native/optional.rs`; the deleted legacy JavaScript helper is
+no longer packaged. Recheck the exact inventory after any further module changes.
+
 ## Resolve Historical And Approval Gates
 
 Prior lineages retain retired experimental interpretations. This source-only

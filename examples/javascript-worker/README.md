@@ -15,13 +15,11 @@ framework-specific provider resolution.
 
 ## API / Interfaces
 
-Provision a trusted Node executable and a self-contained TypeScript compiler
-artifact **outside the repository being analyzed**. No compiler is installed or
-resolved from the target's dependencies automatically:
+Build the native Tree-sitter candidate; discovery requires neither Node nor a
+TypeScript compiler. The native implementation passes the full local regression
+suite; hosted platform validation and publication remain separate gates:
 
 ```sh
-export IDEOMANCER_NODE=/absolute/path/to/trusted/node
-export IDEOMANCER_TYPESCRIPT=/absolute/path/to/trusted/typescript/lib/typescript.js
 ./target/release/ideomancer discover examples/javascript-worker --lang javascript-typescript
 ./target/release/ideomancer diagram .ideomancer/catalogs/javascript-worker --kind class --no-render
 ./target/release/ideomancer diagram .ideomancer/catalogs/javascript-worker --kind class --query Formatter
@@ -46,9 +44,11 @@ paging. Even `--limit 12` or `--offset 0` requests independent `views/class-focu
 inventory. Do not combine entry selection with filters/paging. Catalog browsing
 is unchanged.
 
-Discovery uses only supplied source bytes and `createSourceFile`; it does not load
+Discovery uses only supplied source bytes and compiled-in Tree-sitter; it does not load
 target manifests, TypeScript configuration, plugins, or imports. Saved views do not
-invoke the extraction Node runtime or compiler. Rendering SVG uses an independently
+invoke an extraction runtime or compiler. Hidden obsolete `--node` / `--typescript`
+flags and `IDEOMANCER_NODE` / `IDEOMANCER_TYPESCRIPT` settings cause actionable
+discovery errors; remove/unset them. Rendering SVG uses an independently
 trusted Mermaid CLI and its Node/Chromium toolchain; `--no-render` avoids that
 renderer dependency.
 
@@ -154,8 +154,9 @@ Python and network semantics are unchanged.
 - The legacy `--js-profile` option is removed and returns an actionable error,
   without operation-profile dispatch or fallback. Consumer adapters own framework
   interpretation; the class extension does not replace retired operation views.
-- Current evidence is `javascript-typescript-static-6-generic-facts`; legacy static-1
-  through static-5 remain accepted for generic browsing. Static-2 and newer support module links;
+- Native evidence is `javascript-typescript-tree-sitter-1`; legacy static-1
+  through static-6 remain accepted for generic browsing, not upgraded to new
+  capabilities. Rediscovery invalidates old snapshot-bound claims. Static-2 and newer support module links;
   static-1 supports same-file navigation. Static-1/2/3 still show members and
   declared-base boundaries without new class-relation facts. Static-4/5 promote
   class relations; static-5/6 resolve named-class modules. Static-5/6 helper
@@ -171,7 +172,7 @@ Python and network semantics are unchanged.
 
 ## Example usage
 
-After configuring the trusted tools above, run from the repository root:
+After building the native candidate, run from the repository root:
 
 ```sh
 ideomancer discover examples/javascript-worker --lang js

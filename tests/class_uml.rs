@@ -92,7 +92,11 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Option<Self> {
-        if python().is_none() {
+        Self::with_python_requirement(true)
+    }
+
+    fn with_python_requirement(needs_python: bool) -> Option<Self> {
+        if needs_python && python().is_none() {
             eprintln!("SKIP class_uml: trusted Python >=3.12 required");
             return None;
         }
@@ -161,8 +165,8 @@ if [ "${UML_TOTAL_SVG:-0}" = 1 ]; then dd if=/dev/zero bs=1048576 count=7 >> "$o
         let mut c = Command::new(env!("CARGO_BIN_EXE_ideomancer"));
         c.current_dir(&self.cwd)
             .env("IDEOMANCER_PYTHON", &self.forbidden)
-            .env("IDEOMANCER_NODE", &self.forbidden)
-            .env("IDEOMANCER_TYPESCRIPT", &self.forbidden)
+            .env_remove("IDEOMANCER_NODE")
+            .env_remove("IDEOMANCER_TYPESCRIPT")
             .env("IDEOMANCER_AGENT", &self.forbidden)
             .env("IDEOMANCER_MMDC", &self.forbidden)
             .env("UML_TOOL_MARKER", self.cwd.join("tool.executed"))
@@ -219,17 +223,7 @@ fn classes(catalog: &Path) -> Vec<Value> {
 }
 
 fn javascript_fixture(files: &[(&str, &str)]) -> Option<(Fixture, PathBuf)> {
-    let (Some(node), Some(compiler)) = (
-        std::env::var_os("IDEOMANCER_TEST_NODE"),
-        std::env::var_os("IDEOMANCER_TEST_TYPESCRIPT"),
-    ) else {
-        eprintln!("SKIP class_uml JavaScript: explicit trusted Node and TypeScript required");
-        return None;
-    };
-    for tool in [&node, &compiler] {
-        assert!(Path::new(tool).is_absolute() && Path::new(tool).is_file());
-    }
-    let f = Fixture::new()?;
+    let f = Fixture::with_python_requirement(false)?;
     fs::remove_dir_all(&f.root).unwrap();
     fs::create_dir(&f.root).unwrap();
     for (path, source) in files {
@@ -244,10 +238,6 @@ fn javascript_fixture(files: &[(&str, &str)]) -> Option<(Fixture, PathBuf)> {
             ])
             .arg("--out")
             .arg(f.cwd.join("catalog output"))
-            .arg("--node")
-            .arg(node)
-            .arg("--typescript")
-            .arg(compiler)
             .output()
             .unwrap(),
     );
@@ -255,7 +245,7 @@ fn javascript_fixture(files: &[(&str, &str)]) -> Option<(Fixture, PathBuf)> {
     let evidence = json_file(&catalog.join("evidence.json"));
     assert_eq!(
         evidence["extractorVersion"],
-        "javascript-typescript-static-6-generic-facts"
+        "javascript-typescript-tree-sitter-1"
     );
     assert_eq!(evidence["complete"], true);
     assert!(
@@ -840,17 +830,7 @@ fn rediscovery_invalidates_both_slots_and_empty_incomplete_snapshots_stay_honest
 
 #[test]
 fn trusted_javascript_hierarchy_and_scoped_dependencies_survive_deleted_source() {
-    let (Some(node), Some(compiler)) = (
-        std::env::var_os("IDEOMANCER_TEST_NODE"),
-        std::env::var_os("IDEOMANCER_TEST_TYPESCRIPT"),
-    ) else {
-        eprintln!("SKIP class_uml JavaScript: explicit trusted Node and TypeScript required");
-        return;
-    };
-    let node = PathBuf::from(node);
-    let compiler = PathBuf::from(compiler);
-    assert!(node.is_absolute() && node.is_file() && compiler.is_absolute() && compiler.is_file());
-    let Some(f) = Fixture::new() else { return };
+    let f = Fixture::with_python_requirement(false).unwrap();
     fs::remove_dir_all(&f.root).unwrap();
     fs::create_dir(&f.root).unwrap();
     let mut errors = String::from("class RootError extends Error { constructor(message) { super(message); this.message = message; } }\n");
@@ -872,10 +852,6 @@ fn trusted_javascript_hierarchy_and_scoped_dependencies_survive_deleted_source()
             ])
             .arg("--out")
             .arg(f.cwd.join("catalog output"))
-            .arg("--node")
-            .arg(node)
-            .arg("--typescript")
-            .arg(compiler)
             .output()
             .unwrap(),
     );
@@ -1342,6 +1318,10 @@ fn javascript_v4_saved_same_file_relations_remain_renderable_without_member_exte
     for document in [&mut saved, &mut evidence] {
         document["extractorVersion"] = json!("javascript-typescript-static-4-class-relations");
     }
+    evidence["language"]["parser"] = json!("typescript");
+    evidence["language"]["runtime"] = json!("node");
+    evidence["language"]["parserVersion"] = json!("synthetic-legacy-typescript");
+    evidence["language"]["runtimeVersion"] = json!("synthetic-legacy-node");
     let facts = evidence["facts"].as_array_mut().unwrap();
     facts.retain(|f| {
         !matches!(

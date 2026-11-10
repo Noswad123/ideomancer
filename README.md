@@ -28,6 +28,10 @@ by the engine. See [adapter ownership and migration](docs/adapters.md).
 See [ROADMAP.md](ROADMAP.md) for ownership boundaries, milestone status, and
 acceptance gates. Generic read-only facts and validated derived class relationships
 are implemented locally and exercised by independent external adapter conventions.
+Native JS/TS Tree-sitter is implemented as a local candidate with the full local
+regression suite passing. Hosted platform validation and release review remain pending; the
+working tree is uncommitted and unpublished, not a validated release.
+Python/Rust Tree-sitter are subsequent milestones; Rust analysis is not implemented.
 The next gate is release/history review and approved consumer acceptance—not more
 codebase-specific rules in the engine or a claim of complete application understanding.
 See the [release/package checklist](docs/releasing.md) for the enforced crate
@@ -77,22 +81,23 @@ reported catalog directory as `SAVEDDIR` below. Default source scope selects
 `.py` files under `src` when present, otherwise the root, and excludes names including `scripts`,
 `shadow`, `tests`, and `migrations`.
 
-For JavaScript/TypeScript, explicitly select the language and provision trusted
-tools outside the target repository (including monorepo siblings and symlink destinations):
+For JavaScript/TypeScript, explicitly select the native Tree-sitter backend:
 
 ```sh
-export IDEOMANCER_NODE=/absolute/path/to/trusted/node
-export IDEOMANCER_TYPESCRIPT=/absolute/path/to/trusted/typescript/lib/typescript.js
-ideomancer discover /path/to/app --lang javascript-typescript
+ideomancer discover /path/to/app --lang js
 ```
 
 `--language` aliases `--lang`; `js`, `javascript`, `ts`, and `typescript` select
-the same adapter. `--node` overrides `IDEOMANCER_NODE` (default `node`);
-`--typescript ABSFILE` overrides `IDEOMANCER_TYPESCRIPT` and is mandatory for JS/TS.
-There is no auto-install, `npx`, target `node_modules`, tsconfig/plugin/script loading,
-or target import execution. Parsing uses TypeScript `createSourceFile`, not a type
-checker or project resolver. Tested tooling is Node 24.11.1 with TypeScript 5.8.3,
-independent of target-declared versions. See [JS/TS analysis](docs/javascript-typescript-analysis.md)
+the same backend. Discovery needs no Node runtime or TypeScript compiler. Hidden
+obsolete `--node` / `--typescript` flags and `IDEOMANCER_NODE` /
+`IDEOMANCER_TYPESCRIPT` settings cause actionable errors for JS/TS discovery;
+remove the flags and unset the variables rather than expecting silent fallback.
+There is no target `node_modules`, tsconfig/plugin/script loading, module execution,
+or type checker/project resolver. Tree-sitter **0.25.10**, JavaScript grammar
+**0.25.0**, and TypeScript/TSX grammar **0.23.2** are exactly pinned, compiled native
+C with Rust bindings. The language ABI bridge is directly pinned to **0.1.5** to
+preserve Rust 1.89-compatible downstream resolutions, not just the local lockfile.
+See [JS/TS analysis](docs/javascript-typescript-analysis.md)
 for fixed scope, trust boundaries, evidence metadata, and limits.
 
 ### 2. Browse A Subset
@@ -208,8 +213,10 @@ Dependency summaries suppress cycles; missing/invalid summaries disable module
 promotion. Atomic proof and receipt-bound negative assertions must fit the focus
 budgets; unresolved or omitted links are not absence proofs. No target code,
 module, or configuration loading is involved. Current extraction is
-`javascript-typescript-static-6-generic-facts` within unchanged `ideomancer.evidence.v2`;
-legacy static-1 through static-5 remain accepted for generic browsing. Static-2 and newer support
+`javascript-typescript-tree-sitter-1` within unchanged `ideomancer.evidence.v2`;
+legacy static-1 through static-6 remain accepted for generic browsing, not silently
+upgraded to new fact capabilities. Rediscovery changes identity and invalidates old
+snapshot-bound claims. Static-2 and newer support
 module links, and
 static-1 remains same-file only. Older static-1/2/3 class
 snapshots still show members and declared-base boundaries without new relation facts;
@@ -232,7 +239,7 @@ ideomancer diagram .ideomancer/catalogs/python-worker --kind workflow --entry ru
 ```
 
 For public JS/TS worker and module-helper fixtures, see
-[JavaScript worker](examples/javascript-worker/README.md). With external trusted tools:
+[JavaScript worker](examples/javascript-worker/README.md). No extraction runtime setup is needed:
 
 ```sh
 ideomancer discover examples/javascript-worker --lang js
@@ -403,7 +410,9 @@ converter-aware matching. The CLI and offline viewer UI are unchanged.
 
 ## Install
 
-Install with a Rust toolchain:
+Install with a Rust toolchain and a native C compiler for the pinned Tree-sitter
+runtime/grammars. The declared minimum Rust version is **1.89**; full supported
+toolchain/platform validation remains a release gate:
 
 ```sh
 cargo install --path . --locked
@@ -420,10 +429,11 @@ npm install -g @mermaid-js/mermaid-cli
 Python inspection currently supports Unix (Linux/macOS) and requires a trusted
 Python >=3.12 interpreter (default `python3.12`); other operating systems fail
 explicitly rather than use an unsafe filesystem fallback.
-JS/TS inspection also requires Unix and an explicitly trusted external Node/compiler
-pair; it requires no Python. The compiler must be a standalone artifact whose
-`require` dependencies are built-ins only. Neither trusted runtime/compiler isolation
-nor owned-process-group cleanup is an OS sandbox.
+JS/TS inspection also requires Unix, but uses compiled-in Tree-sitter and requires
+neither Node nor Python. Parse/traversal limits are cooperative, not a hard memory
+sandbox. Python still uses its trusted Python >=3.12 AST helper; Python and Rust
+Tree-sitter backends are roadmap work, and Rust source analysis is not implemented.
+Optional SVG rendering still needs external `mmdc` and its Node/Chromium toolchain.
 `discover`, `catalog`, and explicit source views are local. A workflow selected without `--view` or
 explicit `analyze` opts into sending evidence through Djinn or a protocol-compatible
 adapter unless `--extract-only` is supplied. `inspect` never contacts an agent or
@@ -851,14 +861,14 @@ The core tests use synthetic sources and agent/renderer stubs, need no provider
 credentials or `mmdc`, and need no Node/browser installation. Install Python 3.12
 for the workflow tests; they skip Python-dependent cases when it is unavailable.
 `IDEOMANCER_TEST_PYTHON` can select a trusted Python 3.12 executable.
-Real JS/TS extraction tests require external tools selected with
-`IDEOMANCER_TEST_TYPESCRIPT` (absolute `typescript/lib/typescript.js`) and
-`IDEOMANCER_TEST_NODE` (default `node`); source contains no hardcoded global tool
-paths. Provision these explicitly; tests do not download them. Optional member
+JS/TS extraction tests use the compiled-in pinned grammars, not an external
+Node/compiler installation. CI keeps Python, Rustfmt, Clippy, tests, reviewed
+package inventory/package verification, and the release build; it installs no
+Node/TypeScript prerequisite. Optional member
 rendering validation requires existing `mmdc` and Chromium, with no downloads:
 
 ```sh
-IDEOMANCER_TEST_NODE=/absolute/path/to/trusted/node IDEOMANCER_TEST_TYPESCRIPT=/absolute/path/to/trusted/typescript/lib/typescript.js cargo test js_focus::tests::real_mermaid_accepts_javascript_members -- --ignored
+cargo test js_focus::tests::real_mermaid_accepts_javascript_members -- --ignored
 ```
 
 JS/TS pages reuse the existing offline browser regression below.
@@ -965,7 +975,7 @@ than distributable examples.
 - [JavaScript/TypeScript analysis](docs/javascript-typescript-analysis.md): trusted tools,
   fixed scope, language evidence, MVP acceptance matrix, and deferred capabilities.
 - [JavaScript worker](examples/javascript-worker/README.md): public worker and module-helper fixtures.
-- `src/javascript.rs`, `src/javascript_extract.cjs`, `src/js_focus.rs`, `src/js_modules.rs`:
+- `src/javascript.rs`, `src/javascript_native.rs`, `src/javascript_native/optional.rs`, `src/js_focus.rs`, `src/js_modules.rs`:
    trusted syntax extraction, atomic lexical/module proofs, and selected-source resolution.
 - [Agent workflow](docs/agent-workflow.md): current bundles, acceptance, and recovery.
 - [Python worker](examples/python-worker/README.md), `examples/python-worker/worker.py`:

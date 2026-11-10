@@ -237,10 +237,6 @@ fn removed_profile_is_actionable_before_catalog_access() {
 
 #[test]
 fn javascript_factories_use_catalog_class_ids() {
-    let Some(typescript) = std::env::var_os("IDEOMANCER_TEST_TYPESCRIPT") else {
-        eprintln!("SKIP JS adapter API: provision IDEOMANCER_TEST_TYPESCRIPT and trusted Node");
-        return;
-    };
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("source");
     fs::create_dir(&root).unwrap();
@@ -248,12 +244,7 @@ fn javascript_factories_use_catalog_class_ids() {
     let discovered = discover(&DiscoverRequest {
         source_root: root,
         output_container: temp.path().join("catalogs"),
-        toolchain: Toolchain::JavaScriptTypeScript {
-            node: std::env::var_os("IDEOMANCER_TEST_NODE")
-                .unwrap_or_else(|| "node".into())
-                .into(),
-            typescript: typescript.into(),
-        },
+        toolchain: Toolchain::NativeJavaScriptTypeScript {},
     })
     .unwrap();
     let catalog = open_catalog(discovered.catalog_directory).unwrap();
@@ -282,7 +273,6 @@ fn javascript_factories_use_catalog_class_ids() {
 }
 
 fn javascript_fixture(source: &str) -> Option<(tempfile::TempDir, CatalogRef)> {
-    let typescript = std::env::var_os("IDEOMANCER_TEST_TYPESCRIPT")?;
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("source");
     fs::create_dir(&root).unwrap();
@@ -290,12 +280,7 @@ fn javascript_fixture(source: &str) -> Option<(tempfile::TempDir, CatalogRef)> {
     let discovered = discover(&DiscoverRequest {
         source_root: root,
         output_container: temp.path().join("catalogs"),
-        toolchain: Toolchain::JavaScriptTypeScript {
-            node: std::env::var_os("IDEOMANCER_TEST_NODE")
-                .unwrap_or_else(|| "node".into())
-                .into(),
-            typescript: typescript.into(),
-        },
+        toolchain: Toolchain::NativeJavaScriptTypeScript {},
     })
     .unwrap();
     Some((temp, open_catalog(discovered.catalog_directory).unwrap()))

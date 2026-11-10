@@ -472,15 +472,8 @@ pub fn discover(root: &Path, out: &Path, python: &Path) -> Result<Store, String>
     discover_with(root, out, || analysis::extract(root, python))
 }
 
-pub fn discover_javascript(
-    root: &Path,
-    out: &Path,
-    node: &Path,
-    typescript: &Path,
-) -> Result<Store, String> {
-    discover_with(root, out, || {
-        analysis::extract_javascript(root, node, typescript)
-    })
+pub fn discover_javascript(root: &Path, out: &Path) -> Result<Store, String> {
+    discover_with(root, out, || analysis::extract_javascript(root))
 }
 
 fn discover_with(

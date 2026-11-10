@@ -2323,7 +2323,7 @@ mod tests {
     fn member_fixture() -> Evidence {
         use crate::js_focus::tests::add;
         let mut e = javascript();
-        e.extractor_version = crate::javascript::EXTRACTOR_VERSION.into();
+        e.extractor_version = crate::javascript::STRUCTURAL_EXTRACTOR_VERSION.into();
         for f in &mut e.facts {
             if matches!(
                 f.kind.as_str(),
@@ -2904,7 +2904,7 @@ mod tests {
         for version in [
             crate::javascript::LEGACY_EXTRACTOR_VERSION,
             crate::javascript::MODULE_EXTRACTOR_VERSION,
-            crate::javascript::EXTRACTOR_VERSION,
+            crate::javascript::STRUCTURAL_EXTRACTOR_VERSION,
         ] {
             e.extractor_version = version.into();
             let b = bundle(&e);
@@ -3280,22 +3280,15 @@ mod tests {
     }
 
     fn saved_javascript(source: &str) -> Evidence {
-        let compiler = std::path::PathBuf::from(
-            std::env::var_os("IDEOMANCER_TEST_TYPESCRIPT").expect("trusted TypeScript compiler"),
-        );
-        let node = std::path::PathBuf::from(
-            std::env::var_os("IDEOMANCER_TEST_NODE").unwrap_or_else(|| "node".into()),
-        );
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("app.ts"), source).unwrap();
-        let e = crate::javascript::extract(directory.path(), &node, &compiler).unwrap();
+        let e = crate::javascript::extract(directory.path()).unwrap();
         assert!(e.complete, "{:?}", e.diagnostics);
         directory.close().unwrap();
         e
     }
 
     #[test]
-    #[ignore = "requires explicit IDEOMANCER_TEST_TYPESCRIPT and installed Node"]
     fn helper_method_local_class_declarations_and_expressions_keep_instance_state_distinct() {
         let e = saved_javascript(
             r#"
@@ -3355,7 +3348,6 @@ class Outer {
     }
 
     #[test]
-    #[ignore = "requires explicit IDEOMANCER_TEST_TYPESCRIPT and installed Node"]
     fn helper_nine_parameter_properties_report_eight_visible_and_one_hidden_projection() {
         let parameters = (0..9)
             .map(|i| format!("public field{i}: number"))
@@ -3420,7 +3412,6 @@ class Outer {
     }
 
     #[test]
-    #[ignore = "requires explicit IDEOMANCER_TEST_TYPESCRIPT and installed Node"]
     fn helper_computed_and_string_methods_do_not_supply_orphan_signatures_or_values() {
         let e = saved_javascript(
             r#"
@@ -3482,7 +3473,6 @@ class Unusual {
     }
 
     #[test]
-    #[ignore = "requires explicit IDEOMANCER_TEST_TYPESCRIPT and installed Node"]
     fn helper_primitive_types_remain_storage_fields_even_with_receiver_calls() {
         let e = saved_javascript("class ErrorData { constructor(message: string) { this.message = message; } run(): string { return this.message.trim(); } }");
         let b = bundle(&e);
@@ -3503,14 +3493,7 @@ class Unusual {
     }
 
     #[test]
-    #[ignore = "requires explicit IDEOMANCER_TEST_TYPESCRIPT and installed Node"]
     fn helper_commonjs_import_receipt_cannot_promote_a_preinitialization_reference() {
-        let compiler = std::path::PathBuf::from(
-            std::env::var_os("IDEOMANCER_TEST_TYPESCRIPT").expect("trusted TypeScript compiler"),
-        );
-        let node = std::path::PathBuf::from(
-            std::env::var_os("IDEOMANCER_TEST_NODE").unwrap_or_else(|| "node".into()),
-        );
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(
             directory.path().join("base.ts"),
@@ -3518,7 +3501,7 @@ class Unusual {
         )
         .unwrap();
         std::fs::write(directory.path().join("app.ts"), "class Early extends Late {}\nconst {Base: Late} = require('./base');\nclass Ready extends Late {}").unwrap();
-        let mut e = crate::javascript::extract(directory.path(), &node, &compiler).unwrap();
+        let mut e = crate::javascript::extract(directory.path()).unwrap();
         assert!(e.complete);
         directory.close().unwrap();
         let original = bundle(&e);
@@ -3573,14 +3556,7 @@ class Unusual {
     }
 
     #[test]
-    #[ignore = "requires explicit IDEOMANCER_TEST_TYPESCRIPT and installed Node"]
     fn helper_module_classes_and_error_state_survive_deleted_sources() {
-        let compiler = std::path::PathBuf::from(
-            std::env::var_os("IDEOMANCER_TEST_TYPESCRIPT").expect("trusted TypeScript compiler"),
-        );
-        let node = std::path::PathBuf::from(
-            std::env::var_os("IDEOMANCER_TEST_NODE").unwrap_or_else(|| "node".into()),
-        );
         for commonjs in [false, true] {
             let directory = tempfile::tempdir().unwrap();
             std::fs::create_dir(directory.path().join("lib")).unwrap();
@@ -3629,7 +3605,7 @@ class DefaultIntegrationError extends Error {
             if commonjs {
                 std::fs::write(directory.path().join("early.ts"), format!("class Early extends Late {{}} const {{ {base}: Late }} = require('./lib/base');")).unwrap();
             }
-            let e = crate::javascript::extract(directory.path(), &node, &compiler).unwrap();
+            let e = crate::javascript::extract(directory.path()).unwrap();
             assert!(e.complete, "{:?}", e.diagnostics);
             directory.close().unwrap();
             let b = bundle(&e);
@@ -3754,6 +3730,11 @@ class DefaultIntegrationError extends Error {
                 .contains("from(code#63;) DefaultIntegrationError$")));
             let mut legacy: Evidence = serde_json::from_value(json!(e)).unwrap();
             legacy.extractor_version = crate::javascript::CLASS_RELATION_EXTRACTOR_VERSION.into();
+            let language = legacy.language.as_mut().unwrap();
+            language.parser = "typescript".into();
+            language.runtime = "node".into();
+            language.parser_version = "synthetic-legacy-typescript".into();
+            language.runtime_version = "synthetic-legacy-node".into();
             let imports: BTreeSet<_> = legacy
                 .facts
                 .iter()
@@ -3854,14 +3835,7 @@ class DefaultIntegrationError extends Error {
     }
 
     #[test]
-    #[ignore = "requires explicit IDEOMANCER_TEST_TYPESCRIPT and installed Node"]
     fn helper_receipts_render_without_source_reads_in_model_build() {
-        let compiler = std::path::PathBuf::from(
-            std::env::var_os("IDEOMANCER_TEST_TYPESCRIPT").expect("trusted TypeScript compiler"),
-        );
-        let node = std::path::PathBuf::from(
-            std::env::var_os("IDEOMANCER_TEST_NODE").unwrap_or_else(|| "node".into()),
-        );
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("app.ts"),r#"
 class Parent {}
@@ -3888,7 +3862,7 @@ function two(Base) { return class extends Base {}; }
 class A {} class B {}
 {class C extends A {}}{class C extends B {}}
 "#.to_string() + "\nclass Cafe\u{0301} {}\nclass Bas\u{200c} {}\nclass UnicodeChild extends Cafe\u{0301} {}\nclass JoinerChild extends Bas\u{200c} {}\nfunction unicode(D\u{200c}, E\u{200d}) { return class extends D\u{200c} { constructor(P\u{0301}: DeclaredType) { super(); this.f\u{200d} = P\u{0301}; this.g\u{0301} = E\u{200d}; } run() { return new E\u{200d}(); } }; }\n").unwrap();
-        let e = crate::javascript::extract(directory.path(), &node, &compiler).unwrap();
+        let e = crate::javascript::extract(directory.path()).unwrap();
         assert!(
             e.facts.iter().any(|f| f.kind == "js_class_relation"),
             "helper did not emit relation receipts"

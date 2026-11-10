@@ -247,9 +247,11 @@ Model precedence for `analyze` is explicit `--model`, then `IDEOMANCER_MODEL`,
 then this built-in default; it sends that selection to the agent.
 These `IDEOMANCER_*` settings apply to `analyze` and workflow `diagram` without `--view`;
 `discover` honors `IDEOMANCER_PYTHON`, and static `diagram` uses `IDEOMANCER_MMDC`.
-JS/TS `discover --lang javascript-typescript` instead honors `IDEOMANCER_NODE`
-(default `node`) and mandatory `IDEOMANCER_TYPESCRIPT` (absolute external compiler),
-overridden by `--node` / `--typescript`. These tools are not agent configuration.
+JS/TS `discover --lang js` uses native compiled-in Tree-sitter, not Node/compiler
+configuration. Obsolete `--node` / `--typescript` flags and `IDEOMANCER_NODE` /
+`IDEOMANCER_TYPESCRIPT` settings are rejected with actionable errors; remove/unset
+them. This does not remove external Node/Chromium requirements for optional SVG
+rendering or browser checks, and Python still needs its Python >=3.12 AST helper.
 `present` also honors
 `IDEOMANCER_MMDC` (explicit `--mmdc` wins, default `mmdc`). Use explicit flags for
 the other lower-level commands. There is no file-based config or automatic selection of an

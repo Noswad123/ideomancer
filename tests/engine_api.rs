@@ -262,6 +262,20 @@ fn requests_reject_capability_smuggling_and_invalid_tool_combinations() {
         20
     );
     assert_eq!(RenderMode::default(), RenderMode::SourceOnly);
+    let native = Toolchain::NativeJavaScriptTypeScript {};
+    roundtrip(&native);
+    assert_eq!(
+        serde_json::to_value(native).unwrap(),
+        json!({"language":"javascript_typescript_native"})
+    );
+    for field in ["node", "typescript", "python", "args", "runtime"] {
+        let mut value = json!({"language":"javascript_typescript_native"});
+        value[field] = json!("untrusted");
+        assert!(
+            serde_json::from_value::<Toolchain>(value).is_err(),
+            "{field}"
+        );
+    }
     let js = Toolchain::JavaScriptTypeScript {
         node: "/trusted/node".into(),
         typescript: "/trusted/typescript.js".into(),
@@ -288,6 +302,100 @@ fn requests_reject_capability_smuggling_and_invalid_tool_combinations() {
         discover(&target_tool).unwrap_err().code,
         ErrorCode::InvalidRequest
     );
+}
+
+#[test]
+fn retired_javascript_toolchain_is_wire_compatible_but_rejected_before_root_access() {
+    let temp = tempfile::tempdir().unwrap();
+    let toolchain: Toolchain = serde_json::from_value(json!({
+        "language":"javascript_typescript", "node":"missing-node", "typescript":"missing-typescript"
+    }))
+    .unwrap();
+    roundtrip(&toolchain);
+    let error = discover(&DiscoverRequest {
+        source_root: temp.path().join("missing-source"),
+        output_container: temp.path().join("must-not-create"),
+        toolchain,
+    })
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::InvalidRequest);
+    assert!(error.message.contains("native"), "{error}");
+    assert!(
+        error.message.contains("NativeJavaScriptTypeScript")
+            || error.message.contains("javascript_typescript_native"),
+        "{error}"
+    );
+    assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn legacy_saved_javascript_remains_readable_and_native_rediscovery_invalidates_old_claims() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("source");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("app.ts"), "export class Widget { run() {} }").unwrap();
+    let request = DiscoverRequest {
+        source_root: root,
+        output_container: temp.path().join("catalogs"),
+        toolchain: Toolchain::NativeJavaScriptTypeScript {},
+    };
+    let native = discover(&request).unwrap();
+    let directory = &native.catalog_directory;
+    let mut evidence: Value =
+        serde_json::from_slice(&fs::read(directory.join("evidence.json")).unwrap()).unwrap();
+    let mut catalog: Value =
+        serde_json::from_slice(&fs::read(directory.join("catalog.json")).unwrap()).unwrap();
+    let mut receipt: Value =
+        serde_json::from_slice(&fs::read(directory.join("receipt.json")).unwrap()).unwrap();
+    let legacy_snapshot = "synthetic-static-6-snapshot";
+    for value in [&mut evidence, &mut catalog] {
+        value["extractorVersion"] = json!("javascript-typescript-static-6-generic-facts");
+        value["snapshotId"] = json!(legacy_snapshot);
+    }
+    evidence["language"]["parser"] = json!("typescript");
+    evidence["language"]["runtime"] = json!("node");
+    evidence["language"]["parserVersion"] = json!("synthetic-legacy-typescript");
+    evidence["language"]["runtimeVersion"] = json!("synthetic-legacy-node");
+    for (name, key, value) in [
+        ("evidence.json", "evidenceSha256", &evidence),
+        ("catalog.json", "catalogSha256", &catalog),
+    ] {
+        let bytes = serde_json::to_vec(value).unwrap();
+        receipt[key] = json!(format!("{:x}", Sha256::digest(&bytes)));
+        fs::write(directory.join(name), bytes).unwrap();
+    }
+    fs::write(
+        directory.join("receipt.json"),
+        serde_json::to_vec(&receipt).unwrap(),
+    )
+    .unwrap();
+    let legacy = open_catalog(directory).unwrap();
+    assert_eq!(
+        browse(&legacy, &BrowseOptions::default())
+            .unwrap()
+            .counts
+            .classes,
+        1
+    );
+    class_diagrams(&legacy, &ClassSelection::All, &RenderMode::SourceOnly).unwrap();
+    let refreshed = discover(&request).unwrap();
+    assert_ne!(refreshed.snapshot_id, legacy.snapshot_id());
+    let current = open_catalog(&refreshed.catalog_directory).unwrap();
+    assert_eq!(
+        browse(&current, &BrowseOptions::default())
+            .unwrap()
+            .counts
+            .classes,
+        1
+    );
+    let before = artifacts(current.directory());
+    assert_eq!(
+        browse(&legacy, &BrowseOptions::default()).unwrap_err().code,
+        ErrorCode::CatalogUnavailable
+    );
+    let error = class_diagrams(&legacy, &ClassSelection::All, &RenderMode::SourceOnly).unwrap_err();
+    assert!(error.message.contains("stale"), "{error}");
+    assert_eq!(before, artifacts(current.directory()));
 }
 
 #[test]
@@ -425,7 +533,7 @@ fn source_only_ignores_cli_tool_environment() {
 }
 
 #[test]
-fn executable_path_skips_nonexecutables_without_requiring_executable_compilers() {
+fn executable_path_checks_python_and_renderer_but_native_javascript_needs_no_runtime() {
     const CHILD: &str = "IDEOMANCER_TEST_EXECUTABLE_PATH_FIXTURE";
     if let Some(base) = std::env::var_os(CHILD) {
         let base = PathBuf::from(base);
@@ -454,33 +562,18 @@ fn executable_path_skips_nonexecutables_without_requiring_executable_compilers()
             .iter()
             .all(|diagram| diagram.svg.as_ref().is_some_and(|path| path.is_file())));
 
-        request.toolchain = Toolchain::JavaScriptTypeScript {
-            node: "node".into(),
-            typescript: base.join("compiler.js"),
-        };
+        request.toolchain = Toolchain::NativeJavaScriptTypeScript {};
         request.output_container = base.join("js-catalogs");
         assert!(discover(&request).unwrap().complete);
 
-        for (name, toolchain) in [
-            (
-                "python3.12",
-                Toolchain::Python {
-                    python: base.join("A/python3.12"),
-                },
-            ),
-            (
-                "node",
-                Toolchain::JavaScriptTypeScript {
-                    node: base.join("A/node"),
-                    typescript: base.join("compiler.js"),
-                },
-            ),
-        ] {
-            request.toolchain = toolchain;
+        {
+            request.toolchain = Toolchain::Python {
+                python: base.join("A/python3.12"),
+            };
             let error = discover(&request).unwrap_err();
             assert_eq!(error.code, ErrorCode::InvalidRequest);
             assert!(
-                error.message.contains(name) && error.message.contains("executable"),
+                error.message.contains("python3.12") && error.message.contains("executable"),
                 "{error}"
             );
         }
@@ -506,7 +599,7 @@ fn executable_path_skips_nonexecutables_without_requiring_executable_compilers()
     let second = base.join("B");
     fs::create_dir(&first).unwrap();
     fs::create_dir(&second).unwrap();
-    for name in ["python3.12", "node", "mmdc"] {
+    for name in ["python3.12", "mmdc"] {
         let path = first.join(name);
         fs::write(&path, "not executable\n").unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
@@ -525,19 +618,6 @@ fn executable_path_skips_nonexecutables_without_requiring_executable_compilers()
         "throw new Error('source must not execute');\n",
     )
     .unwrap();
-    let compiler = base.join("compiler.js");
-    let compiler_bytes = b"// trusted synthetic compiler artifact, not an executable\n";
-    fs::write(&compiler, compiler_bytes).unwrap();
-    fs::set_permissions(&compiler, fs::Permissions::from_mode(0o644)).unwrap();
-    let response = json!({
-        "protocolVersion":"ideomancer.js-extractor.v1", "nodeVersion":"synthetic-node",
-        "typescriptVersion":"synthetic-ts", "typescriptSha256":format!("{:x}", Sha256::digest(compiler_bytes)),
-        "facts":[], "diagnostics":[], "complete":true
-    });
-    executable(
-        &second.join("node"),
-        &format!("#!/bin/sh\n/bin/cat >/dev/null\nprintf '%s' '{response}'\n"),
-    );
     executable(
         &second.join("mmdc"),
         "#!/bin/sh\nprintf '<svg width=\"10\" height=\"10\"></svg>' > \"$4\"\n",
@@ -545,7 +625,7 @@ fn executable_path_skips_nonexecutables_without_requiring_executable_compilers()
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            "executable_path_skips_nonexecutables_without_requiring_executable_compilers",
+            "executable_path_checks_python_and_renderer_but_native_javascript_needs_no_runtime",
             "--nocapture",
         ])
         .env(CHILD, base)

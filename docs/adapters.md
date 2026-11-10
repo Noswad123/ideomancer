@@ -38,11 +38,15 @@ proof budgets and saved-source rendering remain supported.
 
 ## Extraction and saved-data compatibility
 
-New JavaScript extraction uses `javascript-typescript-static-6-generic-facts` and
+Native JavaScript extraction uses `javascript-typescript-tree-sitter-1` and
 new Python extraction uses `python-static-8-generic-facts`. Evidence envelope
 versions are unchanged; extractor generations are not envelope versions.
 
-Legacy catalogs remain readable for supported generic behavior. Retired receipt
+Legacy static-1 through static-6 catalogs remain readable for supported generic
+behavior, without upgrading static-6 claims to new capabilities. Explicit native
+rediscovery changes identity and invalidates prior snapshot-bound claims. The
+migration preserves fact/proof/output contracts, not old extractor identity.
+Retired receipt
 kinds are not reinterpreted as approved framework rules. Exported factory facts
 require the new JavaScript capability and explicit rediscovery; do not synthesize
 them from old profile receipts or edit evidence/receipts to enable an adapter.

@@ -27,14 +27,14 @@ Parents and the application-named current catalog directory are created automati
 Python remains the default. For the offline JS/TS source-navigation MVP:
 
 ```sh
-ideomancer discover /path/to/app --lang javascript-typescript --node /absolute/path/to/trusted/node --typescript /absolute/path/to/trusted/typescript/lib/typescript.js
+ideomancer discover /path/to/app --lang js
 ```
 
 `--language` aliases `--lang`; language aliases are `js`, `javascript`, `ts`, and
-`typescript`. `--node` / `IDEOMANCER_NODE` defaults to `node`;
-`--typescript ABSFILE` / `IDEOMANCER_TYPESCRIPT` is required. Both tools must resolve
-outside the target repository/source root, including monorepo siblings and symlink
-destinations. Nothing is installed or resolved from target dependencies/configuration.
+`typescript`. Discovery uses native compiled-in Tree-sitter, not Node or an external
+TypeScript compiler. Hidden obsolete `--node` / `--typescript` and
+`IDEOMANCER_NODE` / `IDEOMANCER_TYPESCRIPT` settings produce actionable errors;
+remove/unset them. Nothing is installed or resolved from target dependencies/configuration.
 See [JS/TS analysis](javascript-typescript-analysis.md) for syntax-only parsing,
 fixed exclusions, bounds, evidence v2, and unsupported framework/runtime behavior.
 
@@ -64,6 +64,9 @@ It is not JS runtime, DI, network, or agent analysis, nor completion of a whole
 private application. Python/FastAPI behavior is unchanged. See the
 [bounded acceptance matrix](javascript-typescript-analysis.md#bounded-mvp-acceptance-matrix)
 for supported and deferred capabilities.
+The native parser is an implemented local candidate with the full local regression
+suite passing, not a release. Hosted platform validation remains pending; see
+[parser milestones](../ROADMAP.md#parser-acceptance).
 
 The first page defaults to 20 entries. `discover` accepts the same filters as
 `catalog` below; filters change the displayed page, not the scan scope or saved
@@ -278,7 +281,7 @@ filters or paging. Generate the full class bundle only when wanted; focus is ind
 #### Related files
 
 - `src/render/class_uml.rs`: grouped UML, relation proofs, packing, and secondary details.
-- `src/javascript_extract.cjs`, `src/javascript.rs`, `src/js_modules.rs`: versioned
+- `src/javascript_native.rs`, `src/javascript.rs`, `src/js_modules.rs`: versioned
   class/member receipts and separate selected-relative class/function policies.
 - `src/render/class_overview.rs`: shared saved class/member grounding and legacy inventory.
 - `src/render/source_view.rs`, `src/catalog.rs`: shared members/bases and catalog types.
@@ -388,7 +391,7 @@ ideomancer diagram .ideomancer/catalogs/python-worker --kind workflow --entry ru
 
 No network candidates in this sample is a scoped static result, not an absence proof.
 
-With trusted external Node and TypeScript selected as described under [Discover](#discover):
+With the native JS/TS candidate built as described under [Discover](#discover):
 
 ```sh
 ideomancer discover examples/javascript-worker --lang ts
@@ -733,10 +736,10 @@ Identical discovery reuses the verified current directory; changed source/eviden
 replaces it and removes stale views. Old snapshots are not retained.
 JS/TS evidence uses `ideomancer.evidence.v2` with a `language` metadata object
 (`name`, `parser`, `parserVersion`, `parserSha256`, `runtime`, `runtimeVersion`,
-`scanPolicy`); Node versions never occupy `pythonVersion`. Snapshot identity binds
-the helper hash, extractor, parser/runtime metadata, scope policy, and file hashes.
-The current JS/TS extractor is `javascript-typescript-static-6-generic-facts`;
-the outer evidence v2 schema is unchanged and legacy static-1 through static-5 remain
+`scanPolicy`); JS/TS never occupies `pythonVersion`. Snapshot identity binds
+the native parser policy, extractor, parser/runtime metadata, scope policy, and file hashes.
+The native JS/TS extractor is `javascript-typescript-tree-sitter-1`;
+the outer evidence v2 schema is unchanged and legacy static-1 through static-6 remain
 accepted for supported generic views. Static-2 and newer support module links,
 static-4/5/6 support class relations, and static-5/6 resolve named-class modules.
 Static-5/6 helper summaries use
@@ -744,6 +747,12 @@ Static-5/6 helper summaries use
 `selected-relative-functions-1`. Static-1 supports same-file navigation.
 Rediscover for missing generic factory or class-relation facts,
 or for module proofs on static-1.
+Legacy static-6 is not upgraded to new generic-fact capabilities. Explicit
+rediscovery changes identity and invalidates prior snapshot-bound claims. Native
+byte positions convert to existing UTF-16 receipt coordinates. Tree-sitter `ERROR`
+or missing nodes, including module-only syntax failures, make extraction incomplete.
+Cooperative parse/traversal limits are not a hard memory sandbox. See
+[native migration details](javascript-typescript-analysis.md#data-flow).
 Legacy Python v1 evidence with `language: None` serializes without a new language
 field; old snapshots remain validated under their existing identity semantics.
 
@@ -773,7 +782,7 @@ proof that a generated interpretation captures the business correctly.
 - [JavaScript/TypeScript analysis](javascript-typescript-analysis.md): scope, tools,
   evidence, module resolution guards, bounded MVP acceptance, and deferred capabilities.
 - [JavaScript worker](../examples/javascript-worker/README.md): public source fixtures.
-- `src/javascript.rs`, `src/javascript_extract.cjs`, `src/js_focus.rs`, `src/js_modules.rs`,
+- `src/javascript.rs`, `src/javascript_native.rs`, `src/js_focus.rs`, `src/js_modules.rs`,
   `tests/javascript_views.rs`: JS/TS extraction and saved-view contracts.
 - `src/main.rs`: CLI interfaces and limit validation.
 - `src/discovery.rs`, `src/catalog.rs`: saved catalogs, selection, current view publication.

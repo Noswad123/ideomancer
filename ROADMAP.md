@@ -22,7 +22,37 @@ or that a whole application is understood. There are no promised dates.
 | I1 | Evidence and derived-relationship contract | Candidate contract/schema implemented locally | External consumer and independent synthetic conventions exercise the same versioned contract |
 | I2 | Read-only facts and validated class-model augmentation | Implemented locally; synthetic consumer integration validated | Preserve immutability, identity checks and provenance; real consumer acceptance remains separate |
 | I3 | Harden and release the consumable engine | **Next: release and history review** | An approved immutable release works as an upstream or mirrored dependency |
-| I4 | Broader language/model capabilities | Later; after I3 | Independent use cases justify each extension without weakening the boundary |
+| P0 | Shared parser backend and native JS/TS Tree-sitter migration | Implemented locally; full local regression suite passing on Rust 1.89; hosted matrix pending | Preserve fact/proof/output contracts; no Node discovery prerequisite; package/consumer checks and supported-platform release validation |
+| P1 | Python Tree-sitter backend | Next parser milestone; not implemented | Preserve Python facts, FastAPI boundaries and explicit incompleteness; retain current Python >=3.12 AST helper until replacement is validated |
+| P2 | Rust Tree-sitter backend and language facts | Next parser milestone; Rust analysis not implemented | Model Rust structs, enums, traits, impls, functions and modules honestly; no build scripts or macro execution |
+| I4 | Broader language/model capabilities | Later | Independent use cases justify each extension without weakening the boundary |
+
+P0 is the current parser priority, not postponed behind publication. This working
+tree is uncommitted/unpublished; no milestone authorizes a commit, push, or release.
+Python and Rust Tree-sitter are roadmap work, not a claim that all languages are
+native today. Optional Mermaid SVG rendering and browser checks still use external
+Node/Chromium tooling independently of JS/TS discovery.
+
+### Parser Acceptance
+
+- Pin Tree-sitter 0.25.10, JavaScript grammar 0.25.0 and TypeScript/TSX grammar
+  0.23.2 exactly, plus language ABI bridge 0.1.5 directly for downstream Rust 1.89
+  resolution compatibility; build native C with Rust bindings and review license notices.
+- Preserve immutable facts, binding/module/class proof, UTF-16 receipt coordinates,
+  redaction, adapter boundaries, and saved output contracts. Use new identity
+  `javascript-typescript-tree-sitter-1`; legacy static-1 through static-6 stay
+  generically readable without granting new capabilities or upgrading old claims.
+- Rediscovery changes snapshot identity and invalidates prior derived claims.
+  Syntax `ERROR`/missing nodes, including module-only files, make evidence incomplete.
+- Reject obsolete Node/compiler CLI settings and the legacy engine request before
+  source access; never silently ignore them or dispatch an old extractor.
+- Validate the cooperative 60-second extraction deadline, 200000-node traversal
+  budget and depth-256 bound without describing them as a hard memory sandbox.
+  Rust 1.89 is the declared MSRV; record actual matrix results separately.
+- Python migration must preserve language-specific semantics, not merely accept
+  syntax. Rust facts must distinguish structs, traits and impls rather than calling
+  everything a class. Neither backend may execute target modules, `build.rs`,
+  procedural macros, plugins, or other source side effects.
 
 ## I0 — Preserve And Review The Foundation
 

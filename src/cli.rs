@@ -30,11 +30,11 @@ enum Command {
         out: PathBuf,
         #[arg(long, env = "IDEOMANCER_PYTHON", default_value = "python3.12")]
         python: PathBuf,
-        /// Trusted Node executable for JavaScript/TypeScript extraction.
-        #[arg(long, env = "IDEOMANCER_NODE", default_value = "node")]
-        node: PathBuf,
-        /// Trusted typescript/lib/typescript.js outside the target; never auto-installed.
-        #[arg(long, env = "IDEOMANCER_TYPESCRIPT")]
+        /// Retired: native JS/TS discovery needs no Node executable.
+        #[arg(long, env = "IDEOMANCER_NODE", hide = true)]
+        node: Option<PathBuf>,
+        /// Retired: JS/TS grammars are compiled into the engine.
+        #[arg(long, env = "IDEOMANCER_TYPESCRIPT", hide = true)]
         typescript: Option<PathBuf>,
         #[command(flatten)]
         filter: CatalogFilter,
@@ -371,9 +371,12 @@ fn run() -> Result<bool, IdeomancerError> {
             let store = match lang {
                 analysis::Language::Python => discovery::discover(&root, &out, &python),
                 analysis::Language::JavaScriptTypeScript => {
-                    let compiler = typescript.as_deref().ok_or_else(|| IdeomancerError::Usage(
-                        "JavaScript/TypeScript discovery requires --typescript ABSFILE (trusted typescript/lib/typescript.js outside the target), or IDEOMANCER_TYPESCRIPT; no target dependency resolution or installation is performed".into()))?;
-                    discovery::discover_javascript(&root, &out, &node, compiler)
+                    if node.is_some() || typescript.is_some() {
+                        return Err(IdeomancerError::Usage(
+                            "JavaScript/TypeScript discovery is native Tree-sitter: remove --node/--typescript and unset IDEOMANCER_NODE/IDEOMANCER_TYPESCRIPT; no external parser tools are used".into(),
+                        ));
+                    }
+                    discovery::discover_javascript(&root, &out)
                 }
             }.map_err(IdeomancerError::Workflow)?;
             let report = discovery::browse(&store, &filter.selection())

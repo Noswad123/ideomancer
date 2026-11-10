@@ -28,9 +28,15 @@ pub fn class_diagrams(
 ) -> Result<ClassDiagramReport, EngineError>;
 ```
 
-- `Toolchain::Python { python: PathBuf }` and
-  `Toolchain::JavaScriptTypeScript { node: PathBuf, typescript: PathBuf }` keep
-  invalid tool/language combinations out of the API.
+- `Toolchain::Python { python: PathBuf }` selects the existing Python >=3.12 AST
+  helper. `Toolchain::NativeJavaScriptTypeScript {}` selects compiled-in Tree-sitter
+  JS/TS parsing without Node or an external TypeScript compiler.
+- The legacy `Toolchain::JavaScriptTypeScript { node: PathBuf, typescript: PathBuf }`
+  remains deserializable, but `discover` rejects it with an actionable `invalid_request`
+  before touching source. Replace it with `Toolchain::NativeJavaScriptTypeScript {}`.
+  Adding the native enum variant is additive on the wire, but downstream Rust
+  consumers exhaustively matching `Toolchain` must add a match arm when updating;
+  retaining the legacy variant does not guarantee source compatibility for such matches.
 - `DiscoverRequest { source_root, output_container, toolchain }` launches only
   the explicitly selected trusted extractor. It does not render or contact a provider.
 - `DiscoveryReport` carries `schema_version`, `catalog_directory`, `source_root`,
@@ -64,8 +70,13 @@ Request/configuration DTOs reject unknown fields. Neither arbitrary command stri
 nor executable hooks are accepted. Consumers own codebase registration, output
 ownership, source-root authorization, and company/framework adapters.
 
-For serialized API DTOs, the JavaScript language identifier is
-`javascript_typescript` (distinct from the CLI's `javascript-typescript` spelling).
+For serialized API DTOs, `Language` remains `javascript_typescript`. The native
+`Toolchain` wire shape is exactly `{"language":"javascript_typescript_native"}`:
+an internally tagged empty struct/object variant, not a Serde unit variant or a
+string. Unknown fields, including `node` or `typescript`, are rejected. The legacy
+`{"language":"javascript_typescript","node":"...","typescript":"..."}`
+shape is readable but not executable. CLI language spelling remains
+`javascript-typescript` (or `js`).
 Class selection and rendering use a `kind` tag: `all`, `entry`, `page`, and
 `source_only` or `svg`. The serialization schema is authoritative for those wire
 spellings. A catalog handle is never deserialized from a response or caller JSON.
