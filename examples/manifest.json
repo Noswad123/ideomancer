@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "0.1.0",
+  "id": "web-service",
+  "name": "Web Service Dependencies",
+  "nodes": [
+    { "id": "client", "label": "Browser", "kind": "client" },
+    { "id": "api", "label": "HTTP API", "kind": "service" },
+    { "id": "database", "label": "PostgreSQL", "kind": "storage" },
+    { "id": "worker", "label": "Background Worker", "kind": "service" }
+  ],
+  "edges": [
+    { "from": "client", "to": "api", "label": "HTTPS requests" },
+    { "from": "api", "to": "database", "label": "reads and writes" },
+    { "from": "worker", "to": "database", "label": "processes pending jobs" }
+  ]
+}

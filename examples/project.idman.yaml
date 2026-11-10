@@ -1,0 +1,33 @@
+schemaVersion: 0.1.0
+id: ideomancer
+name: Ideomancer
+
+nodes:
+  - id: cli
+    label: CLI
+    kind: interface
+
+  - id: parser
+    label: Parser
+    kind: component
+
+  - id: model
+    label: Graph Model
+    kind: component
+
+  - id: renderer
+    label: Mermaid Renderer
+    kind: component
+
+edges:
+  - from: cli
+    to: parser
+    label: reads file
+
+  - from: parser
+    to: model
+    label: builds
+
+  - from: model
+    to: renderer
+    label: renders

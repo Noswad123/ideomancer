@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ideomancer.dev/schemas/adapter-contract.v1.json",
+  "title": "Ideomancer Typed Facts And Claims v1",
+  "description": "DTO wire shapes only. Identity, grounding, completeness and resource validation require the engine API. Opaque handles have no wire representation.",
+  "oneOf": [{"$ref":"#/$defs/FactsView"},{"$ref":"#/$defs/ClaimSet"},{"$ref":"#/$defs/FactsRequest"}],
+  "$defs": {
+    "Hash": {"type":"string","pattern":"^[0-9a-f]{64}$"},
+    "Text": {"type":"string","minLength":1,"maxLength":512},
+    "Ids": {"type":"array","items":{"type":"string"}},
+    "NullableString": {"type":["string","null"]},
+    "FactsRequest": {"type":"object","additionalProperties":false,"properties":{"requireComplete":{"type":"boolean","default":true}}},
+    "FactsIdentity": {
+      "type":"object","additionalProperties":false,
+      "required":["sourceRootId","snapshotId","extractorVersion","inventoryHash","factsHash"],
+      "properties":{"sourceRootId":{"$ref":"#/$defs/Hash"},"snapshotId":{"type":"string"},"extractorVersion":{"type":"string"},"inventoryHash":{"$ref":"#/$defs/Hash"},"factsHash":{"$ref":"#/$defs/Hash"}}
+    },
+    "FactDiagnostic": {"type":"object","additionalProperties":false,"required":["code","path","message"],"properties":{"code":{"type":"string"},"path":{"type":"string"},"message":{"type":"string"}}},
+    "FactCoverage": {"type":"object","additionalProperties":false,"required":["classRelationshipSites","exportedFactoryStructure","unsupportedShapes"],"properties":{"classRelationshipSites":{"type":"boolean"},"exportedFactoryStructure":{"type":"boolean"},"unsupportedShapes":{"type":"integer","minimum":0}}},
+    "FactFile": {"type":"object","additionalProperties":false,"required":["path","sha256"],"properties":{"path":{"type":"string"},"sha256":{"$ref":"#/$defs/Hash"}}},
+    "SourceCitation": {"type":"object","additionalProperties":false,"required":["path","line","endLine","kind","symbol"],"properties":{"path":{"type":"string"},"line":{"type":"integer","minimum":1},"endLine":{"type":"integer","minimum":1},"kind":{"type":"string"},"symbol":{"type":"string"}}},
+    "ClassFact": {"type":"object","additionalProperties":false,"required":["id","declarationId","name","symbol","path","line","endLine"],"properties":{"id":{"type":"string"},"declarationId":{"type":"string"},"name":{"type":"string"},"symbol":{"type":"string"},"path":{"type":"string"},"line":{"type":"integer","minimum":1},"endLine":{"type":"integer","minimum":1}}},
+    "ParameterFact": {"type":"object","additionalProperties":false,"required":["id","name","position","optional","rest","hasDefault"],"properties":{"id":{"type":"string"},"bindingId":{"$ref":"#/$defs/NullableString"},"name":{"type":"string"},"position":{"type":"integer","minimum":0},"optional":{"type":"boolean"},"rest":{"type":"boolean"},"hasDefault":{"type":"boolean"}}},
+    "FactoryFact": {
+      "type":"object","additionalProperties":false,"required":["id","callableId","modulePath","parameters","resultKind","returnFactIds","evidenceIds","safe"],
+      "properties":{"id":{"type":"string"},"callableId":{"type":"string"},"modulePath":{"type":"string"},"parameters":{"type":"array","items":{"$ref":"#/$defs/ParameterFact"}},"resultKind":{"enum":["class","instance","unsupported","ambiguous"]},"returnedClassId":{"$ref":"#/$defs/NullableString"},"returnFactIds":{"$ref":"#/$defs/Ids"},"evidenceIds":{"$ref":"#/$defs/Ids"},"safe":{"type":"boolean"},"reason":{"$ref":"#/$defs/NullableString"}}
+    },
+    "RelationshipSite": {
+      "type":"object","additionalProperties":false,"required":["id","sourceClassId","ownerId","ownerKind","kind","evidenceIds"],
+      "properties":{"id":{"type":"string"},"sourceClassId":{"type":"string"},"ownerId":{"type":"string"},"ownerKind":{"type":"string"},"bindingId":{"$ref":"#/$defs/NullableString"},"bindingName":{"$ref":"#/$defs/NullableString"},"bindingOrigin":{"$ref":"#/$defs/NullableString"},"kind":{"enum":["extends","dependency","construction"]},"memberName":{"$ref":"#/$defs/NullableString"},"targetClassId":{"$ref":"#/$defs/NullableString"},"evidenceIds":{"$ref":"#/$defs/Ids"}}
+    },
+    "FactsView": {
+      "type":"object","additionalProperties":false,"required":["schemaVersion","identity","complete","coverage","diagnostics","files","classes","factories","relationshipSites","sources"],
+      "properties":{"schemaVersion":{"const":"ideomancer.facts.v1"},"identity":{"$ref":"#/$defs/FactsIdentity"},"complete":{"type":"boolean"},"coverage":{"$ref":"#/$defs/FactCoverage"},"diagnostics":{"type":"array","maxItems":100,"items":{"$ref":"#/$defs/FactDiagnostic"}},"files":{"type":"array","items":{"$ref":"#/$defs/FactFile"}},"classes":{"type":"array","items":{"$ref":"#/$defs/ClassFact"}},"factories":{"type":"array","items":{"$ref":"#/$defs/FactoryFact"}},"relationshipSites":{"type":"array","items":{"$ref":"#/$defs/RelationshipSite"}},"sources":{"type":"object","additionalProperties":{"$ref":"#/$defs/SourceCitation"}}}
+    },
+    "AdapterIdentity": {"type":"object","additionalProperties":false,"required":["id","version","implementation"],"properties":{"id":{"$ref":"#/$defs/Text"},"version":{"$ref":"#/$defs/Text"},"implementation":{"$ref":"#/$defs/Text"}}},
+    "ContractIdentity": {"type":"object","additionalProperties":false,"required":["id","version","specHash"],"properties":{"id":{"$ref":"#/$defs/Text"},"version":{"$ref":"#/$defs/Text"},"specHash":{"$ref":"#/$defs/Hash"}}},
+    "ClassClaim": {
+      "type":"object","additionalProperties":false,"required":["id","siteId","sourceClassId","targetClassId","kind","basis","evidenceIds","ruleId","assumptions"],
+      "properties":{"id":{"$ref":"#/$defs/Text"},"siteId":{"type":"string"},"sourceClassId":{"type":"string"},"targetClassId":{"type":"string"},"kind":{"enum":["extends","depends_on"]},"basis":{"enum":["source_syntax","framework_contract","explicit_configuration","hypothesis"]},"evidenceIds":{"$ref":"#/$defs/Ids"},"ruleId":{"$ref":"#/$defs/Text"},"assumptions":{"type":"array","maxItems":32,"items":{"$ref":"#/$defs/Text"}}}
+    },
+    "ClaimSet": {
+      "type":"object","additionalProperties":false,"required":["schemaVersion","facts","adapter","contract","configurationHash","claims","diagnostics"],
+      "properties":{"schemaVersion":{"const":"ideomancer.claims.v1"},"facts":{"$ref":"#/$defs/FactsIdentity"},"adapter":{"$ref":"#/$defs/AdapterIdentity"},"contract":{"$ref":"#/$defs/ContractIdentity"},"configurationHash":{"$ref":"#/$defs/Hash"},"claims":{"type":"array","maxItems":2000,"items":{"$ref":"#/$defs/ClassClaim"}},"diagnostics":{"type":"array","maxItems":100,"items":{"$ref":"#/$defs/FactDiagnostic"}}}
+    },
+    "AugmentationOrigin": {"type":"object","additionalProperties":false,"required":["adapter","contract","configurationHash","claimSetHash"],"properties":{"adapter":{"$ref":"#/$defs/AdapterIdentity"},"contract":{"$ref":"#/$defs/ContractIdentity"},"configurationHash":{"$ref":"#/$defs/Hash"},"claimSetHash":{"$ref":"#/$defs/Hash"}}},
+    "AugmentationReport": {"type":"object","additionalProperties":false,"required":["schemaVersion","compositionPolicy","facts","origins","claimCount"],"properties":{"schemaVersion":{"const":"ideomancer.augmentation.v1"},"compositionPolicy":{"const":"class-claims-1"},"facts":{"$ref":"#/$defs/FactsIdentity"},"origins":{"type":"array","maxItems":4,"items":{"$ref":"#/$defs/AugmentationOrigin"}},"claimCount":{"type":"integer","minimum":0,"maximum":2000}}},
+    "AugmentedClassDiagramReport": {"type":"object","additionalProperties":false,"required":["schemaVersion","report","augmentation"],"properties":{"schemaVersion":{"const":"ideomancer.augmented-class-diagram.v1"},"report":{"$ref":"engine-api.schema.json#/$defs/ClassDiagramReport"},"augmentation":{"$ref":"#/$defs/AugmentationReport"}}},
+    "ExtensionCapabilities": {"type":"object","additionalProperties":false,"required":["schemaVersion","exportedFactoryStructure","classRelationshipSites","maxClaimSets","maxClaims","maxClaimBytes"],"properties":{"schemaVersion":{"const":"ideomancer.extensions.v1"},"exportedFactoryStructure":{"const":true},"classRelationshipSites":{"const":true},"maxClaimSets":{"const":4},"maxClaims":{"const":2000},"maxClaimBytes":{"const":1048576}}},
+    "ExtensionError": {"type":"object","additionalProperties":false,"required":["message"],"properties":{"message":{"type":"string"}}},
+    "SavedClaims": {"type":"object","additionalProperties":false,"required":["schemaVersion","sets","setsHash"],"properties":{"schemaVersion":{"const":"ideomancer.saved-claims.v1"},"sets":{"type":"array","maxItems":4,"items":{"$ref":"#/$defs/ClaimSet"}},"setsHash":{"$ref":"#/$defs/Hash"}}}
+  }
+}

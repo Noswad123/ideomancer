@@ -1,0 +1,31 @@
+[package]
+name = "ideomancer"
+version = "0.1.0"
+edition = "2021"
+description = "Discover applications and explore source-grounded diagrams in manageable views"
+license = "MIT"
+repository = "https://github.com/Noswad123/ideomancer"
+# Keep local studies, contract exports, and unrelated generated assets out of crates.
+# scripts/check_package.py also enforces an exact reviewed inventory.
+include = [
+    "/Cargo.toml", "/Cargo.lock", "/LICENSE", "/README.md", "/ROADMAP.md", "/makefile",
+    "/.gitignore", "/.github/workflows/rust.yml",
+    "/src/**", "/tests/*.rs", "/tests/*.cjs", "/examples/**",
+    "/docs/*.md", "/docs/*.json", "/docs/package-files.txt",
+    "/scripts/*.py", "/skills/*/SKILL.md",
+]
+
+[lib]
+name = "ideomancer_core"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive", "env"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+thiserror = "2.0"
+tempfile = "3.23"
+sha2 = "0.10"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs", "process"] }

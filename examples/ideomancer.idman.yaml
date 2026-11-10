@@ -1,0 +1,34 @@
+schemaVersion: 0.1.0
+id: ideomancer
+name: Ideomancer Pipeline
+
+nodes:
+  - id: manifest
+    label: YAML or JSON graph manifest
+    kind: document
+  - id: validator
+    label: Rust semantic validator
+    kind: component
+  - id: emitter
+    label: Mermaid source emitter
+    kind: component
+  - id: mermaid_cli
+    label: Mermaid CLI (mmdc)
+    kind: external_tool
+  - id: diagram
+    label: SVG, PNG, or PDF diagram
+    kind: artifact
+
+edges:
+  - from: manifest
+    to: validator
+    label: parse and validate
+  - from: validator
+    to: emitter
+    label: valid graph
+  - from: emitter
+    to: mermaid_cli
+    label: Mermaid source
+  - from: mermaid_cli
+    to: diagram
+    label: render

@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ideomancer:engine:v1",
+  "title": "Ideomancer Engine v1 DTOs",
+  "description": "Named DTO definitions. CatalogRef is opaque and has no wire representation. Saved class artifact schemas are independent of this API schema.",
+  "$defs": {
+    "ApiVersion": { "const": "ideomancer.engine.v1" },
+    "Count": { "type": "integer", "minimum": 0 },
+    "Path": { "type": "string" },
+    "OptionalString": { "type": ["string", "null"] },
+    "Strings": { "type": "array", "items": { "type": "string" } },
+    "Language": { "enum": ["python", "javascript_typescript"] },
+    "ItemKind": { "enum": ["api", "class", "workflow"] },
+    "Capabilities": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "languages", "discover", "browse", "classDiagrams", "sourceOnly", "svg"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/ApiVersion" },
+        "languages": { "type": "array", "items": { "$ref": "#/$defs/Language" } },
+        "discover": { "type": "boolean" }, "browse": { "type": "boolean" },
+        "classDiagrams": { "type": "boolean" }, "sourceOnly": { "type": "boolean" }, "svg": { "type": "boolean" }
+      }
+    },
+    "Toolchain": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false, "required": ["language", "python"],
+          "properties": { "language": { "const": "python" }, "python": { "$ref": "#/$defs/Path" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["language", "node", "typescript"],
+          "properties": { "language": { "const": "javascript_typescript" }, "node": { "$ref": "#/$defs/Path" }, "typescript": { "$ref": "#/$defs/Path" } }
+        }
+      ]
+    },
+    "DiscoverRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sourceRoot", "outputContainer", "toolchain"],
+      "properties": {
+        "sourceRoot": { "$ref": "#/$defs/Path" }, "outputContainer": { "$ref": "#/$defs/Path" }, "toolchain": { "$ref": "#/$defs/Toolchain" }
+      }
+    },
+    "DiscoveryReport": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "catalogDirectory", "sourceRoot", "snapshotId", "complete", "warnings"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/ApiVersion" }, "catalogDirectory": { "$ref": "#/$defs/Path" },
+        "sourceRoot": { "$ref": "#/$defs/Path" }, "snapshotId": { "type": "string" },
+        "complete": { "type": "boolean" }, "warnings": { "$ref": "#/$defs/Strings" }
+      }
+    },
+    "BrowseOptions": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "kind": { "anyOf": [{ "$ref": "#/$defs/ItemKind" }, { "type": "null" }] },
+        "query": { "$ref": "#/$defs/OptionalString" }, "path": { "$ref": "#/$defs/OptionalString" },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
+        "offset": { "$ref": "#/$defs/Count", "default": 0 }
+      }
+    },
+    "CatalogCounts": {
+      "type": "object", "additionalProperties": false, "required": ["api", "classes", "workflows"],
+      "properties": { "api": { "$ref": "#/$defs/Count" }, "classes": { "$ref": "#/$defs/Count" }, "workflows": { "$ref": "#/$defs/Count" } }
+    },
+    "CatalogItem": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "kind", "role", "label", "symbol", "path", "line", "endLine", "factId", "evidenceIds", "pathIsFragment"],
+      "properties": {
+        "id": { "type": "string" }, "kind": { "$ref": "#/$defs/ItemKind" }, "role": { "type": "string" },
+        "label": { "type": "string" }, "symbol": { "type": "string" }, "path": { "type": "string" },
+        "line": { "$ref": "#/$defs/Count" }, "endLine": { "$ref": "#/$defs/Count" },
+        "factId": { "type": "string" }, "evidenceIds": { "$ref": "#/$defs/Strings" },
+        "method": { "$ref": "#/$defs/OptionalString" }, "routePath": { "$ref": "#/$defs/OptionalString" }, "pathIsFragment": { "type": "boolean" }
+      }
+    },
+    "BrowseReport": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "snapshotId", "complete", "totalItems", "matchedItems", "offset", "limit", "counts", "items", "warnings"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/ApiVersion" }, "snapshotId": { "type": "string" }, "complete": { "type": "boolean" },
+        "totalItems": { "$ref": "#/$defs/Count" }, "matchedItems": { "$ref": "#/$defs/Count" },
+        "offset": { "$ref": "#/$defs/Count" }, "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "nextOffset": { "anyOf": [{ "$ref": "#/$defs/Count" }, { "type": "null" }] },
+        "counts": { "$ref": "#/$defs/CatalogCounts" }, "items": { "type": "array", "items": { "$ref": "#/$defs/CatalogItem" } }, "warnings": { "$ref": "#/$defs/Strings" }
+      }
+    },
+    "ClassSelection": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "all" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "id"], "properties": { "kind": { "const": "entry" }, "id": { "type": "string", "minLength": 1 } } },
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind", "limit", "offset"],
+          "properties": {
+            "kind": { "const": "page" }, "query": { "$ref": "#/$defs/OptionalString" }, "path": { "$ref": "#/$defs/OptionalString" },
+            "limit": { "type": "integer", "minimum": 1, "maximum": 30 }, "offset": { "$ref": "#/$defs/Count" }
+          }
+        }
+      ]
+    },
+    "RenderMode": {
+      "default": { "kind": "source_only" },
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "source_only" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "mmdc"], "properties": { "kind": { "const": "svg" }, "mmdc": { "$ref": "#/$defs/Path" } } }
+      ]
+    },
+    "ClassCoverage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["catalogClasses", "selectedClasses", "homeClasses", "allSelectedClassesRepresented", "diagramCount", "modeledRelations", "relationsDrawn", "relationsOmitted", "relationAccounting", "relationsRepresentedAsFields", "relationsRepresentedAsFieldsVisible", "relationsRepresentedAsFieldsHidden"],
+      "properties": {
+        "catalogClasses": { "$ref": "#/$defs/Count" }, "selectedClasses": { "$ref": "#/$defs/Count" }, "homeClasses": { "$ref": "#/$defs/Count" },
+        "allSelectedClassesRepresented": { "type": "boolean" }, "diagramCount": { "$ref": "#/$defs/Count" },
+        "modeledRelations": { "$ref": "#/$defs/Count" }, "relationsDrawn": { "$ref": "#/$defs/Count" }, "relationsOmitted": { "$ref": "#/$defs/Count" },
+        "relationAccounting": { "type": "string" }, "relationsRepresentedAsFields": { "$ref": "#/$defs/Count" },
+        "relationsRepresentedAsFieldsVisible": { "$ref": "#/$defs/Count" }, "relationsRepresentedAsFieldsHidden": { "$ref": "#/$defs/Count" }
+      }
+    },
+    "DiagramArtifact": {
+      "type": "object", "additionalProperties": false, "required": ["id", "title", "mermaid"],
+      "properties": { "id": { "type": "string" }, "title": { "type": "string" }, "mermaid": { "$ref": "#/$defs/Path" }, "svg": { "$ref": "#/$defs/OptionalString" } }
+    },
+    "ClassDiagramReport": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "catalogDirectory", "sourceRoot", "snapshotId", "complete", "selection", "coverage", "diagrams", "viewer", "legend", "viewDirectory", "viewsIndex", "reused", "warnings"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/ApiVersion" }, "catalogDirectory": { "$ref": "#/$defs/Path" }, "sourceRoot": { "$ref": "#/$defs/Path" },
+        "snapshotId": { "type": "string" }, "complete": { "type": "boolean" }, "selection": { "$ref": "#/$defs/ClassSelection" }, "coverage": { "$ref": "#/$defs/ClassCoverage" },
+        "diagrams": { "type": "array", "items": { "$ref": "#/$defs/DiagramArtifact" } }, "viewer": { "$ref": "#/$defs/Path" }, "legend": { "$ref": "#/$defs/Path" },
+        "viewDirectory": { "$ref": "#/$defs/Path" }, "viewsIndex": { "$ref": "#/$defs/Path" }, "reused": { "type": "boolean" }, "warnings": { "$ref": "#/$defs/Strings" }
+      }
+    },
+    "ErrorCode": { "enum": ["invalid_request", "catalog_unavailable", "discovery_failed", "class_diagram_failed"] },
+    "EngineError": {
+      "type": "object", "additionalProperties": false, "required": ["code", "message"],
+      "properties": { "code": { "$ref": "#/$defs/ErrorCode" }, "message": { "type": "string" } }
+    }
+  }
+}
