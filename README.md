@@ -28,14 +28,18 @@ by the engine. See [adapter ownership and migration](docs/adapters.md).
 See [ROADMAP.md](ROADMAP.md) for ownership boundaries, milestone status, and
 acceptance gates. Generic read-only facts and validated derived class relationships
 are implemented locally and exercised by independent external adapter conventions.
-Native JS/TS Tree-sitter is implemented as a local candidate with the full local
-regression suite passing. Hosted platform validation and release review remain pending; the
-working tree is uncommitted and unpublished, not a validated release.
+Native JS/TS Tree-sitter implementation and local acceptance are complete, including
+parser closeout regressions and independent extracted-package consumer checks.
+The development baseline is committed; closeout changes still require review and
+checkpointing. Hosted platform validation and release review remain pending, not
+a validated release. See the [dated validation record](docs/javascript-typescript-analysis.md#validation-tooling).
 Python/Rust Tree-sitter are subsequent milestones; Rust analysis is not implemented.
 The next gate is release/history review and approved consumer acceptance—not more
 codebase-specific rules in the engine or a claim of complete application understanding.
 See the [release/package checklist](docs/releasing.md) for the enforced crate
 inventory and the separate historical, asset, dependency, and publication gates.
+The [readiness review](docs/release-readiness.md) records hosted baseline evidence
+and the remaining owner decisions; current closeout changes still need their own CI run.
 This is a [source-only fresh baseline](docs/lineage.md), not a continuation of
 prior Git ancestry or a claim that previously distributed copies were erased.
 
@@ -65,6 +69,9 @@ local development work; do not assume an older published Git revision contains
 it. Consumers can start with an explicit local path, then pin an approved upstream
 revision or internal mirror after publication. Ideomancer is available under the
 [MIT License](LICENSE); copies and substantial portions must retain its notices.
+The scoped [native-parser third-party notices](docs/third-party-notices.md) are
+included in the source package; binary distribution still needs a complete
+target/feature-specific dependency and notice review.
 
 ## Explore In Waves
 
@@ -862,9 +869,11 @@ credentials or `mmdc`, and need no Node/browser installation. Install Python 3.1
 for the workflow tests; they skip Python-dependent cases when it is unavailable.
 `IDEOMANCER_TEST_PYTHON` can select a trusted Python 3.12 executable.
 JS/TS extraction tests use the compiled-in pinned grammars, not an external
-Node/compiler installation. CI keeps Python, Rustfmt, Clippy, tests, reviewed
-package inventory/package verification, and the release build; it installs no
-Node/TypeScript prerequisite. Optional member
+Node/compiler installation. CI defines Linux/macOS jobs for Rust 1.89.0 and current
+stable, with pinned action revisions, Python, Rustfmt, Clippy, tests, reviewed
+package inventory/package verification, a fresh independent package consumer,
+and the release build; it installs no Node/TypeScript prerequisite. Workflow
+configuration is not evidence of a successful hosted run. Optional member
 rendering validation requires existing `mmdc` and Chromium, with no downloads:
 
 ```sh
@@ -923,8 +932,9 @@ with real `mmdc` and its browser runtime:
 cargo test --locked --lib render::presentation::tests::local_mmdc_accepts_both_arrow_styles -- --ignored
 ```
 
-CI sets up Python 3.12 and checks formatting, clippy, tests, and release builds on
-Linux and macOS. Tests do not exercise production provider credentials.
+CI sets up Python 3.12 in each Rust/platform lane. Tests do not exercise production
+provider credentials. See the [release checks](docs/releasing.md) for local package
+and independent-consumer commands and their limits.
 
 `make` (or `make build`) performs a locked release build and copies only the
 executable into `bin/`; it does not install it. `make install` explicitly builds

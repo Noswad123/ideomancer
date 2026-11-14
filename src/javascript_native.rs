@@ -344,6 +344,17 @@ fn bounded_tree(root: Node<'_>, deadline: Instant) -> bool {
 fn field<'a>(n: Node<'a>, name: &str) -> Option<Node<'a>> {
     n.child_by_field_name(name)
 }
+fn member_name(n: Node<'_>) -> Option<Node<'_>> {
+    // JavaScript fields use `property`; TypeScript fields and methods use `name`.
+    field(
+        n,
+        if n.kind() == "field_definition" {
+            "property"
+        } else {
+            "name"
+        },
+    )
+}
 fn callable(n: Node<'_>) -> bool {
     matches!(
         n.kind(),
@@ -564,6 +575,8 @@ impl<'a> File<'a> {
         };
         let start = if n.kind() == "program" {
             0
+        } else if kind == "js_member" {
+            self.split_accessor_prefix(n).unwrap_or(n).start_byte()
         } else {
             n.start_byte()
         };
@@ -1004,23 +1017,69 @@ impl<'a> File<'a> {
         false
     }
     fn accessor(&self, n: Node<'_>) -> bool {
-        let mut c = n.walk();
-        let found = n
-            .children(&mut c)
-            .any(|n| matches!(n.kind(), "get" | "set"));
-        found
+        self.has(n, "get") || self.has(n, "set") || self.split_accessor_prefix(n).is_some()
+    }
+    fn split_accessor_prefix<'n>(&self, n: Node<'n>) -> Option<Node<'n>> {
+        if n.kind() != "method_definition" || n.parent().is_none_or(|p| p.kind() != "class_body") {
+            return None;
+        }
+        let name = member_name(n)?;
+        let mut cursor = n.walk();
+        if !n
+            .children(&mut cursor)
+            .take_while(|c| *c != name)
+            .all(|c| c.kind() == "comment")
+        {
+            return None;
+        }
+        // Pinned grammars can split `get\nname()` into a field and method.
+        // Only join adjacent class siblings separated entirely by trivia, never `;`.
+        let mut next = n;
+        let prefix = loop {
+            let previous = next.prev_sibling()?;
+            if !self.text[previous.end_byte()..next.start_byte()]
+                .chars()
+                .all(char::is_whitespace)
+            {
+                return None;
+            }
+            if previous.kind() != "comment" {
+                break previous;
+            }
+            next = previous;
+        };
+        if !matches!(
+            prefix.kind(),
+            "field_definition" | "public_field_definition"
+        ) {
+            return None;
+        }
+        let keyword = member_name(prefix)?;
+        if !matches!(self.raw(keyword), "get" | "set") {
+            return None;
+        }
+        let mut cursor = prefix.walk();
+        let bare = prefix.children(&mut cursor).all(|c| {
+            c == keyword
+                || matches!(
+                    c.kind(),
+                    "static" | "accessibility_modifier" | "override_modifier" | "comment"
+                )
+        });
+        bare.then_some(prefix)
     }
     fn has(&self, n: Node<'_>, token: &str) -> bool {
         let mut c = n.walk();
         let found = n.children(&mut c).any(|n| {
-            n.kind() == token
+            // The JS grammar can combine modifiers into an unnamed `static get` token.
+            n.kind().split_ascii_whitespace().any(|part| part == token)
                 || (matches!(n.kind(), "accessibility_modifier" | "override_modifier")
                     && self.raw(n) == token)
         });
         found
     }
     fn visibility(&self, n: Node<'_>) -> &'static str {
-        if field(n, "name").is_some_and(|n| n.kind() == "private_property_identifier")
+        if member_name(n).is_some_and(|n| n.kind() == "private_property_identifier")
             || self.has(n, "private")
         {
             "private"
@@ -1029,6 +1088,14 @@ impl<'a> File<'a> {
         } else {
             "public"
         }
+    }
+    fn constructor(&self, n: Node<'_>) -> bool {
+        matches!(n.kind(), "method_definition" | "method_signature")
+            && n.parent()
+                .is_some_and(|p| p.kind() == "class_body" && p.parent().is_some_and(class))
+            && !self.has(n, "static")
+            && !self.accessor(n)
+            && member_name(n).is_some_and(|n| self.raw(n) == "constructor")
     }
     fn owner(&self, n: Node<'a>, include_class: bool) -> Option<usize> {
         let mut p = n.parent();
@@ -1464,14 +1531,13 @@ impl<'a> File<'a> {
             .and_then(|n| self.direct(n));
         let arrow_field = p
             .filter(|p| matches!(p.kind(), "public_field_definition" | "field_definition"))
-            .and_then(|p| field(p, "name"))
+            .and_then(member_name)
             .and_then(|n| self.direct(n));
-        let constructor = n.kind() == "method_definition"
-            && field(n, "name").is_some_and(|n| self.raw(n) == "constructor");
+        let constructor = self.constructor(n);
         let name = named
             .clone()
             .or(arrow_field.clone())
-            .or_else(|| field(n, "name").and_then(|n| self.direct(n)))
+            .or_else(|| member_name(n).and_then(|n| self.direct(n)))
             .unwrap_or_else(|| {
                 format!(
                     "{}_L{}_C{}",
@@ -1522,7 +1588,7 @@ impl<'a> File<'a> {
             json!(name),
             &symbol,
         );
-        let mut meta = json!({"declarationFactId":self.facts[f].id,"ownerFactId":self.facts[own].id,"kind":kind,"name":name,"publicCandidate":vis=="public"&&!constructor&&kind!="callback"&&(kind!="method"||field(n,"name").and_then(|n|self.direct(n)).is_some()||arrow_field.is_some()),"visibility":vis});
+        let mut meta = json!({"declarationFactId":self.facts[f].id,"ownerFactId":self.facts[own].id,"kind":kind,"name":name,"publicCandidate":vis=="public"&&!constructor&&kind!="callback"&&(kind!="method"||member_name(n).and_then(|n|self.direct(n)).is_some()||arrow_field.is_some()),"visibility":vis});
         if class(n) {
             meta["classForm"] = json!(if n.kind() == "class" {
                 "class_expression"
@@ -1638,7 +1704,16 @@ impl<'a> File<'a> {
                 ) {
                     continue;
                 }
-                let Some(name) = field(m, "name").and_then(|n| self.direct(n)) else {
+                if matches!(m.kind(), "field_definition" | "public_field_definition") {
+                    let mut next = m.next_named_sibling();
+                    while next.is_some_and(|n| n.kind() == "comment") {
+                        next = next.and_then(|n| n.next_named_sibling());
+                    }
+                    if next.is_some_and(|n| self.split_accessor_prefix(n) == Some(m)) {
+                        continue;
+                    }
+                }
+                let Some(name) = member_name(m).and_then(|n| self.direct(n)) else {
                     continue;
                 };
                 let target = if callable(m) && !self.accessor(m) {
@@ -1646,7 +1721,8 @@ impl<'a> File<'a> {
                 } else {
                     field(m, "value").map(unwrap).filter(|n| callable(*n))
                 };
-                let kind = if name == "constructor" {
+                let constructor = self.constructor(m);
+                let kind = if constructor {
                     "constructor"
                 } else if target.is_some()
                     || matches!(m.kind(), "method_signature" | "abstract_method_signature")
@@ -1656,7 +1732,7 @@ impl<'a> File<'a> {
                     "field"
                 };
                 self.member(cd.fact, m, &name, kind, target);
-                if name == "constructor" {
+                if constructor {
                     for p in self.params(m) {
                         if self.parameter_property(p) {
                             if let Some(name) = self.direct(self.pname(p)) {
@@ -1682,7 +1758,13 @@ impl<'a> File<'a> {
         kind: &str,
         target: Option<Node<'a>>,
     ) {
-        let mut v = json!({"ownerFactId":self.facts[owner].id,"name":name,"memberKind":kind,"visibility":self.visibility(n),"static":self.has(n,"static")});
+        let modifiers = self.split_accessor_prefix(n).unwrap_or(n);
+        let visibility = if name.starts_with('#') {
+            "private"
+        } else {
+            self.visibility(modifiers)
+        };
+        let mut v = json!({"ownerFactId":self.facts[owner].id,"name":name,"memberKind":kind,"visibility":visibility,"static":self.has(modifiers,"static")});
         if let Some(d) = target.and_then(|t| self.declarations.get(&t.id())) {
             v["declarationFactId"] = json!(self.facts[d.fact].id);
         }
@@ -2005,6 +2087,118 @@ mod tests {
             .iter()
             .any(|d| d.code == "javascript_unsupported_execution_boundary"));
         assert_eq!(r.facts.iter().filter(|f| f.kind == "call").count(), 2);
+    }
+    #[test]
+    fn member_modifiers_do_not_confuse_method_names_or_accessor_constructors() {
+        for path in ["a.js", "a.jsx", "a.ts", "a.tsx"] {
+            let r = extract(path, "function helper() {} class C { static get() { helper(); } set() { helper(); } static get constructor() { helper(); return 1; } } const object = { constructor() { helper(); } };");
+            valid(&r);
+            let declarations = values(&r, "js_declaration");
+            assert!(!declarations.iter().any(|d| d["kind"] == "constructor"));
+            for name in ["get", "set", "constructor"] {
+                assert!(declarations.iter().any(|d| d["name"] == name
+                    && d["kind"] == "method"
+                    && d["publicCandidate"] == true));
+            }
+            let members = values(&r, "js_member");
+            assert!(members.iter().any(|m| m["name"] == "constructor"
+                && m["memberKind"] == "field"
+                && m["static"] == true
+                && m["declarationFactId"].is_null()));
+            assert_eq!(r.facts.iter().filter(|f| f.kind == "call").count(), 3);
+            assert!(values(&r, "js_constructor_field").is_empty());
+        }
+    }
+    #[test]
+    fn constructor_overload_members_keep_their_nonstatic_class_context() {
+        for path in ["a.ts", "a.tsx"] {
+            let r = extract(path, "class C { constructor(dep: unknown); constructor(dep: unknown) {} static constructor(dep: unknown): void; static constructor(dep: unknown) {} }");
+            valid(&r);
+            let members = values(&r, "js_member");
+            assert_eq!(members.len(), 4);
+            for member in members {
+                assert_eq!(
+                    member["memberKind"],
+                    if member["static"] == true {
+                        "method"
+                    } else {
+                        "constructor"
+                    }
+                );
+            }
+        }
+    }
+    #[test]
+    fn split_accessor_matching_does_not_consume_typed_fields_or_modified_methods() {
+        for path in ["a.ts", "a.tsx"] {
+            for prefix in [
+                "static get\nstatic ",
+                "static set\nasync ",
+                "static get: unknown\n",
+                "static set?: unknown\n",
+                "static get!\n",
+                "static get;\nother;\n",
+            ] {
+                let text =
+                    format!("function helper() {{}} class C {{ {prefix}value() {{ helper(); }} }}");
+                let r = extract(path, &text);
+                valid(&r);
+                assert!(
+                    values(&r, "js_declaration")
+                        .iter()
+                        .any(|d| d["name"] == "value" && d["publicCandidate"] == true),
+                    "{path}: {text}"
+                );
+                assert_eq!(r.facts.iter().filter(|f| f.kind == "call").count(), 1);
+            }
+            for prefix in [
+                "private static get\n",
+                "protected static set /*\n */ ",
+                "private static override get\n",
+                "protected static override set /*\n */ ",
+            ] {
+                let params = if prefix.contains("set") { "input" } else { "" };
+                let r = extract(path, &format!("function helper() {{}} class C {{ {prefix}value({params}) {{ helper(); }} }}"));
+                valid(&r);
+                let members = values(&r, "js_member");
+                assert_eq!(members.len(), 1);
+                assert_eq!(
+                    members[0]["visibility"],
+                    if params.is_empty() {
+                        "private"
+                    } else {
+                        "protected"
+                    }
+                );
+                assert_eq!(members[0]["static"], true);
+                assert_eq!(members[0]["memberKind"], "field");
+                assert!(!r.facts.iter().any(|f| f.kind == "call"));
+            }
+            for keyword in ["get", "set"] {
+                let params = if keyword == "set" { "input" } else { "" };
+                let returned = if keyword == "get" { "return 1;" } else { "" };
+                let r = extract(path, &format!("function helper() {{}} class Base {{ get value() {{ return 1; }} set value(input) {{}} }} export class C extends Base {{ override {keyword}\nvalue({params}) {{ helper(); {returned} }} }}"));
+                valid(&r);
+                let members = values(&r, "js_member");
+                assert_eq!(members.len(), 3, "{path}: {keyword}");
+                assert!(members.iter().all(|m| m["name"] == "value"
+                    && m["memberKind"] == "field"
+                    && m["static"] == false));
+                assert!(!values(&r, "js_declaration")
+                    .iter()
+                    .any(|d| d["name"] == "value"));
+                assert!(!r.facts.iter().any(|f| f.kind == "call"));
+            }
+        }
+        for path in ["a.js", "a.jsx", "a.ts", "a.tsx"] {
+            let r = extract(path, "class C { static get\n#value() {} }");
+            valid(&r);
+            let members = values(&r, "js_member");
+            assert_eq!(members.len(), 1);
+            assert_eq!(members[0]["visibility"], "private");
+            assert_eq!(members[0]["static"], true);
+            assert_eq!(members[0]["memberKind"], "field");
+        }
     }
     #[test]
     fn utf16_factory_forms_and_class_receipts() {

@@ -20,8 +20,10 @@ docs/javascript-typescript-analysis.md
 docs/lineage.md
 docs/package-files.txt
 docs/python-analysis.md
+docs/release-readiness.md
 docs/releasing.md
 docs/software-planning.md
+docs/third-party-notices.md
 examples/ideomancer.idman.yaml
 examples/javascript-worker/README.md
 examples/javascript-worker/batch.ts
@@ -35,6 +37,10 @@ examples/python-worker/README.md
 examples/python-worker/worker.py
 makefile
 scripts/check_package.py
+scripts/check_package_archive.py
+scripts/check_package_consumer.py
+scripts/test_package_archive.py
+scripts/test_package_consumer.py
 scripts/test_package_policy.py
 src/adapters/fastapi.rs
 src/adapters/mod.rs

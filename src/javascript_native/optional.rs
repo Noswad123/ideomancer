@@ -1040,14 +1040,10 @@ impl<'a> File<'a> {
                     p.kind() == "export_statement" && self.top(p) && !self.has(p, "default")
                 })
             {
-                candidate = field(n, "name")
-                    .and_then(|n| self.direct(n))
-                    .and_then(|name| {
-                        field(n, "value")
-                            .map(unwrap)
-                            .filter(|n| callable(*n))
-                            .map(|f| (f, name))
-                    });
+                candidate = field(n, "value")
+                    .map(unwrap)
+                    .filter(|n| callable(*n))
+                    .zip(field(n, "name").and_then(|n| self.direct(n)));
             } else if n.kind() == "export_specifier"
                 && !self.has(n, "type")
                 && n.parent().and_then(|p| p.parent()).is_some_and(|p| {
@@ -1064,12 +1060,11 @@ impl<'a> File<'a> {
                             .map(|bs| bs[0])
                     })
                     .and_then(|b| self.bindings[b].target)
-                    .and_then(|f| {
+                    .zip(
                         field(n, "alias")
                             .or_else(|| field(n, "name"))
-                            .and_then(|n| self.direct(n))
-                            .map(|name| (f, name))
-                    });
+                            .and_then(|n| self.direct(n)),
+                    );
             }
             if let Some((f, name)) = candidate {
                 if name == "default" || !self.declarations.contains_key(&f.id()) {

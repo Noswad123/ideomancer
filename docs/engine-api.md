@@ -83,11 +83,13 @@ spellings. A catalog handle is never deserialized from a response or caller JSON
 
 ## Dependency source
 
-A local path dependency is appropriate while this API is uncommitted/unpublished.
-Do not claim that an existing upstream revision contains these changes. After
+A local path dependency is appropriate during release review. A committed development
+revision is not automatically an approved consumer pin. After review and authorized
 publication, consumers can pin an immutable upstream revision or use an approved
 internal mirror with the same package/API. No remote or visibility changes are
-part of adding the library target.
+part of adding the library target. The independent extracted-package consumer in
+[the release checks](releasing.md#validate-reuse-from-the-package) verifies native
+JS/TS reuse without claiming private-consumer or publication approval.
 
 Generic read-only facts and validated class augmentation are available through the
 additive [extension contract](adapter-contract.md) and its separate capabilities

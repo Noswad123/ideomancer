@@ -1123,6 +1123,319 @@ fn check_module_proof(data: &Value, evidence: &Value, link: &Value) {
     );
 }
 
+fn fact_metadata(evidence: &Value, kind: &str) -> Vec<Value> {
+    evidence["facts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|fact| fact["kind"] == kind)
+        .map(|fact| serde_json::from_str(fact["value"].as_str().unwrap()).unwrap())
+        .collect()
+}
+
+#[test]
+fn class_field_names_visibility_and_arrow_workflows_survive_saved_catalogs() {
+    for extension in ["js", "jsx", "ts", "tsx"] {
+        let path = format!("fields.{extension}");
+        let Some(f) = module_fixture(&[(
+            &path,
+            r#"
+function helper() {}
+export class Fields {
+  count = 1;
+  static total = 2;
+  #secret = 3;
+  run = () => helper();
+  static start = () => helper();
+  #hidden = () => helper();
+}
+"#,
+        )]) else {
+            return;
+        };
+        let saved = f.saved();
+        let evidence = read_json(&catalog(&saved).join("evidence.json"));
+        let members = fact_metadata(&evidence, "js_member");
+        assert_eq!(members.len(), 6, "{extension}: {members:?}");
+        for (name, kind, visibility, is_static) in [
+            ("count", "field", "public", false),
+            ("total", "field", "public", true),
+            ("#secret", "field", "private", false),
+            ("run", "method", "public", false),
+            ("start", "method", "public", true),
+            ("#hidden", "method", "private", false),
+        ] {
+            let member = members.iter().find(|m| m["name"] == name).unwrap();
+            assert_eq!(member["memberKind"], kind);
+            assert_eq!(member["visibility"], visibility);
+            assert_eq!(member["static"], is_static);
+        }
+        let declarations = fact_metadata(&evidence, "js_declaration");
+        let signatures = fact_metadata(&evidence, "js_callable_signature");
+        for name in ["run", "start", "#hidden"] {
+            let declaration = declarations.iter().find(|d| d["name"] == name).unwrap();
+            assert_eq!(declaration["kind"], "method");
+            assert_eq!(declaration["publicCandidate"], name != "#hidden");
+            assert_eq!(declaration["static"], name == "start");
+            assert!(signatures
+                .iter()
+                .any(|s| s["declarationFactId"] == declaration["declarationFactId"]));
+        }
+        assert!(!saved["page"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["symbol"].as_str().unwrap().ends_with(".#hidden")));
+        fs::remove_dir_all(&f.root).unwrap();
+        for name in ["run", "start"] {
+            let selected = item(&saved, "workflow", &format!(".Fields.{name}"));
+            let report = success(f.diagram(&saved, selected, "services").output().unwrap());
+            let data = check_callable(&report, selected, &saved);
+            let links = data["focus"]["links"].as_array().unwrap();
+            assert_eq!(links.len(), 1, "{extension}: {data}");
+            assert_eq!(links[0]["kind"], "js_local_call_candidate");
+            assert!(data["focus"]["visitedSymbols"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s.as_str().unwrap().ends_with(".helper")));
+        }
+        f.safe(&saved);
+    }
+}
+
+#[test]
+fn accessors_are_explicit_non_callable_boundaries_in_saved_catalogs() {
+    for extension in ["ts", "tsx", "js", "jsx"] {
+        for modifier in ["static ", "", "static /* modifier */ "] {
+            for (keyword, parameters) in [("get", ""), ("set", "input")] {
+                for separator in [
+                    " ",
+                    "\n",
+                    "\r\n",
+                    " /* gap */\n",
+                    " // gap\n",
+                    " /*\n gap */ ",
+                ] {
+                    let path = format!("getters.{extension}");
+                    let source = format!("function helper() {{}} export class Getters {{ {modifier}{keyword}{separator}value({parameters}) {{ helper(); }} }}");
+                    let Some(f) = module_fixture(&[(&path, &source)]) else {
+                        return;
+                    };
+                    let saved = f.saved();
+                    let evidence = read_json(&catalog(&saved).join("evidence.json"));
+                    let members = fact_metadata(&evidence, "js_member");
+                    assert_eq!(members.len(), 1, "{extension} {separator:?}: {members:?}");
+                    assert_eq!(members[0]["name"], "value");
+                    assert_eq!(
+                        members[0]["memberKind"], "field",
+                        "{extension} {separator:?}"
+                    );
+                    assert_eq!(
+                        members[0]["static"],
+                        !modifier.is_empty(),
+                        "{extension} {modifier}{keyword}{separator:?}"
+                    );
+                    assert!(members[0]["declarationFactId"].is_null());
+                    let member_fact = evidence["facts"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|fact| fact["kind"] == "js_member")
+                        .unwrap();
+                    assert_eq!(
+                        member_fact["line"], 1,
+                        "member citation includes its accessor/static prefix"
+                    );
+                    assert!(!fact_metadata(&evidence, "js_declaration")
+                        .iter()
+                        .any(|d| d["name"] == "value"));
+                    for kind in [
+                        "call",
+                        "js_call",
+                        "js_local_call_candidate",
+                        "js_callable_signature",
+                    ] {
+                        assert!(
+                            !evidence["facts"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .any(|fact| fact["kind"] == kind),
+                            "{extension} {separator:?}: unexpected {kind}"
+                        );
+                    }
+                    assert!(evidence["diagnostics"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|d| d["code"] == "javascript_unsupported_execution_boundary"));
+                    assert!(!saved["page"]["items"].as_array().unwrap().iter().any(|i| i
+                        ["symbol"]
+                        .as_str()
+                        .unwrap()
+                        .ends_with(".value")));
+                    fs::remove_dir_all(&f.root).unwrap();
+                    let selected = item(&saved, "class", ".Getters");
+                    let report = success(
+                        f.command()
+                            .arg("diagram")
+                            .arg(catalog(&saved))
+                            .args([
+                                "--entry",
+                                selected["id"].as_str().unwrap(),
+                                "--kind",
+                                "class",
+                                "--no-render",
+                            ])
+                            .output()
+                            .unwrap(),
+                    );
+                    let data = legend(&report);
+                    assert!(
+                        data["entries"][0]["attributes"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|m| m["name"] == "value" && m["static"] == !modifier.is_empty()),
+                        "{data}"
+                    );
+                    f.safe(&saved);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn accessor_like_fields_with_explicit_separation_keep_following_methods() {
+    for extension in ["js", "jsx", "ts", "tsx"] {
+        let prefixes = [
+            "static get;\n",
+            "static set;\n",
+            "static get /* comment */;\n",
+            "static set\n;\n",
+            "static get = 1\n",
+            "static set = () => helper();\n",
+            "static get() {}\n",
+        ];
+        let source = format!(
+            "function helper() {{}} {}",
+            prefixes
+                .iter()
+                .enumerate()
+                .map(|(index, prefix)| format!(
+                    "export class Control{index} {{ {prefix}value() {{ helper(); }} }}"
+                ))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        let path = format!("controls.{extension}");
+        let Some(f) = module_fixture(&[(&path, &source)]) else {
+            return;
+        };
+        let saved = f.saved();
+        let evidence = read_json(&catalog(&saved).join("evidence.json"));
+        let members = fact_metadata(&evidence, "js_member");
+        let values: Vec<_> = members.iter().filter(|m| m["name"] == "value").collect();
+        assert_eq!(values.len(), prefixes.len());
+        assert!(values
+            .iter()
+            .all(|m| m["memberKind"] == "method" && m["declarationFactId"].is_string()));
+        fs::remove_dir_all(&f.root).unwrap();
+        for (index, prefix) in prefixes.iter().enumerate() {
+            let selected = item(&saved, "workflow", &format!(".Control{index}.value"));
+            let report = success(f.diagram(&saved, selected, "services").output().unwrap());
+            let data = check_callable(&report, selected, &saved);
+            assert_eq!(
+                data["focus"]["links"].as_array().unwrap().len(),
+                1,
+                "{extension} {}: {data}",
+                prefix
+            );
+        }
+        f.safe(&saved);
+    }
+}
+
+#[test]
+fn only_nonstatic_class_constructors_emit_instance_storage_receipts() {
+    for extension in ["js", "jsx", "ts", "tsx"] {
+        let path = format!("constructors.{extension}");
+        let Some(f) = module_fixture(&[(
+            &path,
+            r#"
+function helper() {}
+export class Static { static constructor(dep) { this.dep = dep; helper(); } }
+export class Instance { constructor(dep) { this.dep = dep; } }
+const object = { constructor(dep) { this.dep = dep; helper(); } };
+"#,
+        )]) else {
+            return;
+        };
+        let saved = f.saved();
+        let evidence = read_json(&catalog(&saved).join("evidence.json"));
+        let declarations = fact_metadata(&evidence, "js_declaration");
+        let constructors: Vec<_> = declarations
+            .iter()
+            .filter(|d| d["name"] == "constructor")
+            .collect();
+        assert_eq!(constructors.len(), 3);
+        assert_eq!(
+            constructors
+                .iter()
+                .filter(|d| d["kind"] == "constructor")
+                .count(),
+            1,
+            "{extension}: {constructors:?}"
+        );
+        assert_eq!(
+            constructors
+                .iter()
+                .filter(|d| d["kind"] == "method" && d["publicCandidate"] == true)
+                .count(),
+            2
+        );
+        let members = fact_metadata(&evidence, "js_member");
+        assert!(members.iter().any(|m| m["name"] == "constructor"
+            && m["memberKind"] == "method"
+            && m["static"] == true));
+        assert!(members.iter().any(|m| m["name"] == "constructor"
+            && m["memberKind"] == "constructor"
+            && m["static"] == false));
+        for kind in ["js_constructor_field", "js_class_relation"] {
+            let receipts = fact_metadata(&evidence, kind);
+            assert_eq!(receipts.len(), 1, "{extension} {kind}: {receipts:?}");
+            let owner = evidence["facts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|fact| fact["id"] == receipts[0]["ownerFactId"])
+                .unwrap();
+            assert!(
+                owner["symbol"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with(".Instance.constructor"),
+                "{owner}"
+            );
+            if kind == "js_class_relation" {
+                assert_eq!(receipts[0]["bindingKind"], "constructor_parameter");
+            }
+        }
+        fs::remove_dir_all(&f.root).unwrap();
+        let selected = item(&saved, "workflow", ".Static.constructor");
+        let report = success(f.diagram(&saved, selected, "services").output().unwrap());
+        let data = check_callable(&report, selected, &saved);
+        assert_eq!(
+            data["focus"]["links"].as_array().unwrap().len(),
+            1,
+            "{data}"
+        );
+        f.safe(&saved);
+    }
+}
+
 #[test]
 fn module_chains_keep_complete_cross_file_proofs_offline_and_repeat_without_writes() {
     for (app, work, leaf) in [

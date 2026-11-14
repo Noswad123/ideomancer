@@ -561,16 +561,50 @@ and the release build. It does not install Node, TypeScript, Mermaid, or browser
 The declared MSRV is Rust **1.89**, with direct exact dependency pins protecting
 downstream resolution. Record Rust 1.89 and current-stable matrix results separately
 before release. The package review must retain applicable runtime/grammar licenses
-and notices, including compiled C grammar code in binary distributions.
+and notices, including compiled C grammar code in binary distributions. The scoped
+[retained notices](third-party-notices.md) include runtime/grammar MIT and bundled
+Unicode texts; they do not replace a full binary dependency review.
 
-Local validation on Rust 1.89: the full normal suite has **563 passing tests**
-(13 optional tests ignored in that run), including 44 JS/TS view tests, 25 class
-UML tests, 13 adapter API tests and 8 engine API tests. All **nine applicable
-non-agent optional checks** also pass with existing trusted render/browser tools
-and a synthetic saved catalog, plus six package-policy tests. The four optional
-agent-bridge tests remain unrun, not reported as fixed. Independent review's six
-soundness/resource findings have regression fixes and a clean focused re-review.
-These local results are not a claim of hosted matrix success or release approval.
+#### Local closeout — 2026-11-13
+
+Validated on macOS/aarch64 with Python 3.12.11. Rust versions below are actual
+installed toolchains, not a claim about the latest hosted stable release.
+
+| Check | Rust 1.89.0 (MSRV) | Rust 1.96.1 (additional installed toolchain) |
+| --- | --- | --- |
+| Rustfmt and all-target Clippy (`-D warnings`) | Pass | Pass |
+| Full normal suite | **570 pass**, 13 optional ignored | **570 pass**, 13 optional ignored |
+| Locked offline package verification and release build | Pass | Pass |
+| Independent extracted-package native consumer, fresh offline resolution | Pass | Pass |
+
+The normal suite includes **48 JS/TS view tests**, 25 class UML tests, 13 adapter
+API tests and 8 engine API tests. Closeout regressions cover JS/JSX field names,
+static/private arrow methods, getter/setter execution boundaries (including
+newline/comment-split and TS `override` forms), and static/object methods named
+`constructor`. Reconciliation of split accessors is deliberately narrow: adjacent
+same-class bare `get`/`set` prefixes and unmodified methods separated only by trivia;
+explicit semicolons, initializers, type/optional/definite markers and intervening
+members are not joined. This is not general TypeScript semantic analysis.
+
+All **nine applicable non-agent optional checks** also pass on Rust 1.89.0 using
+existing Mermaid 11.12.0, Puppeteer/Chromium and the synthetic saved example catalog;
+nothing was downloaded. The initial closeout's 19 Python script tests have expanded
+to **77 passing checks**, covering package/archive policy, full notice retention,
+bounded manifest reads and consumer-harness behavior. The independent
+consumer additionally exercises typed facts, configured synthetic claims, rejection
+of stale claims, saved claims, immutability, and source-deleted diagram/cache reuse.
+See [repeatable package/consumer commands](releasing.md#validate-reuse-from-the-package)
+for verified archive-checksum and source/extraction-match receipts and their limits.
+
+The four optional agent-bridge tests remain unrun, not reported as fixed. Hosted
+Linux/macOS × Rust 1.89.0/current-stable acceptance, approved private-consumer cases,
+historical/ownership review, complete binary dependency notices and publication
+approval remain separate gates. The pinned CI workflow now defines that matrix
+and consumer check; configuration is not evidence of hosted success. These local
+results close P0 implementation/local acceptance, not release approval.
+The committed baseline's earlier Linux/macOS stable run succeeded; it does not
+cover these new changes. The [readiness review](release-readiness.md) links the
+exact hosted result and records the remaining decisions without claiming clearance.
 
 ```sh
 cargo test --locked --test javascript_views
