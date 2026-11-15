@@ -361,12 +361,7 @@ pub fn extract(root: &Path, python: &Path) -> Result<Evidence, String> {
         root_package,
         ..
     } = extract_with_policy(root, Language::Python)?;
-    let input = serde_json::to_vec(&serde_json::json!({ "sources": sources }))
-        .map_err(|e| e.to_string())?;
-    if input.len() > MAX_INPUT {
-        return Err("Python extractor input exceeds the 40 MiB protocol limit".into());
-    }
-    let response = run_helper(python, input)?;
+    let response = extract_captured(python, &sources)?;
     complete &= response.complete;
     diagnostics.extend(response.diagnostics);
     diagnostics.sort_by(|a, b| (&a.path, &a.code, &a.message).cmp(&(&b.path, &b.code, &b.message)));
@@ -390,6 +385,23 @@ pub fn extract(root: &Path, python: &Path) -> Result<Evidence, String> {
         diagnostics,
         complete,
     })
+}
+
+/// Replay only the captured protocol bytes, never paths in the source tree.
+#[cfg(unix)]
+fn extract_captured(python: &Path, sources: &[Source]) -> Result<Response, String> {
+    let input = serde_json::to_vec(&serde_json::json!({ "sources": sources }))
+        .map_err(|e| e.to_string())?;
+    check_python_input_size(input.len())?;
+    run_helper(python, input)
+}
+
+#[cfg(unix)]
+fn check_python_input_size(length: usize) -> Result<(), String> {
+    if length > MAX_INPUT {
+        return Err("Python extractor input exceeds the 40 MiB protocol limit".into());
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -904,6 +916,10 @@ pub fn module_manifest(evidence: &Evidence, name: &str) -> crate::manifest::Mani
             .collect(),
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "analysis/python_parity.rs"]
+mod python_parity;
 
 #[cfg(all(test, unix))]
 mod tests {

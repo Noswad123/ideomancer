@@ -46,6 +46,7 @@ src/adapters/fastapi.rs
 src/adapters/mod.rs
 src/adapters/vendor_sdk.rs
 src/analysis.rs
+src/analysis/python_parity.rs
 src/analyze.rs
 src/catalog.rs
 src/cli.rs

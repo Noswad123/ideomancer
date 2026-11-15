@@ -1,8 +1,9 @@
 # Source Release Readiness — 2026-11-13
 
 This is a bounded engineering review of the JS/TS P0 source candidate, not legal,
-ownership, security, private-consumer, or publication approval. Local closeout
-changes are not yet checkpointed. The immediate deliverable is a reviewed source
+ownership, security, framework, or publication approval. The dated baseline below
+is historical; later scoped diagram and consumer acceptance is recorded in the
+[roadmap](../ROADMAP.md), not inferred from the earlier hosted run. The immediate deliverable is a reviewed source
 dependency; binary distribution is a separate, uncleared deliverable.
 
 ## Evidence And Decisions
@@ -16,7 +17,7 @@ dependency; binary distribution is a separate, uncleared deliverable.
 | Git identity metadata | Current baseline commits retain organization-domain author/committer metadata | Owner explicitly approves retention or separately authorizes a remediation plan; no rewrite is implied |
 | Legacy lineage | Current `main` has a parentless root; GitHub still lists a legacy backup branch | Owner decides disposition of retained refs and older distributed copies; do not delete or rewrite them implicitly |
 | Published version | No tags or GitHub releases were listed at inspection | Publish only after approval and record a real immutable consumer pin |
-| Real consumer | Independent synthetic consumer exercises facts, configured claims and offline reuse | Consumer owner runs approved actual-source cases without exporting private fixtures or results |
+| Real consumer | Synthetic integration plus a bounded real-source explicit-configuration slice and diagram usefulness accepted | Broader framework semantics, runtime behavior and adoption remain separate; do not export private fixtures or results |
 | Binary notices | Scoped parser/selected dependency texts retained, including original libyaml attribution | Complete target/features/toolchain/native-runtime review and a notice-bearing bundle workflow before any binary distribution |
 | YAML maintenance | Locked `serde_yaml 0.9.34+deprecated`; upstream says it is no longer maintained | Record owner risk acceptance or plan a separately tested replacement; deprecation alone is not a vulnerability finding |
 

@@ -52,6 +52,55 @@ calls, and runtime effects must not be conflated. A module/import graph is evide
 not the architecture itself. Agent grouping is a proposal, not exact reproduction
 of a manually curated responsibility-level diagram.
 
+## Native migration parity foundation
+
+P1 has begun with a **private captured-source AST parity harness**, not a native
+Python backend. The production helper, evidence v1 serialization,
+`python-static-8-generic-facts` identity, snapshot formula, scanner/module policy,
+redaction and resource limits remain unchanged. There is no new CLI flag, public
+toolchain variant, parser dependency, or default migration.
+
+Production extraction and the harness use the same private `extract_captured`
+seam in `src/analysis.rs`. It serializes the bytes already captured by the no-follow
+scanner, retains the 40 MiB helper-input gate, and invokes the existing isolated
+bounded helper. It does not read target paths again. Fixtures in
+`src/analysis/python_parity.rs` are independently synthetic and use automatically
+cleaned temporary directories, not private application examples or new build caches.
+
+Four ordinary unit tests check identity preimages, comparison sensitivity, limit
+boundaries and fail-closed oracle selection. Eight explicit oracle tests pin:
+
+- Full ordered fact tuples and IDs, encoded metadata and Unicode/surrogate escapes.
+- Definitions, lexical ownership, imports, decorators and ordered parameter kinds.
+- Direct local-call candidates, parameter shadowing and literal-write invalidations.
+- Identical same-line call deduplication, repeatability and input-order independence.
+- Direct route/prefix syntax versus dynamic boundaries and literal redaction.
+- Valid/malformed-file isolation: a failed file retains only its module fact.
+- Unicode identifiers/paths, CRLF, UTF-8 BOM, encoding cookies and invalid bytes.
+- Captured-byte replay after source replacement/removal, nonexecution markers,
+  exact production-response equivalence and unchanged persistence identity.
+
+The oracle cases are **ignored in the ordinary suite**. Run the gate explicitly
+with an absolute path to an installed, trusted Python >=3.12:
+
+```sh
+IDEOMANCER_TEST_PYTHON="$(command -v python3.12)" \
+  cargo test --locked --offline --jobs 2 --lib analysis::python_parity \
+  -- --ignored --nocapture --test-threads=2
+```
+
+An unset, missing, relative, old or non-Python selection fails rather than silently
+skipping acceptance. The gate reports the actual interpreter version. Semantic
+comparison keeps every fact field, ID, encoded value, diagnostic and array order;
+interpreter metadata is checked separately and is never stripped from real evidence.
+Fixture expectations are reviewed code, not automatically regenerated goldens.
+
+This foundation does **not** establish full Python parity or native-parser safety.
+The next increment is a private captured-byte Tree-sitter parse front-end with an
+exact reviewed grammar pin, notices and explicit resource/error handling. Native
+fact production, broader Python syntax, constructor forwarding, full FastAPI
+semantics, capability/identity design and default replacement remain later gates.
+
 ## Current extraction boundary
 
 ```sh

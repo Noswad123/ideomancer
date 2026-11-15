@@ -560,6 +560,12 @@ Use either pair independently to keep extensionless paths unambiguous. See the
 
 ### Validation tooling
 
+Scoped diagram usefulness and a bounded external explicit-configuration consumer
+slice have now been accepted. This closes the local P0 source/facts/presentation
+boundary, not general framework interpretation, runtime behavior or publication.
+Private specifications, source paths and acceptance artifacts remain outside this
+repository. P1 work proceeds through the [Python parity foundation](python-analysis.md#native-migration-parity-foundation).
+
 Native extraction tests use synthetic fixtures and compiled-in pinned grammars,
 without Node/compiler provisioning or tool-availability skips. CI keeps Python
 3.12, Rustfmt, Clippy, tests, package-policy/inventory checks, package verification,

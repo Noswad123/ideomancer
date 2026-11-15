@@ -28,18 +28,19 @@ by the engine. See [adapter ownership and migration](docs/adapters.md).
 See [ROADMAP.md](ROADMAP.md) for ownership boundaries, milestone status, and
 acceptance gates. Generic read-only facts and validated derived class relationships
 are implemented locally and exercised by independent external adapter conventions.
-Native JS/TS Tree-sitter implementation and local acceptance are complete, including
-parser closeout regressions and independent extracted-package consumer checks.
-The development baseline is committed; closeout changes still require review and
-checkpointing. Hosted platform validation and release review remain pending, not
-a validated release. See the [dated validation record](docs/javascript-typescript-analysis.md#validation-tooling).
-Python/Rust Tree-sitter are subsequent milestones; Rust analysis is not implemented.
-The next gate is release/history review and approved consumer acceptance—not more
-codebase-specific rules in the engine or a claim of complete application understanding.
+Native JS/TS Tree-sitter has scoped acceptance for source facts, useful rendered
+views and an external explicit-configuration consumer slice, in addition to the
+parser regressions and extracted-package checks. This is not blanket framework,
+runtime or release approval. See the [dated validation record](docs/javascript-typescript-analysis.md#validation-tooling).
+Python migration has started with a private captured-source parity foundation;
+the trusted Python >=3.12 AST helper remains the production default. Native Python
+and Rust analysis are not implemented. See the [Python parity gates](docs/python-analysis.md#native-migration-parity-foundation).
+Release/history review remains separate—not a reason to add codebase-specific
+rules to the engine or claim complete application understanding.
 See the [release/package checklist](docs/releasing.md) for the enforced crate
 inventory and the separate historical, asset, dependency, and publication gates.
 The [readiness review](docs/release-readiness.md) records hosted baseline evidence
-and the remaining owner decisions; current closeout changes still need their own CI run.
+and the remaining release/owner decisions; local acceptance is not release approval.
 This is a [source-only fresh baseline](docs/lineage.md), not a continuation of
 prior Git ancestry or a claim that previously distributed copies were erased.
 
