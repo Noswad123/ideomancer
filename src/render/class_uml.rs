@@ -21,6 +21,7 @@ pub struct Bundle {
     pub diagrams: Vec<Diagram>,
     pub legend: Value,
     pub html: String,
+    pub source_html: String,
 }
 
 // Encode source punctuation as Mermaid entities, including syntax meaningful in
@@ -748,6 +749,7 @@ fn normalize_sources(
     Ok(())
 }
 
+#[cfg(test)]
 pub fn build(
     catalog: &Catalog,
     evidence: &Evidence,
@@ -756,27 +758,40 @@ pub fn build(
     build_augmented(catalog, evidence, selection, None)
 }
 
-pub(crate) fn build_augmented(
+struct Model {
+    entries: Vec<Value>,
+    relations: Vec<Value>,
+    class_ids: BTreeMap<String, String>,
+    scan_warnings: Vec<String>,
+}
+
+// Typed facts share validation and target resolution, not UML members or UI.
+pub(crate) fn relationships(catalog: &Catalog, evidence: &Evidence) -> Result<Vec<Value>, String> {
+    Ok(prepare_model(catalog, evidence, None, false)?.relations)
+}
+
+fn prepare_model(
     catalog: &Catalog,
     evidence: &Evidence,
     selection: Option<&Page>,
-    augmentation: Option<&crate::extensions::ValidatedClaimsRef>,
-) -> Result<Bundle, String> {
-    // This performs exact fresh-catalog grounding, full provenance and JS Index
-    // validation once. Its inventory UI is deliberately not part of this bundle.
-    let semantic = super::class_overview::build(catalog, evidence)?.legend;
-    let mut scan_warnings: Vec<String> = semantic["warnings"].as_array().into_iter().flatten()
-        .filter_map(Value::as_str)
-        .filter(|s| !s.starts_with("JavaScript members use explicit owner IDs"))
-        .map(|s| if selection.is_some() {s.replace("No render-time exclusions are applied: every class already in the catalog is listed.","Selected-class coverage is reported explicitly; this is not an all-catalog selection.")} else {s.to_string()}).collect();
-    if evidence.is_javascript()
-        && !crate::javascript::supports_class_relations(&evidence.extractor_version)
-    {
-        scan_warnings.push("Legacy JavaScript evidence has no versioned class relationship capability; declared bases remain boundaries. Rediscover to obtain lexical inheritance and supplied-parameter dependency facts.".into());
-    }
-    let all = semantic["entries"]
-        .as_array()
-        .ok_or("missing class semantic entries")?;
+    members: bool,
+) -> Result<Model, String> {
+    prepare_model_with_budget(
+        catalog,
+        evidence,
+        selection,
+        members,
+        &mut super::source_view::WorkingBudget::default(),
+    )
+}
+
+fn prepare_model_with_budget(
+    catalog: &Catalog,
+    evidence: &Evidence,
+    selection: Option<&Page>,
+    members: bool,
+    budget: &mut super::source_view::WorkingBudget,
+) -> Result<Model, String> {
     let mut selected = BTreeSet::new();
     if let Some(page) = selection {
         if !(1..=30).contains(&page.items.len())
@@ -803,13 +818,26 @@ pub(crate) fn build_augmented(
             }
         }
     } else {
-        selected.extend(all.iter().map(|e| e["id"].as_str().unwrap()));
+        selected.extend(
+            catalog
+                .items
+                .iter()
+                .filter(|i| i.kind == Kind::Class)
+                .map(|i| i.id.as_str()),
+        );
     }
-    let mut entries: Vec<Value> = all
-        .iter()
-        .filter(|e| selected.contains(e["id"].as_str().unwrap()))
-        .cloned()
-        .collect();
+    let semantic =
+        super::class_overview::semantic_model(catalog, evidence, Some(&selected), budget, members)?;
+    let mut scan_warnings: Vec<String> = semantic.warnings.iter()
+        .filter(|s| !s.starts_with("JavaScript members use explicit owner IDs"))
+        .map(|s| if selection.is_some() {s.replace("No render-time exclusions are applied: every class already in the catalog is listed.","Selected-class coverage is reported explicitly; this is not an all-catalog selection.")} else {s.to_string()}).collect();
+    if evidence.is_javascript()
+        && !crate::javascript::supports_class_relations(&evidence.extractor_version)
+    {
+        scan_warnings.push("Legacy JavaScript evidence has no versioned class relationship capability; declared bases remain boundaries. Rediscover to obtain lexical inheritance and supplied-parameter dependency facts.".into());
+    }
+    let all = semantic.class_ids;
+    let mut entries = semantic.entries;
     entries.sort_by_key(|e| {
         (
             e["folder"].as_str().unwrap().to_string(),
@@ -822,7 +850,7 @@ pub(crate) fn build_augmented(
     let by_id: BTreeMap<_, _> = evidence.facts.iter().map(|f| (f.id.as_str(), f)).collect();
     let fact_classes: BTreeMap<_, _> = all
         .iter()
-        .map(|e| (e["factId"].as_str().unwrap(), e["id"].as_str().unwrap()))
+        .map(|(fact, id)| (fact.as_str(), id.as_str()))
         .collect();
     let mut relations = Vec::new();
     let mut validated = Vec::new();
@@ -891,17 +919,29 @@ pub(crate) fn build_augmented(
                 }
                 r["resolution"] = json!({"policy":"selected-relative-classes-1","status":status,"reason":reason,"snapshotInventoryDependency":"whole saved selected-file module inventory"});
             }
+            // Validate and resolve globally, but retain only selected owners' proofs.
+            let class_id = r["classFactId"]
+                .as_str()
+                .and_then(|id| fact_classes.get(id))
+                .ok_or("class relationship owner is not in the grounded inventory")?;
+            if !selected.contains(*class_id) {
+                continue;
+            }
+            if !members {
+                r.as_object_mut().unwrap().remove("sourceRefs");
+            }
+            budget.replace(0, &r)?;
             validated.push(r);
         }
     }
-    for (i, e) in entries.iter_mut().enumerate() {
-        e["diagramId"] = json!(format!("C{:03}", i + 1));
+    for e in &mut entries {
+        let mut entry_charge = super::source_view::WorkingBudget::size(e)?;
         let receipts: Vec<_> = validated
             .iter()
             .filter(|r| r["classFactId"] == e["factId"])
             .collect();
         for r in &receipts {
-            if r["relationship"] == "stores_parameter" {
+            if members && r["relationship"] == "stores_parameter" {
                 let field = r["memberName"].as_str().unwrap();
                 if !e["attributes"]
                     .as_array()
@@ -940,6 +980,7 @@ pub(crate) fn build_augmented(
                     }
                 }
             }
+            entry_charge = budget.replace(entry_charge, e)?;
             let target = r["targetFactId"]
                 .as_str()
                 .and_then(|f| fact_classes.get(f))
@@ -947,6 +988,7 @@ pub(crate) fn build_augmented(
             let mut r = (*r).clone();
             r["classId"] = e["id"].clone();
             r["targetClassId"] = json!(target);
+            budget.replace(0, &r)?;
             relations.push(r);
         }
         for base in e["declaredBases"].as_array().unwrap() {
@@ -976,8 +1018,57 @@ pub(crate) fn build_augmented(
                 scan_warnings.push(format!("Ambiguous declaration-base ownership at {}:{}-{}; fallback base {} omitted for {}. Class-specific relation receipts remain authoritative.",base_fact.path,base_fact.line,base_fact.end_line,base_fact.id,e["factId"].as_str().unwrap()));
                 continue;
             }
-            relations.push(json!({"siteFactId":base_fact.id,"classId":e["id"],"classFactId":e["factId"],"ownerFactId":e["factId"],"relationship":"extends","expression":expression,"targetClassId":base["targetClassId"],"bindingKind":"unresolved","bindingGuardFactId":null,"memberName":null,"declaredType":null,"stableBinding":false,"sourceFactIds":base["sourceFactIds"],"sourceRefs":base["sourceRefs"]}));
+            let mut r = json!({"siteFactId":base_fact.id,"classId":e["id"],"classFactId":e["factId"],"ownerFactId":e["factId"],"relationship":"extends","expression":expression,"targetClassId":base["targetClassId"],"bindingKind":"unresolved","bindingGuardFactId":null,"memberName":null,"declaredType":null,"stableBinding":false,"sourceFactIds":base["sourceFactIds"]});
+            if members {
+                r["sourceRefs"] = base["sourceRefs"].clone();
+            }
+            budget.replace(0, &r)?;
+            relations.push(r);
         }
+    }
+    sort_relations(&mut relations, &by_id);
+    Ok(Model {
+        entries,
+        relations,
+        class_ids: all,
+        scan_warnings,
+    })
+}
+
+fn sort_relations(relations: &mut [Value], by_id: &BTreeMap<&str, &Fact>) {
+    relations.sort_by_key(|r| {
+        (
+            match r["relationship"].as_str() {
+                Some("extends") => 0,
+                Some("stores_parameter") => 1,
+                Some("creates") => 2,
+                _ => 3,
+            },
+            r["classId"].as_str().unwrap_or("").to_string(),
+            r["sourceFactIds"][0]
+                .as_str()
+                .and_then(|id| by_id.get(id))
+                .map_or(usize::MAX, |f| f.line),
+            r["expression"].as_str().unwrap_or("").to_string(),
+        )
+    });
+}
+
+pub(crate) fn build_augmented(
+    catalog: &Catalog,
+    evidence: &Evidence,
+    selection: Option<&Page>,
+    augmentation: Option<&crate::extensions::ValidatedClaimsRef>,
+) -> Result<Bundle, String> {
+    let Model {
+        mut entries,
+        mut relations,
+        class_ids: all,
+        scan_warnings,
+    } = prepare_model(catalog, evidence, selection, true)?;
+    let by_id: BTreeMap<_, _> = evidence.facts.iter().map(|f| (f.id.as_str(), f)).collect();
+    for (i, e) in entries.iter_mut().enumerate() {
+        e["diagramId"] = json!(format!("C{:03}", i + 1));
         e["fieldCount"] = json!(e["attributes"].as_array().unwrap().len());
         for (index, field) in e["attributes"]
             .as_array_mut()
@@ -1122,19 +1213,7 @@ pub(crate) fn build_augmented(
     }
     // Prefer bases and storage/construction over incidental lexical uses when a
     // single high-fan-out class exceeds the display budget.
-    relations.sort_by_key(|r| {
-        (
-            match r["relationship"].as_str() {
-                Some("extends") => 0,
-                Some("stores_parameter") => 1,
-                Some("creates") => 2,
-                _ => 3,
-            },
-            r["classId"].as_str().unwrap_or("").to_string(),
-            r["sourceRefs"][0]["line"].as_u64().unwrap_or(u64::MAX),
-            r["expression"].as_str().unwrap_or("").to_string(),
-        )
-    });
+    sort_relations(&mut relations, &by_id);
     // Packing and drawing share boundary identities. Preserve small file sets
     // when they fit, but split dense sets before omitting avoidable relations.
     let selected_ids: BTreeSet<_> = entries.iter().map(|e| e["id"].as_str().unwrap()).collect();
@@ -1300,9 +1379,11 @@ pub(crate) fn build_augmented(
                     }
                     let bid = format!("B{:03}", boundaries.len() + 1);
                     let boundary_label = if let Some(tid) = target {
-                        all.iter()
-                            .find(|e| e["id"] == tid)
-                            .map(name)
+                        catalog
+                            .items
+                            .iter()
+                            .find(|e| e.kind == Kind::Class && e.id == tid)
+                            .map(|e| name(&json!({"symbol":e.symbol,"path":e.path})))
                             .unwrap_or_else(|| r["expression"].as_str().unwrap().into())
                     } else {
                         r["expression"].as_str().unwrap().to_string()
@@ -1442,24 +1523,38 @@ pub(crate) fn build_augmented(
         ));
     }
     body.push_str("</ul></nav>");
+    let mut source_body = body.clone();
+    if diagrams.is_empty() {
+        source_body.push_str("<p><strong>Source-only: no image generated.</strong> No diagram groups in this selection.</p>");
+    }
     for (d, g) in diagrams.iter().zip(&groups) {
-        body.push_str(&format!("<section id=\"{}\"><h2>{}</h2><p>{} home classes; {} modeled relations shown by {} UML arrows / {} projected as fields ({} visible, {} hidden by the 8-field-per-class image cap) / {} relation records omitted from arrows by image layout caps. Hidden field projections are a subset of projected fields, not additional modeled relations. All fields and relations remain in details and JSON.</p><p><a href=\"{}.mmd\">Mermaid source</a> | <a href=\"{}.svg\">SVG image</a></p>",d.id,html_text(&d.title),g["homeClassIds"].as_array().unwrap().len(),g["relationCounts"]["shown"],g["drawnEdges"].as_array().unwrap().len(),g["relationCounts"]["fields"],g["relationCounts"]["fieldsVisible"],g["relationCounts"]["fieldsHidden"],g["relationCounts"]["omitted"],d.id,d.id));
-        body.push_str(&viewer::diagram_for(
+        let mut section = format!("<section id=\"{}\"><h2>{}</h2><p>{} home classes; {} modeled relations shown by {} UML arrows / {} projected as fields ({} visible, {} hidden by the 8-field-per-class image cap) / {} relation records omitted from arrows by image layout caps. Hidden field projections are a subset of projected fields, not additional modeled relations. All fields and relations remain in details and JSON.</p>",d.id,html_text(&d.title),g["homeClassIds"].as_array().unwrap().len(),g["relationCounts"]["shown"],g["drawnEdges"].as_array().unwrap().len(),g["relationCounts"]["fields"],g["relationCounts"]["fieldsVisible"],g["relationCounts"]["fieldsHidden"],g["relationCounts"]["omitted"]);
+        body.push_str(&section);
+        source_body.push_str(&section);
+        body.push_str(&viewer::Presentation::Rendered.diagram(
             &d.title,
             "Source-grounded UML. Use class details when the image is unavailable.",
-            &format!("{}.svg", d.id),
             &d.id,
         )?);
+        source_body.push_str(&viewer::Presentation::SourceOnly.diagram(
+            &d.title,
+            "Source-grounded UML. Full members, relations and proof references remain below.",
+            &d.id,
+        )?);
+        section.clear();
         for c in g["contextNodes"].as_array().unwrap() {
             let e = &entries[entry_by_id[c["classId"].as_str().unwrap()]];
-            body.push_str(&format!(
+            section.push_str(&format!(
                 "<p>Context: {}. <a href=\"#{}\">Home group</a>.</p>",
                 html_text(&name(e)),
                 c["homeGroupId"].as_str().unwrap()
             ));
         }
-        body.push_str("</section>");
+        section.push_str("</section>");
+        body.push_str(&section);
+        source_body.push_str(&section);
     }
+    let details_start = body.len();
     body.push_str("<h2>Class Index and Full Details</h2>");
     body.push_str("<p>Storage-only observations are represented as fields, not layout omissions or claims of no dependency. A parameter ? means optional or defaulted; default values are intentionally absent. Constructor assignments are observations, not definite initialization or composition.</p>");
     if entries.is_empty() {
@@ -1533,7 +1628,7 @@ pub(crate) fn build_augmented(
         }
         body.push_str("</ul></details>");
         if body.len() > MAX_BYTES {
-            return Err(LIMIT.into());
+            return Err(format!("{LIMIT} (HTML body: {} bytes, limit: {MAX_BYTES} bytes). Select a smaller class entry or page.", body.len()));
         }
     }
     body.push_str("<h2>Snapshot Boundaries</h2><ul>");
@@ -1552,6 +1647,8 @@ pub(crate) fn build_augmented(
         "</ul><p><a href=\"legend.json\">Complete metadata and all proof references</a>. The legend stores full citations once in <code>proofSources</code>, keyed by fact ID. Each <code>sourceRefs</code> integer indexes that record's <code>sourceFactIds</code>; resolve the resulting fact ID through <code>proofSources</code> for its complete citation.</p>",
     );
     let html = viewer::document(title, &body);
+    source_body.push_str(&body[details_start..]);
+    let source_html = viewer::Presentation::SourceOnly.document(title, &source_body);
     let mut sources = BTreeMap::new();
     normalize_sources(&mut legend, &mut sources)?;
     if let Some(claims) = augmentation {
@@ -1567,14 +1664,15 @@ pub(crate) fn build_augmented(
         .map_err(|e| e.to_string())?
         .len();
     let mermaid_bytes = diagrams.iter().map(|d| d.mermaid.len()).sum::<usize>();
-    let bytes = html.len() + legend_bytes + mermaid_bytes;
+    let bytes = html.len().max(source_html.len()) + legend_bytes + mermaid_bytes;
     if bytes > MAX_BYTES {
-        return Err(format!("{LIMIT} (HTML: {}, legend: {legend_bytes}, Mermaid: {mermaid_bytes}, total: {bytes}, limit: {MAX_BYTES} bytes; legend entries: {}, relationships: {}, proofSources: {})", html.len(), serde_json::to_vec_pretty(&legend["entries"]).map_err(|e|e.to_string())?.len(),serde_json::to_vec_pretty(&legend["relationships"]).map_err(|e|e.to_string())?.len(),serde_json::to_vec_pretty(&legend["proofSources"]).map_err(|e|e.to_string())?.len()));
+        return Err(format!("{LIMIT} (HTML: {}, legend: {legend_bytes}, Mermaid: {mermaid_bytes}, total: {bytes}, limit: {MAX_BYTES} bytes; legend entries: {}, relationships: {}, proofSources: {}). Select a smaller class entry or page.", html.len(), serde_json::to_vec_pretty(&legend["entries"]).map_err(|e|e.to_string())?.len(),serde_json::to_vec_pretty(&legend["relationships"]).map_err(|e|e.to_string())?.len(),serde_json::to_vec_pretty(&legend["proofSources"]).map_err(|e|e.to_string())?.len()));
     }
     Ok(Bundle {
         diagrams,
         legend,
         html,
+        source_html,
     })
 }
 
@@ -1662,6 +1760,223 @@ mod tests {
 
     fn bundle(e: &Evidence) -> Bundle {
         build(&crate::catalog::build(e, "/source").unwrap(), e, None).unwrap()
+    }
+
+    fn selected_page(catalog: &Catalog, fact_id: &str) -> Page {
+        let mut page = crate::catalog::page(
+            catalog,
+            &crate::catalog::Filter {
+                kind: Some(Kind::Class),
+                limit: 30,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        page.items.retain(|i| i.fact_id == fact_id);
+        assert_eq!(page.items.len(), 1);
+        page.matched_items = 1;
+        page
+    }
+
+    #[test]
+    fn focus_discards_unselected_relation_work_after_global_validation() {
+        use super::super::source_view::WorkingBudget;
+        let mut e = member_fixture();
+        let template = e.facts.iter().find(|f| f.id == "inherit").unwrap();
+        let template = serde_json::to_value(template).unwrap();
+        for n in 0..64 {
+            let mut receipt: Fact = serde_json::from_value(template.clone()).unwrap();
+            receipt.id = format!("unselected-relation-{n:03}");
+            e.facts.push(receipt);
+        }
+        let c = crate::catalog::build(&e, "/source").unwrap();
+        let page = selected_page(&c, "parent");
+        let limit = 32 * 1024;
+        // All receipts are valid, but retaining them exceeds this injected budget.
+        let all = prepare_model(&c, &e, None, true).unwrap();
+        assert!(all.relations.len() >= 64);
+        assert!(
+            all.relations
+                .iter()
+                .map(|r| WorkingBudget::size(r).unwrap())
+                .sum::<usize>()
+                > limit
+        );
+        for members in [true, false] {
+            let error = prepare_model_with_budget(
+                &c,
+                &e,
+                None,
+                members,
+                &mut WorkingBudget::limited(limit),
+            )
+            .err()
+            .unwrap();
+            assert!(error.contains("working budget exceeded"), "{error}");
+            let focused = prepare_model_with_budget(
+                &c,
+                &e,
+                Some(&page),
+                members,
+                &mut WorkingBudget::limited(limit),
+            )
+            .unwrap();
+            assert_eq!(focused.entries.len(), 1);
+            assert!(focused.relations.is_empty());
+            assert_eq!(focused.class_ids.len(), 2);
+        }
+        let rendered = build(&c, &e, Some(&page)).unwrap();
+        assert_eq!(rendered.legend["coverage"]["homeClasses"], 1);
+        assert_eq!(rendered.legend["coverage"]["modeledRelations"], 0);
+        assert!(rendered.diagrams[0].mermaid.contains("Parent"));
+
+        edit(
+            &mut e,
+            "unselected-relation-063",
+            "targetFactId",
+            json!("factory"),
+        );
+        for members in [true, false] {
+            let error = prepare_model_with_budget(
+                &c,
+                &e,
+                Some(&page),
+                members,
+                &mut WorkingBudget::limited(limit),
+            )
+            .err()
+            .unwrap();
+            assert!(
+                error.contains("invalid JavaScript class relation proof"),
+                "{error}"
+            );
+        }
+        assert!(build(&c, &e, Some(&page)).is_err());
+    }
+
+    #[test]
+    fn focused_semantics_do_not_render_or_materialize_oversized_unselected_members() {
+        use crate::js_focus::tests::add;
+        let mut e = member_fixture();
+        for n in 0..1200 {
+            add(
+                &mut e,
+                &format!("stress-field-{n}"),
+                "js_member",
+                "app.factory.Child.state",
+                24,
+                24,
+                json!({"ownerFactId":"child","memberKind":"field","name":format!("state{n}"),"visibility":"public","static":false,"type":"T".repeat(4096)}),
+            );
+        }
+        let c = crate::catalog::build(&e, "/source").unwrap();
+        let error = super::super::class_overview::build(&c, &e).err().unwrap();
+        assert!(error.contains("combined 8 MiB"));
+        let error = build(&c, &e, None).err().unwrap();
+        assert!(
+            error.contains("class UML exceeds") && error.contains("smaller class entry or page")
+        );
+
+        let page = selected_page(&c, "parent");
+        let ids = page.items.iter().map(|i| i.id.as_str()).collect();
+        let model = super::super::class_overview::semantics(&c, &e, Some(&ids)).unwrap();
+        assert_eq!(model.class_ids.len(), 2);
+        assert_eq!(model.entries.len(), 1);
+        assert_eq!(model.entries[0]["factId"], "parent");
+        assert!(model.entries[0]["attributes"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        let b = build(&c, &e, Some(&page)).unwrap();
+        assert_eq!(b.legend["coverage"]["catalogClasses"], 2);
+        assert_eq!(b.legend["coverage"]["selectedClasses"], 1);
+        assert!(!b.html.contains("state1199"));
+        assert!(
+            b.html.len()
+                + serde_json::to_vec_pretty(&b.legend).unwrap().len()
+                + b.diagrams.iter().map(|d| d.mermaid.len()).sum::<usize>()
+                <= MAX_BYTES
+        );
+        let unknown = BTreeSet::from(["class_unknown"]);
+        assert!(super::super::class_overview::semantics(&c, &e, Some(&unknown)).is_err());
+    }
+
+    #[test]
+    fn unselected_duplicate_or_orphan_signature_proofs_fail_closed() {
+        for mutation in 0..3 {
+            let mut e = member_fixture();
+            if mutation == 0 {
+                let original = e.facts.iter().find(|f| f.id == "ctor-signature").unwrap();
+                let mut duplicate: Fact = serde_json::from_value(json!(original)).unwrap();
+                duplicate.id = "duplicate-signature".into();
+                e.facts.push(duplicate);
+            } else if mutation == 1 {
+                e.facts.retain(|f| f.id != "ctor-member");
+            } else {
+                let original = e.facts.iter().find(|f| f.id == "ctor-signature").unwrap();
+                let mut conflict: Fact = serde_json::from_value(json!(original)).unwrap();
+                conflict.value = "{}".into();
+                e.facts.push(conflict);
+            }
+            let c = crate::catalog::build(&member_fixture(), "/source").unwrap();
+            let page = selected_page(&c, "parent");
+            assert!(
+                build(&c, &e, Some(&page)).is_err(),
+                "accepted mutation {mutation}"
+            );
+        }
+    }
+
+    #[test]
+    fn member_work_guard_accounts_signature_and_constructor_enrichment() {
+        use super::super::source_view::{javascript_member_inventory, WorkingBudget};
+        let e = member_fixture();
+        let by_id: BTreeMap<_, _> = e.facts.iter().map(|f| (f.id.as_str(), f)).collect();
+        let js = crate::js_focus::Index::new(by_id.values().copied().collect()).unwrap();
+        let selected = BTreeSet::from(["child"]);
+        let base: BTreeMap<_, _> = by_id
+            .iter()
+            .filter(|(_, f)| {
+                !matches!(
+                    f.kind.as_str(),
+                    "js_callable_signature" | "js_constructor_field"
+                )
+            })
+            .map(|(id, f)| (*id, *f))
+            .collect();
+        let members =
+            javascript_member_inventory(&js, &base, &selected, &mut WorkingBudget::default())
+                .unwrap();
+        let base_bytes: usize = members
+            .values()
+            .flatten()
+            .map(|m| WorkingBudget::size(m).unwrap())
+            .sum();
+        let base_count = members.values().map(Vec::len).sum::<usize>();
+        for kind in ["js_callable_signature", "js_constructor_field"] {
+            let mut receipts = base.clone();
+            receipts.extend(
+                by_id
+                    .iter()
+                    .filter(|(_, f)| {
+                        f.kind == kind && (kind != "js_constructor_field" || f.id == "field-1")
+                    })
+                    .map(|(id, f)| (*id, *f)),
+            );
+            // The existing constructor field's observation fits; its additional
+            // full proof citations must still be charged as they are appended.
+            let allowance = if kind == "js_constructor_field" {
+                256
+            } else {
+                0
+            };
+            let mut budget = WorkingBudget::limited(base_bytes + allowance);
+            let error = javascript_member_inventory(&js, &receipts, &selected, &mut budget)
+                .err()
+                .unwrap();
+            assert!(error.contains("working budget exceeded"), "{kind}: {error}");
+            assert_eq!(budget.projected_members, base_count);
+        }
     }
 
     fn proof_refs<'a>(legend: &'a Value, record: &Value) -> Vec<&'a Value> {
@@ -1774,7 +2089,7 @@ mod tests {
         let template: Fact =
             serde_json::from_value(json!(e.facts.iter().find(|f| f.id == "field-0").unwrap()))
                 .unwrap();
-        for i in 0..400 {
+        for i in 0..1200 {
             let mut f: Fact = serde_json::from_value(json!(template)).unwrap();
             f.id = format!("large-field-{i}");
             let mut v: Value = serde_json::from_str(&f.value).unwrap();
@@ -1782,15 +2097,17 @@ mod tests {
             f.value = v.to_string();
             e.facts.push(f);
         }
-        let b = bundle(&e);
+        let c = crate::catalog::build(&e, "/source").unwrap();
+        assert!(super::super::class_overview::build(&c, &e).is_err());
+        let b = build(&c, &e, None).unwrap();
         let child = b.legend["entries"]
             .as_array()
             .unwrap()
             .iter()
             .find(|c| c["factId"] == "child")
             .unwrap();
-        assert_eq!(child["attributes"].as_array().unwrap().len(), 408);
-        for i in 0..400 {
+        assert_eq!(child["attributes"].as_array().unwrap().len(), 1208);
+        for i in 0..1200 {
             let field = child["attributes"]
                 .as_array()
                 .unwrap()
@@ -1811,7 +2128,7 @@ mod tests {
                 assert_eq!(b.legend["proofSources"][&id]["factId"], id);
             }
         }
-        assert!(b.html.contains("state399"));
+        assert!(b.html.contains("state1199"));
         assert!(b.html.contains("constructor(Dep?)"));
         assert!(!b.html.contains("&quot;parameters&quot;"));
         for method in child["methods"].as_array().unwrap() {
@@ -2822,6 +3139,11 @@ mod tests {
             edit(&mut e, id, key, value);
             let c = crate::catalog::build(&e, "/source").unwrap();
             assert!(build(&c, &e, None).is_err(), "accepted {id}.{key}");
+            let page = selected_page(&c, "parent");
+            assert!(
+                build(&c, &e, Some(&page)).is_err(),
+                "accepted unselected {id}.{key}"
+            );
         }
         let mut e = member_fixture();
         let f = e.facts.iter_mut().find(|f| f.id == "store").unwrap();

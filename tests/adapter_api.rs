@@ -1,6 +1,7 @@
 //! Public consumer contracts. All sources and claims are synthetic.
 use ideomancer_core::engine::v1::*;
 use serde_json::{json, Value};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
 fn fixture() -> (tempfile::TempDir, CatalogRef, FactsRef) {
@@ -273,10 +274,16 @@ fn javascript_factories_use_catalog_class_ids() {
 }
 
 fn javascript_fixture(source: &str) -> Option<(tempfile::TempDir, CatalogRef)> {
+    javascript_files(&[("factory.js", source)])
+}
+
+fn javascript_files(files: &[(&str, &str)]) -> Option<(tempfile::TempDir, CatalogRef)> {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("source");
     fs::create_dir(&root).unwrap();
-    fs::write(root.join("factory.js"), source).unwrap();
+    for (path, source) in files {
+        fs::write(root.join(path), source).unwrap();
+    }
     let discovered = discover(&DiscoverRequest {
         source_root: root,
         output_container: temp.path().join("catalogs"),
@@ -284,6 +291,315 @@ fn javascript_fixture(source: &str) -> Option<(tempfile::TempDir, CatalogRef)> {
     })
     .unwrap();
     Some((temp, open_catalog(discovered.catalog_directory).unwrap()))
+}
+
+fn assert_exported_citations(catalog: &CatalogRef, view: &FactsView) {
+    let mut required = BTreeSet::new();
+    for c in &view.classes {
+        required.insert(c.declaration_id.as_str());
+    }
+    for f in &view.factories {
+        required.extend([f.id.as_str(), f.callable_id.as_str()]);
+        required.extend(
+            f.evidence_ids
+                .iter()
+                .chain(&f.return_fact_ids)
+                .map(String::as_str),
+        );
+        for p in &f.parameters {
+            required.insert(p.id.as_str());
+            required.extend(p.binding_id.as_deref());
+        }
+        assert!(f
+            .returned_class_id
+            .as_ref()
+            .is_none_or(|id| view.classes.iter().any(|c| &c.id == id)));
+    }
+    for s in &view.relationship_sites {
+        required.extend([s.id.as_str(), s.owner_id.as_str()]);
+        required.extend(s.binding_id.as_deref());
+        required.extend(s.evidence_ids.iter().map(String::as_str));
+        assert!(view.classes.iter().any(|c| c.id == s.source_class_id));
+        assert!(s
+            .target_class_id
+            .as_ref()
+            .is_none_or(|id| view.classes.iter().any(|c| &c.id == id)));
+    }
+    assert_eq!(required, view.sources.keys().map(String::as_str).collect());
+    let evidence: Value =
+        serde_json::from_slice(&fs::read(catalog.directory().join("evidence.json")).unwrap())
+            .unwrap();
+    let by_id: BTreeMap<_, _> = evidence["facts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| (f["id"].as_str().unwrap(), f))
+        .collect();
+    for (id, citation) in &view.sources {
+        let f = by_id[id.as_str()];
+        assert_eq!(
+            serde_json::to_value(citation).unwrap(),
+            json!({"path":f["path"],"line":f["line"],"endLine":f["endLine"],"kind":f["kind"],"symbol":f["symbol"]})
+        );
+    }
+}
+
+#[test]
+fn typed_facts_do_not_require_oversized_member_documents() {
+    let mut files = vec![("factory.js".to_string(), "module.exports = function(Base) { class Target {} class Product extends Base {} return Product; };".to_string())];
+    for n in 0..8 {
+        let mut source = format!("export class Bulk{n} {{\n");
+        for field in 0..1000 {
+            source.push_str(&format!("state{field}: {};\n", "Declared".repeat(64)));
+        }
+        source.push_str("}\n");
+        files.push((format!("bulk{n}.ts"), source));
+    }
+    let files: Vec<_> = files
+        .iter()
+        .map(|(p, s)| (p.as_str(), s.as_str()))
+        .collect();
+    let (_temp, catalog) = javascript_files(&files).unwrap();
+    let error =
+        class_diagrams(&catalog, &ClassSelection::All, &RenderMode::SourceOnly).unwrap_err();
+    assert!(error.message.contains("class UML exceeds"), "{error}");
+    fs::remove_dir_all(catalog.source_root()).unwrap();
+    let facts = open_facts(&catalog, &FactsRequest::default()).unwrap();
+    assert_exported_citations(&catalog, facts.view());
+    assert!(serde_json::to_vec(facts.view()).unwrap().len() < 8 * 1024 * 1024);
+    assert!(!catalog.directory().join("views").exists());
+    validate_claims(&facts, &[set(&facts)]).unwrap();
+    assert_eq!(
+        facts.view(),
+        open_facts(&catalog, &FactsRequest::default())
+            .unwrap()
+            .view()
+    );
+    rewrite_saved(&catalog, |evidence, _| {
+        for f in evidence["facts"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .filter(|f| f["kind"] == "js_member")
+        {
+            let mut raw: Value = serde_json::from_str(f["value"].as_str().unwrap()).unwrap();
+            if raw["memberKind"] == "field" {
+                raw["type"] = json!("WideType".repeat(256));
+                f["value"] = json!(raw.to_string());
+            }
+        }
+    });
+    let error =
+        class_diagrams(&catalog, &ClassSelection::All, &RenderMode::SourceOnly).unwrap_err();
+    assert!(error.message.contains("working budget exceeded"), "{error}");
+    let enlarged = open_facts(&catalog, &FactsRequest::default()).unwrap();
+    assert_eq!(enlarged.view().sources, facts.view().sources);
+    assert_ne!(
+        enlarged.view().identity.facts_hash,
+        facts.view().identity.facts_hash
+    );
+}
+
+#[test]
+fn unrelated_call_flood_is_validated_but_not_exported_and_hashes_are_deterministic() {
+    let (_temp, catalog) = javascript_fixture("module.exports = function(Base) { class Target {} class Product extends Base { constructor(value) { this.state = value; } } return Product; };").unwrap();
+    let initial = open_facts(&catalog, &FactsRequest::default()).unwrap();
+    rewrite_saved(&catalog, |evidence, _| {
+        let facts = evidence["facts"].as_array_mut().unwrap();
+        let module = facts
+            .iter()
+            .find(|f| f["kind"] == "module")
+            .unwrap()
+            .clone();
+        for n in 0..4500 {
+            let id = format!("unrelated-call-{n}");
+            let mut call = module.clone();
+            call["id"] = json!(id);
+            call["kind"] = json!("call");
+            call["symbol"] = json!(format!("app.{}", "neutral_".repeat(140)));
+            call["value"] = json!("external()");
+            facts.push(call.clone());
+            call["id"] = json!(format!("unrelated-metadata-{n}"));
+            call["kind"] = json!("js_call");
+            call["value"] = json!(json!({"callFactId":id,"ownerFactId":module["id"],"callee":"external","targetFactId":null,"supportingFactIds":[],"lookupScopeIds":[]}).to_string());
+            facts.push(call);
+        }
+        // Citation symbols alone would exceed the public facts-document cap.
+        assert!(
+            facts
+                .iter()
+                .map(|f| f["symbol"].as_str().unwrap().len())
+                .sum::<usize>()
+                > 8 * 1024 * 1024
+        );
+    });
+    assert!(validate_claims(&initial, &[set(&initial)]).is_err());
+    let facts = open_facts(&catalog, &FactsRequest::default()).unwrap();
+    assert_eq!(facts.view().sources, initial.view().sources);
+    assert_ne!(
+        facts.view().identity.facts_hash,
+        initial.view().identity.facts_hash
+    );
+    assert_exported_citations(&catalog, facts.view());
+    let mut arbitrary = set(&facts);
+    arbitrary.claims[0]
+        .evidence_ids
+        .push("unrelated-call-0".into());
+    assert!(validate_claims(&facts, &[arbitrary]).is_err());
+    let valid = set(&facts);
+    validate_claims(&facts, std::slice::from_ref(&valid)).unwrap();
+    rewrite_saved(&catalog, |evidence, _| {
+        evidence["facts"].as_array_mut().unwrap().reverse()
+    });
+    let permuted = open_facts(&catalog, &FactsRequest::default()).unwrap();
+    assert_eq!(facts.view(), permuted.view());
+    // Raw saved-store changes still invalidate existing handles, even permutations.
+    assert!(validate_claims(&facts, &[valid]).is_err());
+    rewrite_saved(&catalog, |evidence, _| {
+        let call = evidence["facts"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|f| f["id"] == "unrelated-call-0")
+            .unwrap();
+        call["value"] = json!("different saved call metadata");
+    });
+    let changed = open_facts(&catalog, &FactsRequest::default()).unwrap();
+    assert_eq!(changed.view().sources, permuted.view().sources);
+    assert_ne!(
+        changed.view().identity.facts_hash,
+        permuted.view().identity.facts_hash
+    );
+}
+
+#[test]
+fn omitted_member_and_call_citations_do_not_skip_global_proof_validation() {
+    let source = "module.exports = function(Base) { class Target {} class Product extends Base {} return Product; }; class Auxiliary { constructor(value) { this.state = value; } run(input) { external(input); } }";
+    for mutation in [
+        "signature",
+        "duplicate_signature",
+        "constructor",
+        "call",
+        "span",
+        "duplicate_fact",
+    ] {
+        let (_temp, catalog) = javascript_fixture(source).unwrap();
+        let facts = open_facts(&catalog, &FactsRequest::default()).unwrap();
+        assert_exported_citations(&catalog, facts.view());
+        rewrite_saved(&catalog, |evidence, _| {
+            let all = evidence["facts"].as_array_mut().unwrap();
+            let kind = match mutation {
+                "signature" | "duplicate_signature" => "js_callable_signature",
+                "constructor" => "js_constructor_field",
+                "call" => "js_call",
+                _ => "call",
+            };
+            let pos = all
+                .iter()
+                .position(|f| {
+                    f["kind"] == kind && f["symbol"].as_str().unwrap().contains("Auxiliary")
+                })
+                .unwrap();
+            assert!(!facts
+                .view()
+                .sources
+                .contains_key(all[pos]["id"].as_str().unwrap()));
+            if mutation == "duplicate_signature" || mutation == "duplicate_fact" {
+                let mut duplicate = all[pos].clone();
+                if mutation == "duplicate_signature" {
+                    duplicate["id"] = json!("duplicate-signature");
+                }
+                all.push(duplicate);
+            } else if mutation == "span" {
+                all[pos]["line"] = json!(0);
+            } else {
+                let mut raw: Value =
+                    serde_json::from_str(all[pos]["value"].as_str().unwrap()).unwrap();
+                match mutation {
+                    "signature" => raw["returnType"] = json!(false),
+                    "constructor" => raw["sourceType"] = json!("not allowed"),
+                    "call" => raw["supportingFactIds"] = json!(["missing-proof"]),
+                    _ => unreachable!(),
+                }
+                all[pos]["value"] = json!(raw.to_string());
+            }
+        });
+        assert!(
+            open_facts(&catalog, &FactsRequest::default()).is_err(),
+            "accepted {mutation}"
+        );
+    }
+}
+
+#[test]
+fn typed_relationship_targets_and_proofs_match_full_and_focused_uml() {
+    let (_python_temp, python, _) =
+        fixture_source("class Target: pass\nclass Child(Target): pass\n");
+    let (_js_temp, javascript) = javascript_files(&[
+        ("base.js", "export class Target {}"),
+        ("factory.js", "import { Target } from './base'; export function factory(Dependency) { return class Product extends Target { constructor(value) { super(); this.state = value; } make() { return new Target(); } run() { return Dependency(); } }; }"),
+    ]).unwrap();
+    for catalog in [&python, &javascript] {
+        let facts = open_facts(catalog, &FactsRequest::default()).unwrap();
+        assert_exported_citations(catalog, facts.view());
+        let child = facts
+            .view()
+            .classes
+            .iter()
+            .find(|c| c.name == "Child" || c.name == "Product")
+            .unwrap();
+        for selection in [
+            ClassSelection::All,
+            ClassSelection::Entry {
+                id: child.id.clone(),
+            },
+        ] {
+            let report = class_diagrams(catalog, &selection, &RenderMode::SourceOnly).unwrap();
+            let legend: Value = serde_json::from_slice(&fs::read(report.legend).unwrap()).unwrap();
+            for site in facts
+                .view()
+                .relationship_sites
+                .iter()
+                .filter(|s| selection == ClassSelection::All || s.source_class_id == child.id)
+            {
+                let r = legend["relationships"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|r| r["siteFactId"] == site.id)
+                    .unwrap();
+                assert_eq!(r["classId"], site.source_class_id);
+                assert_eq!(r["ownerFactId"], site.owner_id);
+                assert_eq!(r["targetClassId"], json!(site.target_class_id));
+                assert_eq!(r["sourceFactIds"], json!(site.evidence_ids));
+            }
+        }
+    }
+}
+
+#[test]
+fn genuinely_oversized_exported_facts_still_fail_the_eight_mib_cap() {
+    let (_temp, catalog, _) = fixture_source("class Widget: pass\n");
+    rewrite_saved(&catalog, |evidence, items| {
+        let symbol = format!("model.{}", "W".repeat(3 * 1024 * 1024));
+        evidence["facts"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|f| f["kind"] == "class")
+            .unwrap()["symbol"] = json!(symbol);
+        let class = items["items"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|i| i["kind"] == "class")
+            .unwrap();
+        class["symbol"] = json!(symbol);
+        class["label"] = json!(symbol);
+    });
+    let error = open_facts(&catalog, &FactsRequest::default()).unwrap_err();
+    assert_eq!(error.message, "Facts metadata exceeds 8 MiB");
+    assert!(!catalog.directory().join("views").exists());
 }
 
 // Re-sign synthetic metadata so regressions exercise grounding, not receipt tamper checks.

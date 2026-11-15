@@ -1238,6 +1238,9 @@ fn retained_input(
     files.sort_by_key(|f| (&f.path, &f.sha256));
     input["facts"] = json!(selected);
     input["files"] = json!(files);
+    if evidence.is_javascript() {
+        focus::project_diagnostics(&mut input, evidence, &paths);
+    }
     input["selection"]["includedFacts"] = json!(selected.len());
     input["selection"]["omittedFacts"] = json!(facts.len() - selected.len());
     if let Some(kinds) = input["selection"]["byKind"].as_object_mut() {
@@ -1251,6 +1254,7 @@ fn retained_input(
     input
 }
 
+#[cfg(test)]
 pub fn build(
     catalog: &Catalog,
     evidence: &Evidence,
@@ -1260,6 +1264,19 @@ pub fn build(
     hops: usize,
     max_facts: usize,
 ) -> Result<Documents, String> {
+    build_variants(catalog, evidence, item, view, spec, hops, max_facts)
+        .map(|(documents, _)| documents)
+}
+
+pub(crate) fn build_variants(
+    catalog: &Catalog,
+    evidence: &Evidence,
+    item: &Item,
+    view: &View,
+    spec: Option<&crate::openapi::Document>,
+    hops: usize,
+    max_facts: usize,
+) -> Result<(Documents, String), String> {
     let grounded = crate::catalog::build(evidence, &catalog.source_root)?;
     let selected = serde_json::to_value(item).map_err(|e| e.to_string())?;
     let is_api = item.kind == Kind::Api;
@@ -2205,6 +2222,11 @@ pub fn build(
     if js_services {
         legend["counts"]["renderedCallGroups"] = json!(rendered_call_groups);
     }
+    if let Some(summary) =
+        retained_input(&prepared.input, evidence, &facts, &retained).get("diagnosticSelection")
+    {
+        legend["diagnosticSelection"] = summary.clone();
+    }
     let details = serde_json::to_string_pretty(&legend).map_err(|e| e.to_string())?;
     let title = match (is_api, view) {
         (true, View::Network) => "Endpoint Network Candidates",
@@ -2250,15 +2272,28 @@ pub fn build(
     } else {
         "Callable source candidates"
     };
-    let html = super::viewer::document(title, &format!("<h1>{title}</h1><p>Static source candidates, not a runtime trace or activation order. Dashed targets are unverified. Keep source metadata local.</p><p>{unclassified_calls} unclassified calls are retained in the legend, not asserted as network traffic. {omitted_calls} service call sites omitted by presentation selection/limits, including {routine_calls} routine expressions.</p>{contract_section}{}{unresolved_section}<h2>Readable Diagram Source</h2><pre>{}</pre><h2>{citations_title}</h2><pre>{}</pre>",super::viewer::diagram(diagram_title, "Calls and target candidates are static evidence, not an execution trace. Source references remain outside this viewport."),html_text(&mermaid),html_text(&details)));
-    if mermaid.len().max(details.len()).max(html.len()) > 8 * 1024 * 1024 {
+    let make_html = |presentation: super::viewer::Presentation| -> Result<String, String> {
+        Ok(presentation.document(title, &format!("<h1>{title}</h1><p>Static source candidates, not a runtime trace or activation order. Dashed targets are unverified. Keep source metadata local.</p><p>{unclassified_calls} unclassified calls are retained in the legend, not asserted as network traffic. {omitted_calls} service call sites omitted by presentation selection/limits, including {routine_calls} routine expressions.</p>{contract_section}{}{unresolved_section}<h2>Readable Diagram Source</h2><pre>{}</pre><h2>{citations_title}</h2><pre>{}</pre>",presentation.diagram(diagram_title, "Calls and target candidates are static evidence, not an execution trace. Full source references remain below.", "diagram")?,html_text(&mermaid),html_text(&details))))
+    };
+    let html = make_html(super::viewer::Presentation::Rendered)?;
+    let source_html = make_html(super::viewer::Presentation::SourceOnly)?;
+    if mermaid
+        .len()
+        .max(details.len())
+        .max(html.len())
+        .max(source_html.len())
+        > 8 * 1024 * 1024
+    {
         return Err("Endpoint view exceeds the 8 MiB document limit".into());
     }
-    Ok(Documents {
-        mermaid,
-        legend,
-        html,
-    })
+    Ok((
+        Documents {
+            mermaid,
+            legend,
+            html,
+        },
+        source_html,
+    ))
 }
 
 #[cfg(test)]
@@ -2543,6 +2578,79 @@ mod tests {
             .is_empty());
     }
     use super::*;
+
+    #[test]
+    fn javascript_services_diagnostic_flood_and_restored_paths_are_fully_charged() {
+        let mut e = crate::js_focus::tests::source();
+        crate::js_focus::tests::metadata_flood(&mut e);
+        e.facts.push(Fact {
+            id: "unused-proof".into(),
+            kind: "module".into(),
+            symbol: "unused.unit000".into(),
+            path: "unused/unit000.ts".into(),
+            line: 1,
+            end_line: 1,
+            value: "unused.unit000".into(),
+        });
+        for complete in [true, false] {
+            e.complete = complete;
+            let c = crate::catalog::build(&e, "local").unwrap();
+            let item = c.items.iter().find(|i| i.fact_id == "run").unwrap();
+            let d = build(&c, &e, item, &View::Services, None, 2, 100).unwrap();
+            assert_eq!(d.legend["complete"], complete);
+            assert_eq!(d.legend["focus"]["links"].as_array().unwrap().len(), 1);
+            assert_eq!(d.legend["diagnosticSelection"]["omitted"], 64);
+            assert_eq!(d.legend["diagnosticSelection"]["snapshotId"], e.snapshot_id);
+            let cap = d.legend["limits"]["focusMaxBytes"].as_u64().unwrap() as usize;
+            let prepared = focus::prepare_with_byte_limit(
+                &e,
+                &FocusOptions {
+                    symbol: item.fact_id.clone(),
+                    hops: 2,
+                    max_facts: d.legend["limits"]["focusMaxFacts"].as_u64().unwrap() as usize,
+                },
+                cap,
+            )
+            .unwrap();
+            let facts: Vec<_> = {
+                let mut facts: Vec<_> = e.facts.iter().collect();
+                facts.sort_by_key(|f| (&f.path, &f.symbol, f.line, f.end_line, &f.kind, &f.id));
+                facts
+            };
+            let mut ids: BTreeSet<String> = d.legend["sourceRefs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["factId"].as_str().unwrap().into())
+                .collect();
+            for link in prepared.input["focus"]["links"].as_array().unwrap() {
+                for id in link["evidenceIds"].as_array().unwrap() {
+                    assert!(ids.contains(id.as_str().unwrap()));
+                }
+            }
+            let input = retained_input(&prepared.input, &e, &facts, &ids);
+            let bytes = serde_json::to_vec(&input).unwrap().len();
+            assert_eq!(d.legend["limits"]["retainedInputBytes"], bytes);
+            assert!(bytes <= crate::packet::MAX_INPUT_BYTES);
+            ids.insert("unused-proof".into());
+            let restored = retained_input(&prepared.input, &e, &facts, &ids);
+            assert_eq!(restored["diagnostics"].as_array().unwrap().len(), 4);
+            assert_eq!(restored["diagnosticSelection"]["included"], 4);
+            assert_eq!(restored["diagnosticSelection"]["omitted"], 63);
+            assert_eq!(
+                restored["diagnosticSelection"]["byCode"]["synthetic_boundary_0"],
+                json!({"total":35,"included":4,"omitted":31})
+            );
+            assert_eq!(restored["files"].as_array().unwrap().len(), 2);
+            assert!(serde_json::to_vec(&restored).unwrap().len() > bytes + 4096);
+            e.files.reverse();
+            e.facts.reverse();
+            e.diagnostics.reverse();
+            let repeat = build(&c, &e, item, &View::Services, None, 2, 100).unwrap();
+            assert_eq!(d.legend, repeat.legend);
+            assert_eq!(d.mermaid, repeat.mermaid);
+        }
+    }
 
     #[test]
     fn javascript_services_group_source_sites_with_complete_shared_proof() {
@@ -3793,7 +3901,10 @@ mod tests {
             );
         }
         for link in d.html.split("href=\"").skip(1) {
-            assert_eq!(link.split('"').next().unwrap(), "diagram.svg");
+            assert!(matches!(
+                link.split('"').next().unwrap(),
+                "diagram.svg" | "diagram.mmd"
+            ));
         }
         assert!(!d.mermaid.contains("server.example"));
         assert!(d.legend["contractMatch"]["basis"]

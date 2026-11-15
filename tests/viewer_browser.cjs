@@ -1,7 +1,7 @@
 "use strict";
 
 // Opt-in only: use an existing Puppeteer module and its already-installed Chrome.
-// Core: node tests/viewer_browser.cjs READY.html MISSING.html HOSTILE.html RESPONSIVE.html
+// Core: node tests/viewer_browser.cjs READY.html MISSING.html HOSTILE.html RESPONSIVE.html SOURCE.html
 // Smoke: node tests/viewer_browser.cjs --smoke GENERATED.html [GENERATED.html ...]
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -63,8 +63,8 @@ async function main() {
   const smoke = args[0] === "--smoke";
   if (smoke) args.shift();
   if (args[0] === "--") args.shift();
-  assert.ok(smoke ? args.length > 0 : args.length === 4,
-    "usage: viewer_browser.cjs READY.html MISSING.html HOSTILE.html RESPONSIVE.html | --smoke HTML ...");
+  assert.ok(smoke ? args.length > 0 : args.length === 5,
+    "usage: viewer_browser.cjs READY.html MISSING.html HOSTILE.html RESPONSIVE.html SOURCE.html | --smoke HTML ...");
   for (const file of args) assert.ok(fs.statSync(file).isFile(), `not a file: ${file}`);
   const executablePath = puppeteer.executablePath();
   assert.ok(fs.existsSync(executablePath), `Chrome must already be installed: ${executablePath}`);
@@ -131,6 +131,23 @@ async function main() {
       console.log(`PASS smoke ${file}`);
     }
   } else {
+    for (const javascript of [true, false]) {
+      const page = await browser.newPage();
+      const images = [];
+      page.on("request", request => {
+        if (request.resourceType() === "image" || /\.svg(?:$|[?#])/i.test(request.url())) images.push(request.url());
+      });
+      await page.setJavaScriptEnabled(javascript);
+      await page.goto(pathToFileURL(path.resolve(args[4])).href);
+      assert.match(await page.$eval("body", n => n.innerText), /Source-only: no image generated\./);
+      assert.equal(await page.$$eval("img, [data-viewer], [data-viewer-viewport], [data-viewer-toolbar], button, script", ns => ns.length), 0);
+      const source = await page.$eval('a[href$=".mmd"]', n => n.href);
+      await page.goto(source);
+      assert.match(await page.$eval("body", n => n.innerText), /flowchart LR/);
+      assert.deepEqual(images, []);
+      await page.close();
+    }
+    console.log("PASS source-only notice and usable Mermaid link, no viewer or image requests with JavaScript enabled and disabled");
     const page = await open(args[0], true, true);
     await ready(page);
     const initial = await metrics(page);

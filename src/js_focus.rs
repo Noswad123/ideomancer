@@ -603,14 +603,15 @@ pub fn prepare_with_byte_limit(
             })
             .collect();
         let a = index.facts[anchor];
-        let input = json!({"schemaVersion":evidence.schema_version,"snapshotId":evidence.snapshot_id,"extractorVersion":evidence.extractor_version,
-            "language":evidence.language,"complete":evidence.complete,"diagnostics":evidence.diagnostics,"files":files,
+        let mut input = json!({"schemaVersion":evidence.schema_version,"snapshotId":evidence.snapshot_id,"extractorVersion":evidence.extractor_version,
+            "language":evidence.language,"complete":evidence.complete,"files":files,
             "facts":chosen.iter().map(|i|index.facts[*i]).collect::<Vec<_>>(),
             "focus":{"policyVersion":POLICY_VERSION,"requestedSymbol":options.symbol,"anchor":{"id":a.id,"symbol":a.symbol,"path":a.path,"line":a.line,"endLine":a.end_line},
                 "maxHops":options.hops,"maxFacts":options.max_facts,"links":kept_links,"visitedSymbols":visited.iter().filter(|i|chosen.contains(i)).map(|i| &index.facts[*i].symbol).collect::<Vec<_>>(),
                 "unresolved":unresolved.iter().filter(|(id,_)|retained.contains(id.as_str())).map(|(id,reason)|json!({"factId":id,"reason":reason})).collect::<Vec<_>>(),
                 "truncated":chosen.len()<index.facts.len(),"boundaries":boundaries},
             "selection":{"policyVersion":POLICY_VERSION,"totalFacts":coverage.total_facts,"includedFacts":coverage.included_facts,"omittedFacts":coverage.omitted_facts,"maxBytes":max_bytes,"byKind":coverage.by_kind,"warnings":coverage.warnings}});
+        crate::focus::project_diagnostics(&mut input, evidence, &paths);
         coverage.input_bytes = serde_json::to_vec(&input).map_err(|e| e.to_string())?.len();
         if coverage.input_bytes <= max_bytes {
             return Ok(Prepared { input, coverage });
@@ -753,6 +754,82 @@ pub(crate) mod tests {
             hops: 2,
             max_facts,
         }
+    }
+
+    pub(crate) fn metadata_flood(e: &mut Evidence) {
+        for n in 0..64 {
+            let path = format!("unused/unit{n:03}.ts");
+            e.files.push(SourceFile {
+                path: path.clone(),
+                sha256: "c".repeat(64),
+            });
+            e.diagnostics.push(crate::analysis::Diagnostic {
+                code: format!("synthetic_boundary_{}", n % 2),
+                path,
+                message: "neutral unsupported syntax ".repeat(180),
+            });
+        }
+        for path in ["app.ts", "", "missing.ts"] {
+            e.diagnostics.push(crate::analysis::Diagnostic {
+                code: "synthetic_boundary_0".into(),
+                path: path.into(),
+                message: "retained boundary".into(),
+            });
+        }
+    }
+
+    #[test]
+    fn diagnostic_flood_preserves_links_provenance_and_source_completeness() {
+        let mut e = source();
+        let baseline = prepare_with_byte_limit(&e, &options(100), MAX_INPUT_BYTES).unwrap();
+        metadata_flood(&mut e);
+        assert!(serde_json::to_vec(&e.diagnostics).unwrap().len() > MAX_INPUT_BYTES);
+        for complete in [true, false] {
+            e.complete = complete;
+            let p = prepare_with_byte_limit(&e, &options(100), 16 * 1024).unwrap();
+            assert_eq!(p.input["complete"], complete);
+            assert_eq!(p.input["focus"]["links"], baseline.input["focus"]["links"]);
+            assert_eq!(p.input["facts"], baseline.input["facts"]);
+            assert_eq!(p.input["files"], baseline.input["files"]);
+            assert_eq!(p.input["diagnostics"].as_array().unwrap().len(), 3);
+            let summary = &p.input["diagnosticSelection"];
+            assert_eq!(summary["snapshotId"], e.snapshot_id);
+            assert_eq!(summary["total"], 67);
+            assert_eq!(summary["included"], 3);
+            assert_eq!(summary["omitted"], 64);
+            assert_eq!(
+                summary["byCode"]["synthetic_boundary_0"],
+                json!({"total":35,"included":3,"omitted":32})
+            );
+            assert_eq!(
+                summary["byCode"]["synthetic_boundary_1"],
+                json!({"total":32,"included":0,"omitted":32})
+            );
+            assert_eq!(
+                p.coverage.input_bytes,
+                serde_json::to_vec(&p.input).unwrap().len()
+            );
+            assert!(p.coverage.input_bytes <= 16 * 1024);
+            e.files.reverse();
+            e.facts.reverse();
+            e.diagnostics.reverse();
+            assert_eq!(
+                p.input,
+                prepare_with_byte_limit(&e, &options(100), 16 * 1024)
+                    .unwrap()
+                    .input
+            );
+        }
+        // Required diagnostic metadata and root values are never truncated to fit.
+        e.diagnostics
+            .iter_mut()
+            .find(|d| d.path.is_empty())
+            .unwrap()
+            .message = "x".repeat(MAX_INPUT_BYTES);
+        assert!(prepare_with_byte_limit(&e, &options(100), MAX_INPUT_BYTES).is_err());
+        e.diagnostics.clear();
+        e.facts.iter_mut().find(|f| f.id == "run").unwrap().value = "x".repeat(MAX_INPUT_BYTES);
+        assert!(prepare_with_byte_limit(&e, &options(100), MAX_INPUT_BYTES).is_err());
     }
 
     #[test]

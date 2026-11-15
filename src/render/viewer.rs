@@ -5,15 +5,74 @@ use sha2::{Digest, Sha256};
 const STYLE: &str = include_str!("viewer.css");
 const SCRIPT: &str = include_str!("viewer.js");
 
+#[derive(Clone, Copy)]
+pub enum Presentation {
+    Rendered,
+    SourceOnly,
+}
+
+impl Presentation {
+    pub fn document(self, title: &str, body: &str) -> String {
+        document_with_script(
+            title,
+            body,
+            match self {
+                Self::Rendered => SCRIPT,
+                Self::SourceOnly => "",
+            },
+        )
+    }
+
+    pub fn diagram(self, alt: &str, caption: &str, stem: &str) -> Result<String, String> {
+        if stem.is_empty()
+            || !stem
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+            || !stem.as_bytes()[0].is_ascii_alphabetic()
+        {
+            return Err("diagram requires a safe flat generated source name".into());
+        }
+        let source = format!("<p><a href=\"{stem}.mmd\">Mermaid source</a></p>");
+        match self {
+            Self::Rendered => Ok(format!(
+                "{source}<p><a href=\"{stem}.svg\">SVG image</a></p>{}",
+                diagram_for(alt, caption, &format!("{stem}.svg"), stem)?
+            )),
+            Self::SourceOnly => Ok(format!(
+                "<p><strong>Source-only: no image generated.</strong> {}</p>{source}",
+                escape(caption)
+            )),
+        }
+    }
+}
+
 /// Wrap renderer-owned, already-escaped markup in the shared offline viewer.
 /// `body` is trusted HTML, not arbitrary user input. `title` is plain text.
 pub fn document(title: &str, body: &str) -> String {
-    let hash = base64(&Sha256::digest(SCRIPT.as_bytes()));
+    Presentation::Rendered.document(title, body)
+}
+
+fn document_with_script(title: &str, body: &str, script: &str) -> String {
+    let hash = base64(&Sha256::digest(script.as_bytes()));
+    // The stylesheet puts document styles before the viewer-specific rules.
+    let style = if script.is_empty() {
+        STYLE
+            .split_once("\n.diagram-viewer")
+            .expect("shared document styles")
+            .0
+    } else {
+        STYLE
+    };
+    let controller = if script.is_empty() {
+        String::new()
+    } else {
+        format!("<script>{script}</script>")
+    };
     format!(
         "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n\
          <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src 'self'; script-src 'sha256-{hash}'; style-src 'unsafe-inline'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-         <title>{}</title><style>{STYLE}</style></head><body>{body}<script>{SCRIPT}</script></body></html>\n",
+         <title>{}</title><style>{style}</style></head><body>{body}{controller}</body></html>\n",
         escape(title)
     )
 }
@@ -94,6 +153,29 @@ fn base64(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_only_has_safe_source_link_without_image_or_controller() {
+        let body = Presentation::SourceOnly
+            .diagram("unused", "Full <details> & proof", "group-0001")
+            .unwrap();
+        let html = Presentation::SourceOnly.document("Source <inventory>", &body);
+        assert!(html.contains("Source-only: no image generated."));
+        assert!(html.contains("Full &lt;details&gt; &amp; proof"));
+        assert!(html.contains("href=\"group-0001.mmd\">Mermaid source</a>"));
+        for absent in ["<img", ".svg", "data-viewer", "<button", "<script>"] {
+            assert!(!html.contains(absent), "unexpected {absent}");
+        }
+        for bad in ["", "../bad", "a/b", "a.mmd", "a\"", "https://bad", "1bad"] {
+            assert!(Presentation::SourceOnly.diagram("", "", bad).is_err());
+        }
+        let rendered = Presentation::Rendered
+            .diagram("Diagram", "Caption", "group-0001")
+            .unwrap();
+        assert!(rendered.contains("href=\"group-0001.mmd\""));
+        assert!(rendered.contains("src=\"group-0001.svg\""));
+        assert!(rendered.contains("data-viewer-viewport"));
+    }
 
     #[test]
     fn base64_vectors() {
@@ -240,6 +322,25 @@ mod tests {
             fs::write(&page, document("Offline viewer regression", &body)).unwrap();
             pages.push(page);
         }
+        let page = fixtures.path().join("source-only.html");
+        fs::write(
+            fixtures.path().join("diagram.mmd"),
+            "flowchart LR\n  A[Source candidate]\n",
+        )
+        .unwrap();
+        let body = Presentation::SourceOnly
+            .diagram(
+                "Source candidate",
+                "Full source and proof details remain available.",
+                "diagram",
+            )
+            .unwrap();
+        fs::write(
+            &page,
+            Presentation::SourceOnly.document("Source-only inventory", &body),
+        )
+        .unwrap();
+        pages.push(page);
         // IDEOMANCER_NODE may be an absolute executable or a name resolved on PATH.
         let node = std::env::var_os("IDEOMANCER_NODE").unwrap_or_else(|| "node".into());
         let output = Command::new(&node)

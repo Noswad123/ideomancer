@@ -236,9 +236,16 @@ summaries and source/target closures; resolution metadata records the dependency
 the whole receipt-verified selected module inventory, not just reached citations.
 
 Full UML and focus publish independently: focus never automatically generates
-full UML or an inventory. A focus without a full bundle offers only a plain-text
+full UML or an inventory, and it does not require unused all-class overview documents
+to fit. Whole-snapshot grounding and receipt validation still run, including proofs
+owned by unselected classes; only selected details consume the retained projection.
+A focus without a full bundle offers only a plain-text
 command to generate all-class UML, not a dead link. Matching bundles can be reused;
-`--no-render` uses only saved evidence and invokes no `mmdc`. Each group image has
+`--no-render` uses only saved evidence and invokes no `mmdc`. Fresh source-only pages
+state that no image was generated and retain Mermaid links and full details, without
+SVG links, image requests or image controls. A matching validated rendered bundle
+can still be reused, including its existing images; canonical HTML refreshes can
+also preserve those validated SVGs without running the renderer. Each group image has
 independent pan/zoom via one shared static CSP-authorized controller. SVG remains
 an inert `<img>`; there is no inline SVG or target code in JavaScript.
 
@@ -255,6 +262,12 @@ an inert `<img>`; there is no inline SVG or target code in JavaScript.
   8 MiB per SVG, 64 MiB aggregate SVG, and a 180-second aggregate render budget.
   All groups stage and validate before one atomic publication; failure protects
   the previous bundle rather than publishing a partial set.
+- An additional 16 MiB estimated semantic working allowance bounds expanded
+  member/entry/relationship records before document rendering. It counts compact
+  JSON plus container overhead, not total process RSS or input-index memory.
+  Signatures and proof enrichment are charged incrementally. A large all-class
+  request may fail this allowance or the final document cap; use a smaller entry
+  or page rather than assuming the renderer silently omitted classes.
 - Receipts use `source-views.v2-class-uml`. Canonical `manifestHash` covers identity,
   explicit flat artifact names/hashes, titles, renderer, and diagram order. This
   detects un-rehashed changes, not authentication by an adversary who can rehash.
@@ -340,6 +353,12 @@ retains its historical name, `src/render/endpoint.rs`; module navigation adds no
 new CLI flags or catalog kinds.
 
 For JS/TS, `js_local_call_candidate` links retain same-file lexical proofs.
+Focused diagnostic metadata retains selected-path, pathless and unknown-inventory-
+path records. Other known-path details remain in the original snapshot and are
+accounted for by `diagnosticSelection`: snapshot ID, total/included/omitted counts
+and per-code counts. Restored citation paths restore their diagnostics too, charged
+to the existing byte budget. Source completeness and all resolution decisions still
+use full evidence; this presentation projection grants no new proof capability.
 `js_module_call_candidate` links carry
 `resolutionPolicy: selected-relative-functions-1` and expand only direct ESM named
 imports/aliases to named functions or local export aliases, or top-level CommonJS

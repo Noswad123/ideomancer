@@ -158,6 +158,8 @@ pub struct FactsRef {
     receipt_hash: String,
 }
 impl FactsRef {
+    /// Citations cover references exported by classes, factories and relationship
+    /// sites, not every saved fact. Claims may cite only this grounded source set.
     pub fn view(&self) -> &FactsView {
         &self.view
     }
@@ -201,6 +203,20 @@ fn digest<T: Serialize>(value: &T) -> Result<String, ExtensionError> {
 fn receipt(store: &discovery::Store) -> Result<String, ExtensionError> {
     digest(&(&store.catalog, &store.evidence))
 }
+fn canonical_receipt(store: &discovery::Store) -> Result<String, ExtensionError> {
+    let mut evidence =
+        serde_json::to_value(&store.evidence).map_err(|e| invalid(&e.to_string()))?;
+    for (key, field) in [("facts", "id"), ("files", "path")] {
+        evidence[key]
+            .as_array_mut()
+            .ok_or_else(|| invalid("Invalid evidence inventory"))?
+            .sort_by(|a, b| a[field].as_str().cmp(&b[field].as_str()));
+    }
+    if let Some(diagnostics) = evidence["diagnostics"].as_array_mut() {
+        diagnostics.sort_by_cached_key(|v| v.to_string());
+    }
+    digest(&(&store.catalog, evidence))
+}
 fn string(v: &Value, key: &str) -> Result<String, ExtensionError> {
     v[key]
         .as_str()
@@ -234,57 +250,51 @@ pub fn open_facts(
             "Complete facts required; rediscover unavailable sources",
         ));
     }
-    let bundle = crate::render::class_uml::build(&store.catalog, &store.evidence, None)?;
+    let relationships = crate::render::class_uml::relationships(&store.catalog, &store.evidence)?;
     let evidence = &store.evidence;
     let by_id: BTreeMap<_, _> = evidence.facts.iter().map(|f| (f.id.as_str(), f)).collect();
-    let mut sources = BTreeMap::new();
+    let mut source_ids = BTreeSet::new();
     for f in &evidence.facts {
         if f.line == 0
             || f.end_line < f.line
             || !evidence.files.iter().any(|file| file.path == f.path)
-            || sources
-                .insert(
-                    f.id.clone(),
-                    SourceCitation {
-                        path: f.path.clone(),
-                        line: f.line,
-                        end_line: f.end_line,
-                        kind: f.kind.clone(),
-                        symbol: f.symbol.clone(),
-                    },
-                )
-                .is_some()
+            || !source_ids.insert(f.id.as_str())
         {
             return Err(invalid("Invalid source fact inventory"));
         }
     }
+    let mut data_budget = crate::render::source_view::WorkingBudget::default();
     let classes: Vec<_> = store
         .catalog
         .items
         .iter()
         .filter(|i| i.kind == crate::catalog::Kind::Class)
-        .map(|i| ClassFact {
-            id: i.id.clone(),
-            declaration_id: i.fact_id.clone(),
-            name: i.symbol.rsplit('.').next().unwrap_or(&i.symbol).into(),
-            symbol: i.symbol.clone(),
-            path: i.path.clone(),
-            line: i.line,
-            end_line: i.end_line,
+        .map(|i| {
+            let class = ClassFact {
+                id: i.id.clone(),
+                declaration_id: i.fact_id.clone(),
+                name: i.symbol.rsplit('.').next().unwrap_or(&i.symbol).into(),
+                symbol: i.symbol.clone(),
+                path: i.path.clone(),
+                line: i.line,
+                end_line: i.end_line,
+            };
+            data_budget.replace(
+                0,
+                &serde_json::to_value(&class).map_err(|e| invalid(&e.to_string()))?,
+            )?;
+            Ok(class)
         })
-        .collect();
+        .collect::<Result<_, ExtensionError>>()?;
     let mut sites = Vec::new();
     let mut site_ids = BTreeSet::new();
-    for r in bundle.legend["relationships"]
-        .as_array()
-        .ok_or_else(|| invalid("Missing relationship model"))?
-    {
-        let evidence_ids = ids(r, "sourceFactIds")?;
-        let id = string(r, "siteFactId")?;
+    for r in relationships {
+        let evidence_ids = ids(&r, "sourceFactIds")?;
+        let id = string(&r, "siteFactId")?;
         let origin = by_id
             .get(id.as_str())
             .ok_or_else(|| invalid("Missing relationship source site"))?;
-        let source_class_id = string(r, "classId")?;
+        let source_class_id = string(&r, "classId")?;
         let class = classes
             .iter()
             .find(|c| c.id == source_class_id)
@@ -311,12 +321,12 @@ pub fn open_facts(
                     && origin.end_line <= class.end_line => {}
             _ => return Err(invalid("Incompatible relationship source site")),
         }
-        let owner_id = string(r, "ownerFactId")?;
-        sites.push(RelationshipSite {
+        let owner_id = string(&r, "ownerFactId")?;
+        let site = RelationshipSite {
             id,
             source_class_id,
-            owner_kind: sources
-                .get(&owner_id)
+            owner_kind: by_id
+                .get(owner_id.as_str())
                 .ok_or_else(|| invalid("Unknown relationship owner"))?
                 .kind
                 .clone(),
@@ -332,14 +342,19 @@ pub fn open_facts(
             member_name: r["memberName"].as_str().map(str::to_owned),
             target_class_id: r["targetClassId"].as_str().map(str::to_owned),
             evidence_ids,
-        });
+        };
+        data_budget.replace(
+            0,
+            &serde_json::to_value(&site).map_err(|e| invalid(&e.to_string()))?,
+        )?;
+        sites.push(site);
     }
     let factory_capability =
         crate::javascript::supports_structural_facts(&evidence.extractor_version);
     let mut factories = Vec::new();
     if factory_capability {
         let index = crate::js_focus::Index::new(evidence.facts.iter().collect())?;
-        for f in evidence.facts.iter().filter(|f| f.kind == "js_factory") {
+        for f in by_id.values().filter(|f| f.kind == "js_factory") {
             let v: Value =
                 serde_json::from_str(&f.value).map_err(|_| invalid("Invalid factory receipt"))?;
             if v["policy"] != "javascript-structural-facts-1"
@@ -814,7 +829,7 @@ pub fn open_facts(
                     return Err(invalid("Returned class declaration owner mismatch"));
                 }
             }
-            factories.push(FactoryFact {
+            let factory = FactoryFact {
                 id: f.id.clone(),
                 callable_id,
                 module_path: f.path.clone(),
@@ -825,16 +840,62 @@ pub fn open_facts(
                 evidence_ids,
                 safe,
                 reason: v["reason"].as_str().map(str::to_owned),
-            });
+            };
+            data_budget.replace(
+                0,
+                &serde_json::to_value(&factory).map_err(|e| invalid(&e.to_string()))?,
+            )?;
+            factories.push(factory);
         }
     }
+    // Retain all exported raw fact references, never an all-evidence citation copy.
+    let mut required = BTreeSet::new();
+    required.extend(classes.iter().map(|c| c.declaration_id.as_str()));
+    for f in &factories {
+        required.extend([f.id.as_str(), f.callable_id.as_str()]);
+        required.extend(
+            f.evidence_ids
+                .iter()
+                .chain(&f.return_fact_ids)
+                .map(String::as_str),
+        );
+        for p in &f.parameters {
+            required.insert(p.id.as_str());
+            required.extend(p.binding_id.as_deref());
+        }
+    }
+    for s in &sites {
+        required.extend([s.id.as_str(), s.owner_id.as_str()]);
+        required.extend(s.binding_id.as_deref());
+        required.extend(s.evidence_ids.iter().map(String::as_str));
+    }
+    let mut sources = BTreeMap::new();
+    for id in required {
+        let f = by_id
+            .get(id)
+            .ok_or_else(|| invalid("Missing exported source citation"))?;
+        let citation = SourceCitation {
+            path: f.path.clone(),
+            line: f.line,
+            end_line: f.end_line,
+            kind: f.kind.clone(),
+            symbol: f.symbol.clone(),
+        };
+        data_budget.replace(
+            0,
+            &serde_json::to_value(&citation).map_err(|e| invalid(&e.to_string()))?,
+        )?;
+        sources.insert(id.to_string(), citation);
+    }
+    let mut diagnostics: Vec<_> = evidence.diagnostics.iter().collect();
+    diagnostics.sort_by(|a, b| (&a.path, &a.code, &a.message).cmp(&(&b.path, &b.code, &b.message)));
     let mut view = FactsView {
         schema_version: "ideomancer.facts.v1".into(),
         identity: FactsIdentity {
             source_root_id: hash(store.catalog.source_root.as_bytes()),
             snapshot_id: catalog.snapshot_id().into(),
             extractor_version: evidence.extractor_version.clone(),
-            inventory_hash: digest(&evidence.files)?,
+            inventory_hash: String::new(),
             facts_hash: String::new(),
         },
         complete: evidence.complete,
@@ -852,8 +913,7 @@ pub fn open_facts(
                     .any(|d| d.code == "javascript_structural_facts_omitted"),
             unsupported_shapes: factories.iter().filter(|f| !f.safe).count(),
         },
-        diagnostics: evidence
-            .diagnostics
+        diagnostics: diagnostics
             .iter()
             .take(100)
             .map(|d| FactDiagnostic {
@@ -883,8 +943,10 @@ pub fn open_facts(
             message: "Saved extraction lacks complete generic factory facts; rediscover to obtain this capability".into(),
         });
     }
+    view.files.sort_by(|a, b| a.path.cmp(&b.path));
+    view.identity.inventory_hash = digest(&view.files)?;
     let receipt_hash = receipt(&store)?;
-    view.identity.facts_hash = digest(&(&view, &receipt_hash))?;
+    view.identity.facts_hash = digest(&(&view, canonical_receipt(&store)?))?;
     if serde_json::to_vec(&view)
         .map_err(|e| invalid(&e.to_string()))?
         .len()

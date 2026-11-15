@@ -56,8 +56,20 @@ identities before publication; source files are not reopened by cached actions.
   owner_kind, binding_id, binding_name, binding_origin, kind, member_name,
   target_class_id, evidence_ids }`. Sites distinguish inheritance, dependency
   and construction and preserve already-established syntax targets.
-- `sources`: fact ID to source citation. Every referenced ID must be grounded in
-  this saved snapshot. IDs are stable within a snapshot, not promised across edits.
+- `sources`: exported raw fact ID to source citation. This covers the references
+  exposed by class declarations, factories, parameters/bindings, returns and
+  relationship sites/proofs, not every unrelated saved call or member fact. Every
+  exported reference must be grounded in this saved snapshot. Claims may cite only
+  this exported citation set. IDs are stable within a snapshot, not promised across edits.
+
+Opening facts constructs validated relationship data, not HTML, Mermaid or a
+complete diagram bundle. It does not require all-class presentation to fit.
+The facts view retains its own 8 MiB metadata cap and bounded semantic working
+model. Whole-snapshot validation and canonical evidence identity remain in force,
+including facts whose citations are not exported. Changed evidence cannot retain
+an old facts hash merely because its changed records are outside this citation set.
+Reopen facts and revalidate claims after a change to facts identity; existing saved
+claims are not silently upgraded to a newly projected citation set.
 
 New generic JavaScript extraction records exported function/factory structure,
 direct returns and referenced class identity without interpreting provider naming,

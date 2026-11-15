@@ -345,6 +345,12 @@ fn check_callable(report: &Value, selected: &Value, saved: &Value) -> Value {
         assert!(!mermaid.contains(fabricated), "{mermaid}");
     }
     let html = artifact(report, "viewer");
+    assert!(html.contains("Source-only: no image generated."));
+    assert!(html.contains("href=\"diagram.mmd\">Mermaid source</a>"));
+    assert!(html.contains("Boundaries and Source Citations") && html.contains("sourceRefs"));
+    for absent in ["<img", ".svg", "data-viewer", "<button", "<script>"] {
+        assert!(!html.contains(absent), "unexpected {absent}");
+    }
     for fabricated in [
         "Security (Declared",
         "Servers (Declared",

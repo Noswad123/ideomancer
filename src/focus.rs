@@ -9,6 +9,44 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub const POLICY_VERSION: &str = "architecture-focus.v1";
 
+/// Project presentation metadata only; resolution must continue using full evidence.
+pub(crate) fn project_diagnostics(input: &mut Value, evidence: &Evidence, paths: &BTreeSet<&str>) {
+    let inventory: BTreeSet<_> = evidence.files.iter().map(|f| f.path.as_str()).collect();
+    let mut diagnostics = Vec::new();
+    let mut by_code = BTreeMap::<&str, KindCoverage>::new();
+    for diagnostic in &evidence.diagnostics {
+        // Unknown paths may describe rejected/unreadable files or global failures.
+        let include = diagnostic.path.is_empty()
+            || paths.contains(diagnostic.path.as_str())
+            || !inventory.contains(diagnostic.path.as_str());
+        let count = by_code.entry(&diagnostic.code).or_insert(KindCoverage {
+            total: 0,
+            included: 0,
+            omitted: 0,
+        });
+        count.total += 1;
+        if include {
+            diagnostics.push(diagnostic);
+            count.included += 1;
+        } else {
+            count.omitted += 1;
+        }
+    }
+    diagnostics.sort_by_key(|d| (&d.path, &d.code, &d.message));
+    let omitted = evidence.diagnostics.len() - diagnostics.len();
+    input["diagnostics"] = json!(diagnostics);
+    if omitted > 0 {
+        input["diagnosticSelection"] = json!({
+            "snapshotId": evidence.snapshot_id,
+            "total": evidence.diagnostics.len(), "included": diagnostics.len(), "omitted": omitted,
+            "byCode": by_code,
+            "note": "Diagnostic details for unselected inventory paths are omitted; full diagnostics remain in the original snapshot evidence. Selected-path, pathless and unknown-inventory-path diagnostics are retained. This projection does not change source completeness or resolution."
+        });
+    } else {
+        input.as_object_mut().unwrap().remove("diagnosticSelection");
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FocusOptions {
@@ -1327,6 +1365,47 @@ mod tests {
             "run",
         );
         e
+    }
+
+    #[test]
+    fn diagnostic_projection_is_explicit_and_small_packets_keep_original_records() {
+        let mut e = base();
+        for path in ["pkg/service.py", "", "unreadable.py"] {
+            e.diagnostics.push(crate::analysis::Diagnostic {
+                path: path.into(),
+                code: "synthetic_boundary".into(),
+                message: "boundary".into(),
+            });
+        }
+        let paths = BTreeSet::from(["pkg/service.py"]);
+        let mut original = json!({"complete": e.complete});
+        project_diagnostics(&mut original, &e, &paths);
+        assert!(original.get("diagnosticSelection").is_none());
+        let mut expected: Vec<_> = e.diagnostics.iter().collect();
+        expected.sort_by_key(|d| (&d.path, &d.code, &d.message));
+        assert_eq!(original["diagnostics"], json!(expected));
+        e.files.push(SourceFile {
+            path: "unused.py".into(),
+            sha256: "d".repeat(64),
+        });
+        e.diagnostics.push(crate::analysis::Diagnostic {
+            path: "unused.py".into(),
+            code: "synthetic_boundary".into(),
+            message: "x".repeat(MAX_INPUT_BYTES),
+        });
+        e.complete = false;
+        let mut projected = json!({"complete": e.complete});
+        project_diagnostics(&mut projected, &e, &paths);
+        assert_eq!(projected["diagnostics"], original["diagnostics"]);
+        assert_eq!(projected["complete"], false);
+        assert_eq!(
+            projected["diagnosticSelection"]["byCode"]["synthetic_boundary"],
+            json!({"total":4,"included":3,"omitted":1})
+        );
+        e.diagnostics.reverse();
+        let mut repeat = json!({"complete": e.complete});
+        project_diagnostics(&mut repeat, &e, &paths);
+        assert_eq!(projected, repeat);
     }
 
     #[test]

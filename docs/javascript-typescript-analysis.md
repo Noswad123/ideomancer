@@ -136,6 +136,12 @@ boundary/context-aware (24 boundaries, 8 context classes), preserving small file
 sets where possible; titles use source folders and stable class ranges, not runtime
 architecture. Methods/fields have 12/8 image caps; all observed members and modeled
 relationships remain in secondary class details and JSON. Caps never omit home classes.
+Focused bundles project only selected class details after whole-snapshot proof
+validation. They do not build or depend on an all-class overview fitting its output
+budget. A 16 MiB estimated semantic working allowance and the existing 8 MiB
+published-document cap remain distinct; over-limit full output fails explicitly
+and can be explored through smaller entries/pages. Read-only facts use the shared
+validated relationship data without rendering those documents.
 Wide inheritance families use a left-to-right base/descendant layout instead of
 placing all long constructor signatures in one horizontal row; each group records
 its presentation-only `direction`.

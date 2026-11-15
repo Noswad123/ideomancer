@@ -831,7 +831,7 @@ pub(crate) fn diagram_augmented(
         }
         return Ok((report, true));
     }
-    let documents = if let Some(view) = &options.view {
+    let (documents, source_html) = if let Some(view) = &options.view {
         let spec_path = if kind == Kind::Api {
             match &options.openapi {
                 Some(path) => Some(path.clone()),
@@ -862,7 +862,7 @@ pub(crate) fn diagram_augmented(
             None
         };
         let spec = spec_path.as_deref().map(crate::openapi::load).transpose()?;
-        render::endpoint::build(
+        render::endpoint::build_variants(
             &store.catalog,
             &store.evidence,
             &page.items[0],
@@ -872,7 +872,7 @@ pub(crate) fn diagram_augmented(
             options.focus_facts,
         )?
     } else {
-        render::source_view::build(&store.catalog, &store.evidence, &page, &kind)?
+        render::source_view::build_variants(&store.catalog, &store.evidence, &page, &kind)?
     };
     let view_name = match &options.view {
         Some(render::endpoint::View::Network) => "network",
@@ -883,7 +883,7 @@ pub(crate) fn diagram_augmented(
             Kind::Workflow => unreachable!(),
         },
     };
-    let (mut report, _) = publish_view(&store, &options, view_name, &documents)?;
+    let (mut report, _) = publish_view(&store, &options, view_name, &documents, &source_html)?;
     report["kind"] = json!(kind);
     report["page"] = json!(page);
     report["viewsIndex"] = json!(write_views_index(&store)?);
@@ -935,13 +935,50 @@ fn publish_class_view_checked(
     } else {
         options.mmdc.clone()
     };
+    let base = store.directory.join("views");
+    let destination = base.join(view_name);
+    let previous = workflow::tree_snapshot(&destination)?;
+    let saved = if previous.is_some() {
+        Some(validate_view(&destination)?)
+    } else {
+        None
+    };
+    let cached_rendered = match &saved {
+        Some(ValidatedView::V2(saved))
+            if options.no_render
+                && saved.snapshot_id == store.catalog.snapshot_id
+                && saved.policy_version == CLASS_POLICY_VERSION
+                && saved.legend_hash == hash(&legend)
+                && saved.renderer.is_some()
+                && saved.diagrams.len() == documents.diagrams.len()
+                && saved
+                    .diagrams
+                    .iter()
+                    .zip(&documents.diagrams)
+                    .all(|(a, b)| {
+                        a.id == b.id
+                            && a.title == b.title
+                            && a.mmd_sha == hash(b.mermaid.as_bytes())
+                            && a.svg_sha.is_some()
+                    }) =>
+        {
+            Some(saved)
+        }
+        _ => None,
+    };
+    let rendered = !options.no_render || cached_rendered.is_some();
+    let html = if rendered {
+        &documents.html
+    } else {
+        &documents.source_html
+    };
     let mut receipt = ClassReceipt {
         schema_version: CLASS_VERSION.into(),
         manifest_hash: "0".repeat(64),
         snapshot_id: store.catalog.snapshot_id.clone(),
         policy_version: CLASS_POLICY_VERSION.into(),
         legend_hash: hash(&legend),
-        html_hash: hash(documents.html.as_bytes()),
+        html_hash: hash(html.as_bytes()),
         diagrams: documents
             .diagrams
             .iter()
@@ -949,7 +986,7 @@ fn publish_class_view_checked(
                 id: diagram.id.clone(),
                 title: diagram.title.clone(),
                 mmd_sha: hash(diagram.mermaid.as_bytes()),
-                svg_sha: (!options.no_render).then(|| "0".repeat(64)),
+                svg_sha: rendered.then(|| "0".repeat(64)),
             })
             .collect(),
         artifacts: vec![
@@ -957,17 +994,19 @@ fn publish_class_view_checked(
             "legend.json".into(),
             "index.html".into(),
         ],
-        renderer: (!options.no_render).then_some(renderer.clone()),
+        renderer: cached_rendered
+            .and_then(|saved| saved.renderer.clone())
+            .or_else(|| (!options.no_render).then_some(renderer.clone())),
     };
     for diagram in &receipt.diagrams {
         receipt.artifacts.push(format!("{}.mmd", diagram.id));
-        if !options.no_render {
+        if rendered {
             receipt.artifacts.push(format!("{}.svg", diagram.id));
         }
     }
     class_artifacts(&receipt)?;
     let metadata_size = legend.len()
-        + documents.html.len()
+        + documents.html.len().max(documents.source_html.len())
         + encoded(&receipt)?.len()
         + documents
             .diagrams
@@ -980,19 +1019,16 @@ fn publish_class_view_checked(
         );
     }
 
-    let base = analyze::create_storage(&store.directory.join("views"))?;
-    let destination = base.join(view_name);
-    let previous = workflow::tree_snapshot(&destination)?;
-    let saved = if previous.is_some() {
-        Some(validate_view(&destination)?)
-    } else {
-        None
-    };
+    let base = analyze::create_storage(&base)?;
     let reuse = matches!(&saved, Some(ValidatedView::V2(saved))
         if saved.snapshot_id == receipt.snapshot_id
         && saved.policy_version == receipt.policy_version
         && saved.legend_hash == receipt.legend_hash
-        && saved.html_hash == receipt.html_hash
+        && saved.html_hash == hash(if saved.renderer.is_some() && saved.diagrams.iter().all(|d| d.svg_sha.is_some()) {
+            documents.html.as_bytes()
+        } else {
+            documents.source_html.as_bytes()
+        })
         && saved.diagrams.len() == receipt.diagrams.len()
         && saved.diagrams.iter().zip(&receipt.diagrams).all(|(a,b)|
             a.id == b.id && a.title == b.title && a.mmd_sha == b.mmd_sha)
@@ -1004,7 +1040,7 @@ fn publish_class_view_checked(
             .tempdir_in(&base)
             .map_err(|e| e.to_string())?;
         write_new(&stage.path().join("legend.json"), &legend)?;
-        write_new(&stage.path().join("index.html"), documents.html.as_bytes())?;
+        write_new(&stage.path().join("index.html"), html.as_bytes())?;
         let started = Instant::now();
         let budget = Duration::from_secs(180);
         let mut svg_size = 0;
@@ -1013,12 +1049,15 @@ fn publish_class_view_checked(
                 &stage.path().join(format!("{}.mmd", diagram.id)),
                 diagram.mermaid.as_bytes(),
             )?;
-            if !options.no_render {
+            if rendered {
                 let remaining = budget
                     .checked_sub(started.elapsed())
                     .ok_or("Class UML aggregate render budget exhausted")?;
-                let svg =
-                    render::draft::svg_with_timeout(&diagram.mermaid, &options.mmdc, remaining)?;
+                let svg = if cached_rendered.is_some() {
+                    read(&destination.join(format!("{}.svg", diagram.id)))?
+                } else {
+                    render::draft::svg_with_timeout(&diagram.mermaid, &options.mmdc, remaining)?
+                };
                 if started.elapsed() > budget {
                     return Err("Class UML aggregate render budget exhausted".into());
                 }
@@ -1072,8 +1111,14 @@ fn publish_view(
     options: &DiagramOptions,
     view_name: &str,
     documents: &render::source_view::Documents,
+    source_html: &str,
 ) -> Result<(Value, bool), String> {
     let legend = encoded(&documents.legend)?;
+    let mut html = if options.no_render {
+        source_html
+    } else {
+        &documents.html
+    };
     let renderer = if options.mmdc.is_relative() && options.mmdc.components().count() > 1 {
         std::env::current_dir()
             .map_err(|e| e.to_string())?
@@ -1084,15 +1129,37 @@ fn publish_view(
     let base = analyze::create_storage(&store.directory.join("views"))?;
     let destination = base.join(view_name);
     let previous = workflow::tree_snapshot(&destination)?;
+    let saved = if previous.is_some() {
+        Some(validate_v1_view(&destination)?)
+    } else {
+        None
+    };
+    let cached_rendered = saved.as_ref().filter(|saved| {
+        options.no_render
+            && saved.snapshot_id == store.catalog.snapshot_id
+            && saved.mermaid_sha256 == hash(documents.mermaid.as_bytes())
+            && saved.legend_sha256 == hash(&legend)
+            && saved.svg_sha256.is_some()
+    });
+    if cached_rendered.is_some() {
+        html = &documents.html;
+    }
     let mut reuse = false;
-    if fs::symlink_metadata(&destination).is_ok() {
-        let saved = validate_v1_view(&destination)?;
+    if let Some(saved) = &saved {
         reuse = saved.snapshot_id == store.catalog.snapshot_id
             && saved.mermaid_sha256 == hash(documents.mermaid.as_bytes())
             && saved.legend_sha256 == hash(&legend)
-            && saved.html_sha256 == hash(documents.html.as_bytes())
+            && saved.html_sha256
+                == hash(if saved.svg_sha256.is_some() {
+                    documents.html.as_bytes()
+                } else {
+                    source_html.as_bytes()
+                })
             && (options.no_render
                 || saved.svg_sha256.is_some() && saved.renderer.as_ref() == Some(&renderer));
+        if reuse && saved.svg_sha256.is_some() {
+            html = &documents.html;
+        }
     }
     if !reuse {
         let stage = tempfile::Builder::new()
@@ -1104,8 +1171,10 @@ fn publish_view(
             documents.mermaid.as_bytes(),
         )?;
         write_new(&stage.path().join("legend.json"), &legend)?;
-        write_new(&stage.path().join("index.html"), documents.html.as_bytes())?;
-        let svg = if options.no_render {
+        write_new(&stage.path().join("index.html"), html.as_bytes())?;
+        let svg = if cached_rendered.is_some() {
+            Some(read(&destination.join("diagram.svg"))?)
+        } else if options.no_render {
             None
         } else {
             Some(render::draft::svg(&documents.mermaid, &options.mmdc)?)
@@ -1118,9 +1187,11 @@ fn publish_view(
             snapshot_id: store.catalog.snapshot_id.clone(),
             mermaid_sha256: hash(documents.mermaid.as_bytes()),
             legend_sha256: hash(&legend),
-            html_sha256: hash(documents.html.as_bytes()),
+            html_sha256: hash(html.as_bytes()),
             svg_sha256: svg.as_deref().map(hash),
-            renderer: if options.no_render {
+            renderer: if let Some(saved) = cached_rendered {
+                saved.renderer.clone()
+            } else if options.no_render {
                 None
             } else {
                 Some(renderer)
@@ -1137,7 +1208,7 @@ fn publish_view(
         || receipt.snapshot_id != store.catalog.snapshot_id
         || receipt.mermaid_sha256 != hash(documents.mermaid.as_bytes())
         || receipt.legend_sha256 != hash(&legend)
-        || receipt.html_sha256 != hash(documents.html.as_bytes())
+        || receipt.html_sha256 != hash(html.as_bytes())
         || (!options.no_render && receipt.svg_sha256.is_none())
     {
         return Err("Source-view receipt does not match this page".into());
@@ -1155,7 +1226,7 @@ fn publish_view(
     Ok((
         json!({"catalogDirectory":store.directory,"viewDirectory":destination,"snapshotId":store.catalog.snapshot_id,"view":view_name,
         "mermaid":destination.join("diagram.mmd"),"legend":destination.join("legend.json"),"viewer":destination.join("index.html"),
-        "svg":if options.no_render{None}else{Some(destination.join("diagram.svg"))},"error":Value::Null}),
+        "svg":receipt.svg_sha256.as_ref().map(|_| destination.join("diagram.svg")),"error":Value::Null}),
         reuse,
     ))
 }
@@ -1592,9 +1663,9 @@ mod tests {
         let documents =
             render::source_view::build(&store.catalog, &store.evidence, &page, &Kind::Class)
                 .unwrap();
-        publish_view(&store, &opts, "class", &documents).unwrap();
+        publish_view(&store, &opts, "class", &documents, &documents.html).unwrap();
         let inventory = render::class_overview::build(&store.catalog, &store.evidence).unwrap();
-        publish_view(&store, &opts, "class-overview", &inventory).unwrap();
+        publish_view(&store, &opts, "class-overview", &inventory, &inventory.html).unwrap();
         let legacy =
             workflow::tree_snapshot(&store.directory.join("views/class-overview")).unwrap();
         let (report, _) = diagram(opts).unwrap();
@@ -1610,6 +1681,84 @@ mod tests {
         );
         let index = fs::read_to_string(store.directory.join("views/index.html")).unwrap();
         assert!(!index.contains("class-overview"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn html_refresh_without_renderer_preserves_valid_images_for_both_receipts() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let tools = tempfile::tempdir().unwrap();
+        saved_catalog(root.path(), destination.path());
+        let store = load(destination.path()).unwrap();
+        let renderer = tools.path().join("mmdc");
+        fs::write(
+            &renderer,
+            "#!/bin/sh\nprintf '<svg width=\"10\" height=\"10\"></svg>' > \"$4\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&renderer, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut opts = class_options(destination.path());
+        opts.no_render = false;
+        opts.mmdc = renderer.clone();
+        let mut classes = render::class_uml::build(&store.catalog, &store.evidence, None).unwrap();
+        let mut source = render::source_view::Documents {
+            mermaid: "flowchart LR\n  A[Candidate]\n".into(),
+            legend: json!({"snapshotId":store.catalog.snapshot_id}),
+            html: "<!doctype html><p>Rendered generation one</p>".into(),
+        };
+        let source_html = "<!doctype html><p>Source-only: no image generated.</p>";
+        opts.no_render = true;
+        publish_class_view(&store, &opts, "class", &classes).unwrap();
+        publish_view(&store, &opts, "api", &source, source_html).unwrap();
+        assert!(!store.directory.join("views/class/group-0001.svg").exists());
+        assert!(!store.directory.join("views/api/diagram.svg").exists());
+        opts.no_render = false;
+        publish_class_view(&store, &opts, "class", &classes).unwrap();
+        publish_view(&store, &opts, "api", &source, source_html).unwrap();
+        let class_svg = store.directory.join("views/class/group-0001.svg");
+        let source_svg = store.directory.join("views/api/diagram.svg");
+        let images = [read(&class_svg).unwrap(), read(&source_svg).unwrap()];
+        fs::remove_file(renderer).unwrap();
+        classes.html.push_str("<p>Refreshed HTML generation</p>");
+        source.html.push_str("<p>Refreshed HTML generation</p>");
+        opts.no_render = true;
+        assert!(
+            !publish_class_view(&store, &opts, "class", &classes)
+                .unwrap()
+                .1
+        );
+        let (report, reused) = publish_view(&store, &opts, "api", &source, source_html).unwrap();
+        assert!(!reused && report["svg"].is_string());
+        assert_eq!(read(&class_svg).unwrap(), images[0]);
+        assert_eq!(read(&source_svg).unwrap(), images[1]);
+        assert_eq!(
+            fs::read_to_string(store.directory.join("views/class/index.html")).unwrap(),
+            classes.html
+        );
+        assert_eq!(
+            fs::read_to_string(store.directory.join("views/api/index.html")).unwrap(),
+            source.html
+        );
+        let before = workflow::tree_snapshot(&store.directory).unwrap();
+        assert!(
+            publish_class_view(&store, &opts, "class", &classes)
+                .unwrap()
+                .1
+        );
+        assert!(
+            publish_view(&store, &opts, "api", &source, source_html)
+                .unwrap()
+                .1
+        );
+        assert_eq!(workflow::tree_snapshot(&store.directory).unwrap(), before);
+        opts.no_render = false;
+        classes.diagrams[0].mermaid.push('\n');
+        source.mermaid.push('\n');
+        assert!(publish_class_view(&store, &opts, "class", &classes).is_err());
+        assert!(publish_view(&store, &opts, "api", &source, source_html).is_err());
+        assert_eq!(workflow::tree_snapshot(&store.directory).unwrap(), before);
     }
 
     #[cfg(unix)]

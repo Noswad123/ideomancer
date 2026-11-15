@@ -274,6 +274,95 @@ fn class_entry<'a>(legend: &'a Value, name: &str) -> &'a Value {
     matches[0]
 }
 
+#[test]
+fn oversized_full_bundle_does_not_block_cli_or_engine_entry_and_page() {
+    use ideomancer_core::engine::v1::{class_diagrams, open_catalog, ClassSelection, RenderMode};
+    let mut sources = vec![(
+        "focus.ts".to_string(),
+        "export class FocusClass { run() {} }".to_string(),
+    )];
+    for n in 0..8 {
+        let mut source = format!("export class Bulk{n} {{\n");
+        for field in 0..1000 {
+            source.push_str(&format!("state{field}: {};\n", "Declared".repeat(64)));
+        }
+        source.push_str("}\n");
+        sources.push((format!("bulk{n}.ts"), source));
+    }
+    let files: Vec<_> = sources
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect();
+    let (f, catalog) = javascript_fixture(&files).unwrap();
+    let id = classes(&catalog)
+        .into_iter()
+        .find(|i| i["symbol"] == "focus.ts.FocusClass")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let before = artifacts(&catalog);
+    let failed = f.diagram(&catalog, &["--no-render"]).output().unwrap();
+    assert!(!failed.status.success());
+    let error = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        error.contains("class UML exceeds") && error.contains("smaller class entry or page"),
+        "{error}"
+    );
+    assert_eq!(before, artifacts(&catalog));
+
+    for args in [
+        vec!["--entry", id.as_str()],
+        vec!["--query", "FocusClass", "--limit", "1"],
+    ] {
+        let result = report(
+            f.diagram(&catalog, &args)
+                .args(["--no-render"])
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(result["coverage"]["catalogClasses"], 9);
+        assert_eq!(result["coverage"]["homeClasses"], 1);
+        let legend = json_file(Path::new(result["legend"].as_str().unwrap()));
+        assert_eq!(legend["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(legend["entries"][0]["id"], id);
+    }
+
+    let handle = open_catalog(&catalog).unwrap();
+    for selection in [
+        ClassSelection::Entry { id: id.clone() },
+        ClassSelection::Page {
+            query: Some("FocusClass".into()),
+            path: None,
+            limit: 1,
+            offset: 0,
+        },
+    ] {
+        let result = class_diagrams(&handle, &selection, &RenderMode::SourceOnly).unwrap();
+        assert_eq!(result.coverage.catalog_classes, 9);
+        assert_eq!(result.coverage.home_classes, 1);
+        let before = artifacts(&catalog);
+        assert!(
+            class_diagrams(&handle, &selection, &RenderMode::SourceOnly)
+                .unwrap()
+                .reused
+        );
+        assert_eq!(before, artifacts(&catalog));
+    }
+    let before = artifacts(&catalog);
+    assert!(class_diagrams(&handle, &ClassSelection::All, &RenderMode::SourceOnly).is_err());
+    assert!(class_diagrams(
+        &handle,
+        &ClassSelection::Entry {
+            id: "class_unknown".into()
+        },
+        &RenderMode::SourceOnly
+    )
+    .is_err());
+    assert_eq!(before, artifacts(&catalog));
+    f.safe();
+}
+
 fn class_relation<'a>(legend: &'a Value, name: &str, kind: &str) -> &'a Value {
     let entry = class_entry(legend, name);
     let matches: Vec<_> = legend["relationships"]
@@ -312,6 +401,19 @@ fn check_bundle(r: &Value, expected: &[Value]) -> Value {
     );
     let diagrams = r["diagrams"].as_array().unwrap();
     assert!(!diagrams.is_empty() && diagrams.len() <= 128);
+    let html = text(r, "viewer");
+    if diagrams.iter().all(|d| d["svg"].is_null()) {
+        assert!(html.contains("Source-only: no image generated."));
+        assert!(html.contains("Class Index and Full Details") && html.contains("proofSources"));
+        for absent in ["<img", ".svg", "data-viewer", "<button", "<script>"] {
+            assert!(!html.contains(absent), "unexpected {absent}");
+        }
+    }
+    for diagram in diagrams {
+        let source = format!("{}.mmd", diagram["id"].as_str().unwrap());
+        assert!(html.contains(&format!("href=\"{source}\">Mermaid source</a>")));
+        assert!(view.join(source).is_file());
+    }
     assert_eq!(diagrams.len(), legend["groups"].as_array().unwrap().len());
     let entries = legend["entries"].as_array().unwrap();
     let expected: BTreeSet<_> = expected.iter().map(|e| e["id"].as_str().unwrap()).collect();
@@ -388,7 +490,11 @@ fn default_has_all_88_actual_class_boxes_and_uncapped_member_metadata_offline() 
     assert_eq!(legend["coverage"]["homeClasses"], 88);
     assert_eq!(legend["coverage"]["allSelectedClassesRepresented"], true);
     let html = text(&r, "viewer");
-    assert_eq!(html.matches("<script>").count(), 1);
+    assert_eq!(html.matches("<script>").count(), 0);
+    assert!(html.contains("Source-only: no image generated."));
+    for absent in ["<img", ".svg", "data-viewer", "<button"] {
+        assert!(!html.contains(absent), "unexpected {absent}");
+    }
     assert!(html.contains("Content-Security-Policy") && html.contains("sha256-"));
     assert!(!html.contains("<img src=x") && !html.contains("class-overview"));
     assert_eq!(html.matches("data-class-id=").count(), 88);
@@ -694,6 +800,8 @@ fn later_group_render_failure_and_svg_cap_leave_previous_bundle_intact() {
 fn rendered_cache_preserves_all_group_bytes_and_mtimes() {
     let Some(f) = Fixture::new() else { return };
     let catalog = f.saved();
+    let source = f.complete(&catalog);
+    assert!(text(&source, "viewer").contains("Source-only: no image generated."));
     let r = report(
         f.diagram(&catalog, &[])
             .env("IDEOMANCER_MMDC", &f.renderer)
@@ -701,6 +809,9 @@ fn rendered_cache_preserves_all_group_bytes_and_mtimes() {
             .unwrap(),
     );
     check_bundle(&r, &classes(&catalog));
+    let html = text(&r, "viewer");
+    assert!(html.contains("data-viewer-viewport") && html.contains("<img"));
+    assert_eq!(html.matches("<script>").count(), 1);
     let before = artifacts(&catalog);
     report(
         f.diagram(&catalog, &[])
@@ -809,6 +920,7 @@ fn rediscovery_invalidates_both_slots_and_empty_incomplete_snapshots_stay_honest
     check_bundle(&empty, &[]);
     assert_eq!(empty["coverage"]["homeClasses"], 0);
     assert!(text(&empty, "viewer").contains("No classes in the saved catalog"));
+    assert!(text(&empty, "viewer").contains("Source-only: no image generated."));
     f.write(
         "valid.py",
         "class Retained:\n    def observed(self):\n        self.value = None\n",

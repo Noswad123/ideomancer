@@ -327,6 +327,11 @@ fn openapi3_yaml_and_json_show_inert_redacted_contract_metadata() {
             "https://{tenant}.example.invalid/api"
         );
         let html = artifact(&report, "viewer");
+        assert!(html.contains("Source-only: no image generated."));
+        assert!(html.contains("href=\"diagram.mmd\">Mermaid source</a>"));
+        for absent in ["<img", ".svg", "data-viewer", "<button", "<script>"] {
+            assert!(!html.contains(absent), "unexpected {absent}");
+        }
         for visible in [
             "Request",
             "Responses",

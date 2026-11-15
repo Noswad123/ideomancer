@@ -71,7 +71,43 @@ fn member_table(title: &str, members: &[Value]) -> String {
     html
 }
 
-pub fn build(catalog: &Catalog, evidence: &Evidence) -> Result<Documents, String> {
+pub(super) struct Semantics {
+    pub entries: Vec<Value>,
+    pub warnings: BTreeSet<String>,
+    pub class_ids: BTreeMap<String, String>,
+}
+
+// Ground the whole snapshot, but project heavy details only for selected classes.
+// Document budgets belong to the consuming renderer, not this shared model.
+pub(super) fn semantics(
+    catalog: &Catalog,
+    evidence: &Evidence,
+    selected: Option<&BTreeSet<&str>>,
+) -> Result<Semantics, String> {
+    semantics_with_budget(
+        catalog,
+        evidence,
+        selected,
+        &mut source_view::WorkingBudget::default(),
+    )
+}
+
+fn semantics_with_budget(
+    catalog: &Catalog,
+    evidence: &Evidence,
+    selected: Option<&BTreeSet<&str>>,
+    budget: &mut source_view::WorkingBudget,
+) -> Result<Semantics, String> {
+    semantic_model(catalog, evidence, selected, budget, true)
+}
+
+pub(super) fn semantic_model(
+    catalog: &Catalog,
+    evidence: &Evidence,
+    selected: Option<&BTreeSet<&str>>,
+    budget: &mut source_view::WorkingBudget,
+    members: bool,
+) -> Result<Semantics, String> {
     if catalog.schema_version != crate::catalog::VERSION
         || catalog.snapshot_id != evidence.snapshot_id
         || catalog.extractor_version != evidence.extractor_version
@@ -108,6 +144,9 @@ pub fn build(catalog: &Catalog, evidence: &Evidence) -> Result<Documents, String
                 .into(),
         );
     }
+    if selected.is_some_and(|ids| ids.iter().any(|id| !inventory.contains_key(id))) {
+        return Err("class selection contains an unknown catalog class ID".into());
+    }
     let by_id: BTreeMap<_, _> = evidence.facts.iter().map(|f| (f.id.as_str(), f)).collect();
     let facts: Vec<_> = by_id.values().copied().collect();
     for fact in &facts {
@@ -142,13 +181,25 @@ pub fn build(catalog: &Catalog, evidence: &Evidence) -> Result<Documents, String
 
     let class_ids: BTreeMap<_, _> = inventory
         .values()
-        .map(|i| (i.fact_id.as_str(), i.id.as_str()))
+        .map(|i| (i.fact_id.clone(), i.id.clone()))
         .collect();
-    let mut items: Vec<_> = inventory.values().copied().collect();
+    let mut items: Vec<_> = inventory
+        .values()
+        .copied()
+        .filter(|i| selected.is_none_or(|ids| ids.contains(i.id.as_str())))
+        .collect();
     items.sort_by_key(|i| (&i.path, &i.symbol, i.line, &i.id));
+    let selected_facts = if members {
+        items.iter().map(|i| i.fact_id.as_str()).collect()
+    } else {
+        BTreeSet::new()
+    };
+    let mut js_members = js
+        .as_ref()
+        .map(|js| source_view::javascript_member_inventory(js, &by_id, &selected_facts, budget))
+        .transpose()?
+        .unwrap_or_default();
     let mut entries = Vec::new();
-    let mut folders: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    let mut semantic_bytes = 0usize;
     for item in items {
         let fact = by_id[item.fact_id.as_str()];
         let path = relative_path(&item.path)?;
@@ -167,17 +218,12 @@ pub fn build(catalog: &Catalog, evidence: &Evidence) -> Result<Documents, String
         entry["sourceModel"] = json!("static-candidate");
         entry["confidence"] = json!("source-syntax-only");
         entry["folder"] = json!(folder);
-        let (methods, attributes) = if let Some(js) = &js {
+        let mut charged = budget.replace(0, &entry)?;
+        let (methods, attributes) = if js.is_some() {
             let mut methods = Vec::new();
             let mut attributes = Vec::new();
-            for mut m in source_view::javascript_members(fact, js, &by_id)? {
-                if !m["symbol"].is_string() {
-                    m["symbol"] = m["sourceRefs"]
-                        .as_array()
-                        .and_then(|refs| refs.last())
-                        .map(|r| r["symbol"].clone())
-                        .unwrap_or(Value::Null);
-                }
+            for m in js_members.remove(fact.id.as_str()).unwrap_or_default() {
+                charged += source_view::WorkingBudget::size(&m)?;
                 if m["memberKind"] == "field" {
                     attributes.push(m);
                 } else {
@@ -185,16 +231,26 @@ pub fn build(catalog: &Catalog, evidence: &Evidence) -> Result<Documents, String
                 }
             }
             (methods, attributes)
-        } else {
+        } else if members {
             let (methods, attributes) = source_view::python_members(fact, &facts);
-            let methods = methods.into_iter().map(|m| json!({"name":m.symbol.rsplit('.').next().unwrap_or(&m.symbol),
+            let methods = methods.into_iter().map(|m| {
+                let member = json!({"name":m.symbol.rsplit('.').next().unwrap_or(&m.symbol),
                 "symbol":m.symbol,"memberKind":m.kind,"visibility":"UNKNOWN (Python naming is not access control)",
-                "static":null,"type":"UNKNOWN","parameters":"UNKNOWN","sourceRefs":[source(m)],"sourceFactIds":[m.id]})).collect();
-            let attributes = attributes.into_iter().map(|(name, bindings)| json!({"symbol":format!("{}.{name}",fact.symbol),
+                "static":null,"type":"UNKNOWN","parameters":"UNKNOWN","sourceRefs":[source(m)],"sourceFactIds":[m.id]});
+                charged += budget.replace(0, &member)?;
+                Ok(member)
+            }).collect::<Result<Vec<_>, String>>()?;
+            let attributes = attributes.into_iter().map(|(name, bindings)| {
+                let member = json!({"symbol":format!("{}.{name}",fact.symbol),
                 "name":name,"memberKind":"observed self/cls binding","visibility":"UNKNOWN (Python naming is not access control)",
                 "static":null,"type":"UNKNOWN","sourceRefs":bindings.iter().map(|b|source(b)).collect::<Vec<_>>(),
-                "sourceFactIds":bindings.iter().map(|b|&b.id).collect::<Vec<_>>()})).collect();
+                "sourceFactIds":bindings.iter().map(|b|&b.id).collect::<Vec<_>>()});
+                charged += budget.replace(0, &member)?;
+                Ok(member)
+            }).collect::<Result<Vec<_>, String>>()?;
             (methods, attributes)
+        } else {
+            (Vec::new(), Vec::new())
         };
         let mut bases = Vec::new();
         for base in source_view::declared_bases(fact, &facts) {
@@ -214,7 +270,7 @@ pub fn build(catalog: &Catalog, evidence: &Evidence) -> Result<Documents, String
                     refs.push(source(import));
                     ids.push(import.id.clone());
                 }
-                target_id = class_ids.get(target.id.as_str()).copied();
+                target_id = class_ids.get(target.id.as_str()).map(String::as_str);
                 target_symbol = Some(target.symbol.as_str());
                 if target_id.is_some() {
                     "resolved catalog declaration"
@@ -224,26 +280,58 @@ pub fn build(catalog: &Catalog, evidence: &Evidence) -> Result<Documents, String
             } else {
                 "unresolved boundary"
             };
-            bases.push(
-                json!({"expression":base.value,"status":status,"targetClassId":target_id,
-                "targetSymbol":target_symbol,"sourceRefs":refs,"sourceFactIds":ids}),
-            );
+            let base = json!({"expression":base.value,"status":status,"targetClassId":target_id,
+                "targetSymbol":target_symbol,"sourceRefs":refs,"sourceFactIds":ids});
+            charged += budget.replace(0, &base)?;
+            bases.push(base);
         }
-        entry["methods"] = json!(methods);
-        entry["attributes"] = json!(attributes);
-        entry["declaredBases"] = json!(bases);
-        entry["unresolvedInherits"] = json!(bases
+        let mut unresolved = Vec::new();
+        for base in bases
             .iter()
             .filter(|b| b["status"] == "unresolved boundary")
-            .collect::<Vec<_>>());
+        {
+            charged += budget.replace(0, base)?;
+            unresolved.push(base.clone());
+        }
         entry["methodCount"] = json!(methods.len());
         entry["fieldCount"] = json!(attributes.len());
-        semantic_bytes += serde_json::to_vec(&entry).map_err(|e| e.to_string())?.len();
+        entry["methods"] = Value::Array(methods);
+        entry["attributes"] = Value::Array(attributes);
+        entry["declaredBases"] = Value::Array(bases);
+        entry["unresolvedInherits"] = Value::Array(unresolved);
+        budget.replace(charged, &entry)?;
+        entries.push(entry);
+        #[cfg(test)]
+        {
+            budget.projected_entries += 1;
+        }
+    }
+    Ok(Semantics {
+        entries,
+        warnings,
+        class_ids,
+    })
+}
+
+// Retained as the bounded inventory renderer; UML consumes semantics directly.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn build(catalog: &Catalog, evidence: &Evidence) -> Result<Documents, String> {
+    let Semantics {
+        entries,
+        warnings,
+        class_ids,
+    } = semantics(catalog, evidence, None)?;
+    let mut folders: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let mut semantic_bytes = 0usize;
+    for (index, entry) in entries.iter().enumerate() {
+        semantic_bytes += serde_json::to_vec(entry).map_err(|e| e.to_string())?.len();
         if semantic_bytes > MAX_DOCUMENTS {
             return Err(LIMIT_ERROR.into());
         }
-        folders.entry(folder).or_default().push(entries.len());
-        entries.push(entry);
+        folders
+            .entry(entry["folder"].as_str().unwrap().to_string())
+            .or_default()
+            .push(index);
     }
     let aggregated_folders = if folders.len() > MAX_FOLDER_NODES {
         folders.len() - (MAX_FOLDER_NODES - 1)
@@ -288,14 +376,14 @@ pub fn build(catalog: &Catalog, evidence: &Evidence) -> Result<Documents, String
         "extractorVersion":catalog.extractor_version,"complete":catalog.complete,
         "snapshot":{"id":catalog.snapshot_id,"extractorVersion":catalog.extractor_version,"complete":catalog.complete},
         "entries":entries,"groups":groups,"edges":[],"warnings":warnings,
-        "coverage":{"catalogClasses":inventory.len(),"listedClasses":entries.len(),"folderCount":folders.len(),
+        "coverage":{"catalogClasses":class_ids.len(),"listedClasses":entries.len(),"folderCount":folders.len(),
             "diagramFolderNodes":folder_nodes,"diagramNodes":if folders.is_empty(){1}else{folder_nodes},
             "aggregatedFolders":aggregated_folders,"aggregatedClasses":aggregated_classes,
             "allCatalogClassesListed":true,"grounding":"exact fresh catalog class inventory", "renderTimeExclusions":false},
         "layout":{"maxFolderNodes":MAX_FOLDER_NODES,"meaning":"source organization only; no dependency edges"}});
     let legend_text = serde_json::to_string_pretty(&legend).map_err(|e| e.to_string())?;
     let mut body = format!("<h1>All Catalog Classes</h1><p><strong>{} catalog classes / {} listed</strong> in {} source folders.</p><p>Snapshot: <code>{}</code>. Extractor: <code>{}</code>.</p>",
-        inventory.len(), entries.len(), folders.len(), html_text(&catalog.snapshot_id), html_text(&catalog.extractor_version));
+        class_ids.len(), entries.len(), folders.len(), html_text(&catalog.snapshot_id), html_text(&catalog.extractor_version));
     if !catalog.complete {
         body.push_str("<p class=\"incomplete\" role=\"alert\"><strong>INCOMPLETE SNAPSHOT: classes and members may be missing. All saved catalog classes are listed, not all repository classes.</strong></p>");
     }
@@ -865,5 +953,22 @@ mod tests {
         assert!(result.is_err());
         let error = result.err().unwrap();
         assert!(error.contains("combined 8 MiB") && error.contains("no classes were truncated"));
+    }
+
+    #[test]
+    fn entry_work_guard_stops_before_assembling_all_small_classes() {
+        let e = evidence(100, 4);
+        let c = crate::catalog::build(&e, "/source").unwrap();
+        let mut budget = source_view::WorkingBudget::limited(8 * 1024);
+        let error = semantics_with_budget(&c, &e, None, &mut budget)
+            .err()
+            .unwrap();
+        assert!(error.contains("working budget exceeded"));
+        assert!(budget.projected_entries > 0 && budget.projected_entries < 100);
+        let selected = BTreeSet::from([c.items[0].id.as_str()]);
+        let mut budget = source_view::WorkingBudget::limited(8 * 1024);
+        let model = semantics_with_budget(&c, &e, Some(&selected), &mut budget).unwrap();
+        assert_eq!(model.entries.len(), 1);
+        assert_eq!(model.class_ids.len(), 100);
     }
 }

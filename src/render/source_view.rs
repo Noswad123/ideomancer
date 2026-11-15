@@ -6,6 +6,81 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_DOCUMENT: usize = 8 * 1024 * 1024;
 
+// Expanded semantic records have a separate working allowance, not a larger
+// published-document limit. Evidence-backed lookup maps remain evidence-bounded.
+pub(super) const MAX_SEMANTIC_WORK: usize = 16 * 1024 * 1024;
+
+pub(crate) struct WorkingBudget {
+    used: usize,
+    limit: usize,
+    #[cfg(test)]
+    pub projected_members: usize,
+    #[cfg(test)]
+    pub projected_entries: usize,
+}
+
+impl Default for WorkingBudget {
+    fn default() -> Self {
+        Self {
+            used: 0,
+            limit: MAX_SEMANTIC_WORK,
+            #[cfg(test)]
+            projected_members: 0,
+            #[cfg(test)]
+            projected_entries: 0,
+        }
+    }
+}
+
+impl WorkingBudget {
+    #[cfg(test)]
+    pub(super) fn limited(limit: usize) -> Self {
+        Self {
+            limit,
+            ..Self::default()
+        }
+    }
+
+    // Count compact JSON without allocating another serialized model, plus
+    // conservative per-container overhead for the owned JSON trees/inventory.
+    pub(super) fn size(value: &Value) -> Result<usize, String> {
+        struct Counter(usize);
+        impl std::io::Write for Counter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0 = self.0.saturating_add(bytes.len());
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        fn overhead(value: &Value) -> usize {
+            match value {
+                Value::Object(v) => 256 + v.values().map(overhead).sum::<usize>(),
+                Value::Array(v) => 64 + v.iter().map(overhead).sum::<usize>(),
+                _ => 0,
+            }
+        }
+        let mut counter = Counter(0);
+        serde_json::to_writer(&mut counter, value).map_err(|e| e.to_string())?;
+        Ok(counter.0.saturating_add(overhead(value)))
+    }
+
+    pub(crate) fn replace(&mut self, previous: usize, value: &Value) -> Result<usize, String> {
+        let size = Self::size(value)?;
+        let next = self
+            .used
+            .checked_sub(previous)
+            .ok_or("invalid class semantic working budget accounting")?
+            .saturating_add(size);
+        if next > self.limit {
+            return Err(format!("class semantic working budget exceeded (estimated expanded records: {next} bytes, working limit: {} bytes; published documents remain limited to 8 MiB); no classes were truncated. Select a smaller class entry or page.", self.limit));
+        }
+        self.used = next;
+        Ok(size)
+    }
+}
+
 pub struct Documents {
     pub mermaid: String,
     pub legend: Value,
@@ -418,16 +493,39 @@ pub(super) fn python_members<'a>(
 }
 
 /// Explicit JavaScript owner IDs and source-declared visibility, never name heuristics.
-pub(super) fn javascript_members(
-    fact: &Fact,
+pub(super) fn javascript_member_inventory(
     js: &crate::js_focus::Index<'_>,
     by_id: &BTreeMap<&str, &Fact>,
-) -> Result<Vec<Value>, String> {
-    let mut members = Vec::new();
+    selected: &BTreeSet<&str>,
+    budget: &mut WorkingBudget,
+) -> Result<BTreeMap<String, Vec<Value>>, String> {
+    let indices: BTreeMap<_, _> = js
+        .facts
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (f.id.as_str(), i))
+        .collect();
+    let member_proofs: BTreeMap<_, _> = js
+        .members
+        .iter()
+        .map(|(meta, owner, value)| (js.facts[*meta].id.as_str(), (*owner, value)))
+        .collect();
+    let member_declarations: BTreeSet<_> = js
+        .members
+        .iter()
+        .filter_map(|(_, owner, value)| {
+            value["declarationFactId"]
+                .as_str()
+                .map(|id| (js.facts[*owner].id.as_str(), id))
+        })
+        .collect();
+    let mut inventory: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     for (meta, owner, value) in &js.members {
-        if js.facts[*owner].id != fact.id {
+        let fact = js.facts[*owner];
+        if !selected.contains(fact.id.as_str()) {
             continue;
         }
+        let members = inventory.entry(fact.id.clone()).or_default();
         let name = value["name"]
             .as_str()
             .ok_or("Invalid JavaScript member name")?;
@@ -451,9 +549,15 @@ pub(super) fn javascript_members(
             .and_then(|id| by_id.get(id))
             .map(|f| f.symbol.clone())
             .unwrap_or_else(|| format!("{}.{name}", fact.symbol));
-        members.push(json!({"name":name,"symbol":symbol,"visibility":visibility,"static":value["static"],
+        let member = json!({"name":name,"symbol":symbol,"visibility":visibility,"static":value["static"],
             "memberKind":value["memberKind"],"type":value.get("type").cloned().unwrap_or(json!("UNKNOWN")),
-            "sourceRefs":refs,"sourceFactIds":ids}));
+            "sourceRefs":refs,"sourceFactIds":ids});
+        budget.replace(0, &member)?;
+        members.push(member);
+        #[cfg(test)]
+        {
+            budget.projected_members += 1;
+        }
     }
     let mut signature_declarations = BTreeSet::new();
     let member_identifier = |s: &str| {
@@ -466,6 +570,7 @@ pub(super) fn javascript_members(
                     && (!c.is_ascii() || c.is_ascii_alphanumeric() || matches!(c, '_' | '$'))
             })
     };
+    // Validate all receipts, including unselected owners, before projecting details.
     for extra in by_id.values().filter(|f| {
         matches!(
             f.kind.as_str(),
@@ -478,11 +583,7 @@ pub(super) fn javascript_members(
             .as_str()
             .and_then(|id| by_id.get(id))
             .ok_or_else(invalid)?;
-        let oi = js
-            .facts
-            .iter()
-            .position(|f| f.id == owner.id)
-            .ok_or_else(invalid)?;
+        let oi = *indices.get(owner.id.as_str()).ok_or_else(invalid)?;
         if v["policy"] != "javascript-class-members-1" || !contains(owner, extra) {
             return Err(invalid());
         }
@@ -491,11 +592,7 @@ pub(super) fn javascript_members(
                 .as_str()
                 .and_then(|id| by_id.get(id))
                 .ok_or_else(invalid)?;
-            let di = js
-                .facts
-                .iter()
-                .position(|f| f.id == declaration.id)
-                .ok_or_else(invalid)?;
+            let di = *indices.get(declaration.id.as_str()).ok_or_else(invalid)?;
             let params = v["parameters"].as_array().ok_or_else(invalid)?;
             let generics = v["typeParameters"].as_array().ok_or_else(invalid)?;
             let text = |v: &Value, max: usize| {
@@ -533,10 +630,12 @@ pub(super) fn javascript_members(
                         || !ty(&p["type"])
                 })
                 || !signature_declarations.insert(declaration.id.as_str())
+                || !member_declarations.contains(&(owner.id.as_str(), declaration.id.as_str()))
             {
                 return Err(invalid());
             }
-            if owner.id == fact.id {
+            if selected.contains(owner.id.as_str()) {
+                let members = inventory.entry(owner.id.clone()).or_default();
                 let m = members
                     .iter_mut()
                     .find(|m| {
@@ -545,6 +644,7 @@ pub(super) fn javascript_members(
                             .is_some_and(|ids| ids.contains(&json!(declaration.id)))
                     })
                     .ok_or_else(invalid)?;
+                let mut charged = WorkingBudget::size(m)?;
                 m["signature"] = json!({"policy":v["policy"],"declarationFactId":v["declarationFactId"],"ownerFactId":v["ownerFactId"]});
                 m["parameters"] = v["parameters"].clone();
                 m["returnType"] = v["returnType"].clone();
@@ -554,6 +654,7 @@ pub(super) fn javascript_members(
                     .unwrap()
                     .push(json!(extra.id));
                 m["sourceRefs"].as_array_mut().unwrap().push(source(extra));
+                charged = budget.replace(charged, m)?;
                 for i in js.closure(di)? {
                     let f = js.facts[i];
                     if !m["sourceFactIds"]
@@ -563,6 +664,7 @@ pub(super) fn javascript_members(
                     {
                         m["sourceFactIds"].as_array_mut().unwrap().push(json!(f.id));
                         m["sourceRefs"].as_array_mut().unwrap().push(source(f));
+                        charged = budget.replace(charged, m)?;
                     }
                 }
             }
@@ -571,11 +673,7 @@ pub(super) fn javascript_members(
                 .as_str()
                 .and_then(|id| by_id.get(id))
                 .ok_or_else(invalid)?;
-            let ci = js
-                .facts
-                .iter()
-                .position(|f| f.id == class.id)
-                .ok_or_else(invalid)?;
+            let ci = *indices.get(class.id.as_str()).ok_or_else(invalid)?;
             let name = v["memberName"].as_str().ok_or_else(invalid)?;
             let plain = name.strip_prefix('#').unwrap_or(name);
             let support = v["supportingFactIds"].as_array().ok_or_else(invalid)?;
@@ -620,27 +718,34 @@ pub(super) fn javascript_members(
                         || id == js.facts[class_meta].id
                         || id == js.facts[owner_meta].id
                         || (f.kind == "js_member"
-                            && js.members.iter().any(|(mi, co, mv)| {
-                                js.facts[*mi].id == id
-                                    && *co == ci
-                                    && mv["declarationFactId"] == owner.id
+                            && member_proofs.get(id).is_some_and(|(co, mv)| {
+                                *co == ci && mv["declarationFactId"] == owner.id
                             })))
                 {
                     return Err(invalid());
                 }
                 ids.insert(id);
             }
-            if class.id == fact.id {
+            if selected.contains(class.id.as_str()) {
+                let members = inventory.entry(class.id.clone()).or_default();
                 let position = members.iter().position(|m| {
                     m["memberKind"] == "field" && m["name"] == name && m["static"] == false
                 });
                 let m = if let Some(i) = position {
                     &mut members[i]
                 } else {
-                    members.push(json!({"name":name,"symbol":format!("{}.{name}",class.symbol),"memberKind":"field","visibility":v["visibility"],"static":false,"type":null,"sourceFactIds":[],"sourceRefs":[]}));
+                    let member = json!({"name":name,"symbol":format!("{}.{name}",class.symbol),"memberKind":"field","visibility":v["visibility"],"static":false,"type":null,"sourceFactIds":[],"sourceRefs":[]});
+                    budget.replace(0, &member)?;
+                    members.push(member);
+                    #[cfg(test)]
+                    {
+                        budget.projected_members += 1;
+                    }
                     members.last_mut().unwrap()
                 };
+                let mut charged = WorkingBudget::size(m)?;
                 m["observation"] = json!("direct constructor assignment; not definite initialization or lifetime ownership");
+                charged = budget.replace(charged, m)?;
                 for id in ids {
                     if !m["sourceFactIds"].as_array().unwrap().contains(&json!(id)) {
                         m["sourceFactIds"].as_array_mut().unwrap().push(json!(id));
@@ -648,12 +753,13 @@ pub(super) fn javascript_members(
                             .as_array_mut()
                             .unwrap()
                             .push(source(by_id[id]));
+                        charged = budget.replace(charged, m)?;
                     }
                 }
             }
         }
     }
-    Ok(members)
+    Ok(inventory)
 }
 
 pub(super) fn declared_bases<'a>(fact: &Fact, facts: &[&'a Fact]) -> Vec<&'a Fact> {
@@ -664,12 +770,22 @@ pub(super) fn declared_bases<'a>(fact: &Fact, facts: &[&'a Fact]) -> Vec<&'a Fac
         .collect()
 }
 
+#[cfg(test)]
 pub fn build(
     catalog: &Catalog,
     evidence: &Evidence,
     page: &Page,
     kind: &Kind,
 ) -> Result<Documents, String> {
+    build_variants(catalog, evidence, page, kind).map(|(documents, _)| documents)
+}
+
+pub(crate) fn build_variants(
+    catalog: &Catalog,
+    evidence: &Evidence,
+    page: &Page,
+    kind: &Kind,
+) -> Result<(Documents, String), String> {
     if *kind == Kind::Workflow {
         return Err(
             "Workflow source views are unsupported; use focused analysis for workflows.".into(),
@@ -721,6 +837,22 @@ pub fn build(
     } else {
         None
     };
+    let mut budget = WorkingBudget::default();
+    let mut js_members = if *kind == Kind::Class {
+        js.as_ref()
+            .map(|js| {
+                javascript_member_inventory(
+                    js,
+                    &by_id,
+                    &page.items.iter().map(|i| i.fact_id.as_str()).collect(),
+                    &mut budget,
+                )
+            })
+            .transpose()?
+            .unwrap_or_default()
+    } else {
+        BTreeMap::new()
+    };
     let name = if *kind == Kind::Api { "api" } else { "class" };
     let page_number = (page.offset / page.limit).saturating_add(1);
     let title = if *kind == Kind::Api {
@@ -767,6 +899,7 @@ pub fn build(
             })
             .collect::<Result<_, _>>()?;
         let mut entry = serde_json::to_value(item).map_err(|e| e.to_string())?;
+        let mut charged = 0;
         entry["sourceRefs"] = json!(refs);
         entry["confidence"] = json!("source-syntax-only");
         entry["sourceFactIds"] = json!(item.evidence_ids);
@@ -862,7 +995,7 @@ pub fn build(
             if item.route_path.is_none() {
                 warnings.insert("Some route paths are dynamic and unresolved.".into());
             }
-        } else if let Some(js) = &js {
+        } else if js.is_some() {
             let key = &selected_classes[item.fact_id.as_str()];
             let display = fact.symbol.rsplit('.').next().unwrap_or(&fact.symbol);
             mermaid.push_str(&format!(
@@ -873,7 +1006,8 @@ pub fn build(
             let mut attributes = Vec::new();
             let mut visible_methods = 0;
             let mut visible_attributes = 0;
-            for mut detail in javascript_members(fact, js, &by_id)? {
+            for mut detail in js_members.remove(fact.id.as_str()).unwrap_or_default() {
+                let previous = WorkingBudget::size(&detail)?;
                 let value = &detail;
                 let name = value["name"]
                     .as_str()
@@ -905,6 +1039,7 @@ pub fn build(
                 }
                 detail["visible"] = json!(visible);
                 detail["omissionReason"] = json!(if visible { None } else { Some("member limit") });
+                charged += budget.replace(previous, &detail)?;
                 if method {
                     methods.push(detail);
                 } else {
@@ -920,8 +1055,8 @@ pub fn build(
             entry["visibleAttributes"] = json!(visible_attributes);
             entry["omittedMethods"] = json!(methods.len() - visible_methods);
             entry["omittedAttributes"] = json!(attributes.len() - visible_attributes);
-            entry["methods"] = json!(methods);
-            entry["attributes"] = json!(attributes);
+            entry["methods"] = Value::Array(methods);
+            entry["attributes"] = Value::Array(attributes);
             entry["declaredBases"] = json!(bases);
             entry["unresolvedInherits"] = json!(bases);
         } else {
@@ -947,9 +1082,11 @@ pub fn build(
                 if !safe {
                     warnings.insert("Non-ASCII or unsupported member names are omitted from Mermaid; full labels remain in the legend.".into());
                 }
-                method_details.push(json!({"name": label, "symbol": m.symbol, "visible": visible,
+                let member = json!({"name": label, "symbol": m.symbol, "visible": visible,
                     "omissionReason": if visible { None } else if !safe { Some("unsupported identifier") } else { Some("member limit") },
-                    "parameters": "UNKNOWN (not rendered)", "sourceRefs": [source(m)], "sourceFactIds": [m.id]}));
+                    "parameters": "UNKNOWN (not rendered)", "sourceRefs": [source(m)], "sourceFactIds": [m.id]});
+                charged += budget.replace(0, &member)?;
+                method_details.push(member);
             }
             let mut attribute_details = Vec::new();
             let mut visible_attributes = 0;
@@ -964,11 +1101,11 @@ pub fn build(
                 if !safe {
                     warnings.insert("Non-ASCII or unsupported member names are omitted from Mermaid; full labels remain in the legend.".into());
                 }
-                attribute_details.push(
-                    json!({"name": field, "visible": visible, "type": "UNKNOWN",
+                let member = json!({"name": field, "visible": visible, "type": "UNKNOWN",
                     "sourceRefs": bindings.iter().map(|b| source(b)).collect::<Vec<_>>(),
-                    "sourceFactIds": bindings.iter().map(|b| &b.id).collect::<Vec<_>>()}),
-                );
+                    "sourceFactIds": bindings.iter().map(|b| &b.id).collect::<Vec<_>>()});
+                charged += budget.replace(0, &member)?;
+                attribute_details.push(member);
             }
             mermaid.push_str("  }\n\n");
             let mut bases = Vec::new();
@@ -1000,8 +1137,8 @@ pub fn build(
                     "sourceRefs": citations, "sourceFactIds": ids}));
             }
             entry["diagramId"] = json!(key);
-            entry["methods"] = json!(method_details);
-            entry["attributes"] = json!(attribute_details);
+            entry["methods"] = Value::Array(method_details);
+            entry["attributes"] = Value::Array(attribute_details);
             entry["visibleMethods"] = json!(visible_methods);
             entry["visibleAttributes"] = json!(visible_attributes);
             entry["omittedMethods"] = json!(methods.len() - visible_methods);
@@ -1012,6 +1149,7 @@ pub fn build(
                 .filter(|b| b["diagramId"].is_null())
                 .collect::<Vec<_>>());
         }
+        budget.replace(charged, &entry)?;
         entries.push(entry);
     }
     if *kind == Kind::Api {
@@ -1053,25 +1191,118 @@ pub fn build(
     } else {
         String::new()
     };
-    let html = super::viewer::document(
+    let make_html = |presentation: super::viewer::Presentation| -> Result<String, String> {
+        Ok(presentation.document(
         &title,
         &format!("<h1>{}</h1><p>Static snapshot source inventory, not a live runtime check. Keep proprietary source metadata local.</p>{}{}<h2>SourceRefs and full entry details</h2><pre>{}</pre>",
-            html_text(&title), selection_note, super::viewer::diagram("Static source diagram", "Static source candidates. Full labels and source references follow."), html_text(&legend_text)),
-    );
-    if html.len() > MAX_DOCUMENT {
+            html_text(&title), selection_note, presentation.diagram("Static source diagram", "Static source candidates. Full labels and source references follow.", "diagram")?, html_text(&legend_text)),
+    ))
+    };
+    let html = make_html(super::viewer::Presentation::Rendered)?;
+    let source_html = make_html(super::viewer::Presentation::SourceOnly)?;
+    if html.len().max(source_html.len()) > MAX_DOCUMENT {
         return Err("source view HTML exceeds the 8 MiB limit; request a smaller page".into());
     }
-    Ok(Documents {
-        mermaid,
-        legend,
-        html,
-    })
+    Ok((
+        Documents {
+            mermaid,
+            legend,
+            html,
+        },
+        source_html,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::catalog::{self, Filter};
+
+    #[test]
+    fn working_budget_replaces_growing_records_without_double_charging() {
+        let mut value = json!({"name":"state","sourceRefs":[]});
+        let mut budget = WorkingBudget::limited(4096);
+        let mut charged = budget.replace(0, &value).unwrap();
+        for _ in 0..10 {
+            charged = budget.replace(charged, &value).unwrap();
+        }
+        assert_eq!(budget.used, WorkingBudget::size(&value).unwrap());
+        value["sourceRefs"] = json!([{"factId":"proof","path":"model.ts"}]);
+        charged = budget.replace(charged, &value).unwrap();
+        assert_eq!(budget.used, WorkingBudget::size(&value).unwrap());
+        value["type"] = json!("T".repeat(1024));
+        charged = budget.replace(charged, &value).unwrap();
+        value["type"] = json!("T");
+        charged = budget.replace(charged, &value).unwrap();
+        assert_eq!(budget.used, WorkingBudget::size(&value).unwrap());
+        value["type"] = json!("T".repeat(8192));
+        assert!(budget.replace(charged, &value).is_err());
+        assert_eq!(budget.used, charged);
+    }
+
+    #[test]
+    fn member_work_guard_stops_before_projecting_all_small_classes() {
+        use crate::js_focus::tests::{add, source};
+        let mut e = source();
+        let mut selected = BTreeSet::new();
+        for n in 0..40 {
+            let id = format!("small-class-{n}");
+            let symbol = format!("app.Small{n}");
+            add(
+                &mut e,
+                &id,
+                "class",
+                &symbol,
+                50,
+                99,
+                json!(format!("Small{n}")),
+            );
+            add(
+                &mut e,
+                &format!("class-meta-{n}"),
+                "js_declaration",
+                &symbol,
+                50,
+                99,
+                json!({"declarationFactId":id,"ownerFactId":"module","kind":"class","name":format!("Small{n}"),"publicCandidate":true,"visibility":"public"}),
+            );
+            for m in 0..8 {
+                add(
+                    &mut e,
+                    &format!("member-{n}-{m}"),
+                    "js_member",
+                    &symbol,
+                    60 + m,
+                    60 + m,
+                    json!({"ownerFactId":id,"memberKind":"field","name":format!("state{m}"),"visibility":"public","static":false,"type":"T".repeat(512)}),
+                );
+            }
+            selected.insert(id);
+        }
+        let by_id = e
+            .facts
+            .iter()
+            .map(|f| (f.id.as_str(), f))
+            .collect::<BTreeMap<_, _>>();
+        let js = crate::js_focus::Index::new(by_id.values().copied().collect()).unwrap();
+        for id in &selected {
+            let mut budget = WorkingBudget::limited(32 * 1024);
+            javascript_member_inventory(&js, &by_id, &BTreeSet::from([id.as_str()]), &mut budget)
+                .unwrap();
+            assert_eq!(budget.projected_members, 8);
+        }
+        let selected = selected.iter().map(String::as_str).collect();
+        let mut budget = WorkingBudget::limited(32 * 1024);
+        let error = javascript_member_inventory(&js, &by_id, &selected, &mut budget)
+            .err()
+            .unwrap();
+        assert!(
+            error.contains("working budget exceeded")
+                && error.contains("smaller class entry or page")
+        );
+        assert!(budget.projected_members > 8 && budget.projected_members < 40 * 8);
+        assert!(budget.used <= budget.limit);
+    }
 
     #[test]
     fn javascript_members_keep_owner_visibility_caps_and_unresolved_bases() {
@@ -1874,7 +2105,10 @@ mod tests {
         );
         assert_eq!(d.html.matches("<script>").count(), 1);
         for link in d.html.split("href=\"").skip(1) {
-            assert_eq!(link.split('"').next().unwrap(), "diagram.svg");
+            assert!(matches!(
+                link.split('"').next().unwrap(),
+                "diagram.svg" | "diagram.mmd"
+            ));
         }
         assert!(d.html.contains("img-src 'self'; script-src 'sha256-"));
         assert!(d.html.contains("data-viewer-viewport"));

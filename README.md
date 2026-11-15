@@ -172,7 +172,10 @@ the saved snapshot: no extraction Node/compiler/Python, rescan, agent, model, or
 authentication, and no target-source reads. SVG rendering separately uses trusted
 `mmdc` and its toolchain. API pages and focused class pages default to 12 entries,
 at most 30, with `--query`, `--path`, and `--offset` for more chunks.
-`--no-render` needs no `mmdc`; otherwise it adds SVG. Open the reported `viewer`
+`--no-render` needs no `mmdc`; otherwise it adds SVG. A fresh source-only page is
+explicitly labelled and links to Mermaid source and details, without a missing-image
+viewer. An unchanged validated rendered bundle may still be reused by `--no-render`;
+it does not invoke the renderer or discard existing images. Open the reported `viewer`
 alongside its legend. Source views are static candidates, not architecture proposals,
 and have no acceptance state. API paths remain fragments, not actual full URLs.
 Python native endpoint network/services views can derive cited router-prefix context from

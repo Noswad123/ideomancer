@@ -604,6 +604,30 @@ fn api_and_class_views_render_saved_source_without_agent_or_rescan() {
             assert!(path.is_absolute() && path.starts_with(&view) && path.is_file());
         }
         assert!(report["error"].is_null());
+        let html = fs::read_to_string(report["viewer"].as_str().unwrap()).unwrap();
+        assert!(html.contains("<img") && html.contains("data-viewer-viewport"));
+        assert!(html.contains("Mermaid source") && html.contains("SVG image"));
+        let before = artifacts(&view);
+        let reused = success(
+            f.diagram(&catalog)
+                .args([
+                    "--kind",
+                    kind,
+                    "--limit",
+                    "1",
+                    "--offset",
+                    "1",
+                    "--no-render",
+                ])
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(reused["viewer"], report["viewer"]);
+        assert_eq!(
+            artifacts(&view),
+            before,
+            "no-render rewrote a valid rendered bundle"
+        );
         assert!(fs::read_to_string(diagram["mermaid"].as_str().unwrap())
             .unwrap()
             .contains(syntax));
@@ -663,6 +687,18 @@ fn no_render_views_and_selected_api_class_entries_reuse_artifact_bytes() {
         let legend = read_json(Path::new(report["legend"].as_str().unwrap()));
         assert_eq!(legend["entries"].as_array().unwrap().len(), 1);
         assert!(legend.to_string().contains(id));
+        let html = fs::read_to_string(report["viewer"].as_str().unwrap()).unwrap();
+        assert!(html.contains("Source-only: no image generated."));
+        assert!(html.contains("Mermaid source") && html.contains("sourceRefs"));
+        for absent in ["<img", ".svg", "data-viewer", "<button", "<script>"] {
+            assert!(!html.contains(absent), "unexpected {absent}");
+        }
+        for link in html.split("href=\"").skip(1) {
+            let target = link.split('"').next().unwrap();
+            if target.ends_with(".mmd") {
+                assert!(view.join(target).is_file(), "missing source link {target}");
+            }
+        }
         let before = artifacts(&view);
         let mut repeated = success(
             f.diagram(&catalog)
