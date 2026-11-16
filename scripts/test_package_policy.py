@@ -17,6 +17,7 @@ class PackagePolicyTests(unittest.TestCase):
         self.assertIn(name, expected)
         manifest = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
         self.assertIn("/docs/*.md", manifest["package"]["include"])
+        self.assertEqual(manifest["dependencies"]["tree-sitter-python"], "=0.25.0")
         notices = (root / name).read_text(encoding="utf-8")
         locked = tomllib.loads((root / "Cargo.lock").read_text(encoding="utf-8"))
         versions = {package["name"]: package["version"] for package in locked["package"]}
@@ -25,6 +26,7 @@ class PackagePolicyTests(unittest.TestCase):
             ("tree-sitter-language", "0.1.5", "8b5c63bffae4c1948106eb0a8d722bf2a9141ce5"),
             ("tree-sitter-javascript", "0.25.0", "44c892e0be055ac465d5eeddae6d3e194424e7de"),
             ("tree-sitter-typescript", "0.23.2", "f975a621f4e7f532fe322e13c4f79495e0a7b2e7"),
+            ("tree-sitter-python", "0.25.0", "293fdc02038ee2bf0e2e206711b69c90ac0d413f"),
             ("streaming-iterator", "0.1.9", "69069dc9e46facef6caa79ee48e47420de92633d"),
             ("regex", "1.13.1", "2b527599eb9eea0dcc288c704584f242f26a5c61"),
             ("regex-automata", "0.4.18", "e6ad938198e68339a593f85d228f2d44cb54718f"),
@@ -63,6 +65,7 @@ class PackagePolicyTests(unittest.TestCase):
             ("regex-syntax Unicode", "74db5baf44a41b1000312c673544b3374e4198af5605c7f9080a402cec42cfa3"),
             ("unsafe-libyaml translation MIT", "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"),
             ("translated libyaml upstream MIT", "c40112449f254b9753045925248313e9270efa36d226b22d82d4cc6c43c57f29"),
+            ("Python MIT", "d724405ce238a22c0d35769c5a36b386ad5958192efe8bbb304fb2896254575f"),
         ]
         self.assertEqual(len(blocks), len(expected))
         for block, (label, digest) in zip(blocks, expected):

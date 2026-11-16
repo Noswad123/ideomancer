@@ -54,11 +54,13 @@ of a manually curated responsibility-level diagram.
 
 ## Native migration parity foundation
 
-P1 has begun with a **private captured-source AST parity harness**, not a native
-Python backend. The production helper, evidence v1 serialization,
+P1 has a **private captured-source AST parity harness**, a native parse-only
+front-end and a narrow declaration-fact candidate, not a production native Python
+backend. The production helper, evidence v1 serialization,
 `python-static-8-generic-facts` identity, snapshot formula, scanner/module policy,
 redaction and resource limits remain unchanged. There is no new CLI flag, public
-toolchain variant, parser dependency, or default migration.
+toolchain variant or default migration. The private front-end adds the exactly
+pinned Python grammar dependency described below.
 
 Production extraction and the harness use the same private `extract_captured`
 seam in `src/analysis.rs`. It serializes the bytes already captured by the no-follow
@@ -68,7 +70,7 @@ bounded helper. It does not read target paths again. Fixtures in
 cleaned temporary directories, not private application examples or new build caches.
 
 Four ordinary unit tests check identity preimages, comparison sensitivity, limit
-boundaries and fail-closed oracle selection. Eight explicit oracle tests pin:
+boundaries and fail-closed oracle selection. Eight explicit AST oracle tests pin:
 
 - Full ordered fact tuples and IDs, encoded metadata and Unicode/surrogate escapes.
 - Definitions, lexical ownership, imports, decorators and ordered parameter kinds.
@@ -80,7 +82,14 @@ boundaries and fail-closed oracle selection. Eight explicit oracle tests pin:
 - Captured-byte replay after source replacement/removal, nonexecution markers,
   exact production-response equivalence and unchanged persistence identity.
 
-The oracle cases are **ignored in the ordinary suite**. Run the gate explicitly
+Two further oracle cases compare private front-end classifications/digests, not
+facts, with the AST helper. They expose grammar-versus-AST acceptance differences
+and intentionally unsupported encodings rather than hiding them as parity.
+Five declaration-candidate oracle cases compare complete, unfiltered ordered AST
+fact vectors for the supported subset, pin signature limits and metadata escaping,
+and verify whole-file rejection, isolated transactions and captured-byte replay.
+
+All fifteen oracle cases are **ignored in the ordinary suite**. Run the gate explicitly
 with an absolute path to an installed, trusted Python >=3.12:
 
 ```sh
@@ -95,11 +104,109 @@ comparison keeps every fact field, ID, encoded value, diagnostic and array order
 interpreter metadata is checked separately and is never stripped from real evidence.
 Fixture expectations are reviewed code, not automatically regenerated goldens.
 
-This foundation does **not** establish full Python parity or native-parser safety.
-The next increment is a private captured-byte Tree-sitter parse front-end with an
-exact reviewed grammar pin, notices and explicit resource/error handling. Native
-fact production, broader Python syntax, constructor forwarding, full FastAPI
-semantics, capability/identity design and default replacement remain later gates.
+### Private parse-only front-end
+
+The parse-only entry point in `src/analysis/python_native.rs` operates on borrowed captured bytes. It has
+no production caller, discovery switch or evidence-publication path. Dependency
+pins are Tree-sitter **0.25.10**, Python grammar **0.25.0**, and language ABI bridge
+**0.1.5**. The normal dependency compiles generated C parser/scanner code and adds
+build cost; it is not a target Python runtime or an automatically installed tool.
+The [retained grammar notice](third-party-notices.md) covers its reviewed MIT text.
+
+Its private parse report contains parser identity, path/module, original-byte SHA-256,
+bounded traversal counters and one classification/diagnostic per input. It returns
+no tree, source text, fact records, Python runtime version, source-completeness flag
+or trusted snapshot identity. `SyntaxAccepted` means the pinned CST has no error or
+missing nodes and its visible-node traversal finished within bounds. It does **not**
+establish CPython AST acceptance: for example, the grammar accepts Python 2 print
+syntax which the Python 3 AST oracle rejects.
+
+The front-end accepts UTF-8, optionally with a leading UTF-8 BOM. Digests always
+cover original bytes, including that BOM. Effective encoding declarations on the
+first two physical lines (LF, CRLF or bare CR) yield `UnsupportedEncoding`, even
+when declaring UTF-8 or containing only ASCII. Cookie detection precedes UTF-8
+validation; invalid UTF-8 without an effective cookie is also explicitly unsupported.
+There is no silent Latin-1 decoding, transcoding or encoding-parity claim.
+
+Input gates retain 5,000 files, 1 MiB/file and 16 MiB total source, reject invalid or
+duplicate relative paths, and bound path/module metadata to 4,096 bytes each. A
+1 MiB compact-JSON report allowance is reserved before parsing, including escaped
+metadata and worst-case summaries. The file-count maximum does not guarantee that
+every metadata set fits that separate report allowance.
+
+One cooperative 60-second invocation budget covers validation, hashing, parser
+input/progress callbacks, immediate post-parse checks and traversal. Cancellation
+is latched independently of whether a tree was returned: EOF caused by a cancelled
+input callback cannot become accepted partial syntax. A cursor walk counts visible
+CST nodes, including punctuation/comments/error/missing nodes, with 200,000 nodes
+per file and depth 256 (root depth zero). Trees are dropped between files. These
+are not hard native-allocation or process-RSS limits: the parser may allocate
+before traversal, and bounded digest/report finalization can continue after expiry.
+
+Ordinary Rust tests exercise the parser without an interpreter:
+
+```sh
+cargo test --locked --offline --jobs 2 --lib analysis::python_native -- --test-threads=2
+```
+
+### Private declaration-fact candidates
+
+A separate private candidate entry point uses
+`src/analysis/python_native/facts.rs`. It observes the same counted CST enter/exit
+events as the front-end: one parse and one walk per file, with no fresh deadline,
+node allowance, second scan or second source read. Production extraction never
+calls it. Its output has per-file outcomes and candidate facts, not `Evidence`,
+source-completeness authority, a Python runtime version or a trusted snapshot.
+
+The accepted file subset is deliberately small:
+
+- Modules containing only supported function declarations, `pass`, and comments.
+- Undecorated synchronous/asynchronous functions, including nested declarations,
+  with bodies containing only `pass` or other supported declarations.
+- Unannotated positional, positional-only, keyword-only, `*args` and `**kwargs`
+  parameters, with validated separators/order and no duplicate names.
+- ASCII function/parameter names. Unicode paths and supplied module metadata are
+  preserved exactly; identifier normalization is not approximated.
+- Space-based indentation, LF/CRLF and an optional leading UTF-8 BOM. Parameters
+  may span lines, but a multiline header with an inline body is not supported.
+
+Defaults, annotations, decorators, type parameters/comments, classes, imports,
+calls, bindings, returns, control flow, literal expressions/docstrings and all
+other unmodeled forms reject the **whole file**. So do non-ASCII identifiers,
+semicolons, explicit line continuations, NUL, bare CR formatting and unsupported
+whitespace outside comments. Some rejected forms are valid Python; rejection means
+this candidate policy cannot prove whole-file fact parity, not that the AST helper
+must reject them. Later syntax/resource errors are not hidden by an earlier
+unsupported form.
+
+`AcceptedFacts` is distinct from parse-only `SyntaxAccepted`. Each rejected file
+retains only the path-stable module baseline, never an accepted declaration prefix.
+Accepted candidates match every AST fact field and global ordering, including
+Python's spaced ASCII-escaped JSON identity preimages, surrogate pairs, signature
+strings, parameter spans and function ends excluding trailing comments. More than
+128 counted parameters or a signature exceeding 16,384 bytes yields the helper's
+exact `{"truncated":true}` signature value; parameter facts remain subject to the
+ordinary transaction/resource gates. Variadic names are not counted in that 128 limit.
+
+Candidate files retain their original-byte digest and borrowed path/module data.
+Parser and collector implementation identities remain separate from production
+evidence identity. The candidate identity also fingerprints the collector policy
+and implementation; equal declaration facts do not erase differing captured inputs.
+
+Existing input, 1 MiB summary, node/depth and cooperative invocation bounds remain.
+Candidate output is separately capped at **100,000 facts including baselines** and
+**32 MiB encoded output**, with another **32 MiB pending working allowance** for
+owned frame text, parameter/signature storage and temporary construction. Admission
+and borrowed baseline reservation precede allocation. A file that exhausts its
+allowance rolls back to its module baseline; invocation cancellation also clears
+earlier declaration candidates. These allowances do not bound total process RSS or
+native parser allocation. Tests inject small limits and deterministic cancellation
+checkpoints rather than relying on wall-clock timing.
+
+This foundation does **not** establish full Python parity or a production native
+backend. Calls and lexical binding guards, richer syntax/encoding parity, classes,
+constructor forwarding, FastAPI semantics, capability/identity design and default
+replacement remain later gates. No existing AST expectations were relaxed.
 
 ## Current extraction boundary
 

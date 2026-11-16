@@ -14,6 +14,9 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[allow(dead_code)] // Private native candidates, pending a production caller.
+mod python_native;
+
 #[cfg(unix)]
 use rustix::fs::{openat, statat, AtFlags, Dir, FileType, Mode, OFlags};
 

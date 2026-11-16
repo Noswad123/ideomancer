@@ -748,3 +748,297 @@ fn captured_replay_matches_production_identity_without_second_read_or_execution(
     assert_eq!(captured.python_version, replay.python_version);
     assert!(!marker.exists());
 }
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn private_frontend_reads_the_same_captured_utf8_without_claiming_fact_parity() {
+    use super::python_native::{parse_batch, ParseStatus};
+
+    let python = oracle();
+    for (bytes, ast_complete, native_status) in [
+        (
+            b"def helper(value):\n    return value\nasync def entry(value):\n    return helper(value)\n".as_slice(),
+            true,
+            ParseStatus::SyntaxAccepted,
+        ),
+        (
+            b"def broken(:\n    pass\n".as_slice(),
+            false,
+            ParseStatus::SyntaxError,
+        ),
+        (
+            b"\xef\xbb\xbfvalue = 'PRIVATE_PARSE_LITERAL'\r\n".as_slice(),
+            true,
+            ParseStatus::SyntaxAccepted,
+        ),
+    ] {
+        let (root, scan) = capture(&[("unit.py", bytes)]);
+        let ast = extract_captured(&python, &scan.sources).unwrap();
+        let native = parse_batch(&scan.sources).unwrap();
+        assert_eq!(ast.complete, ast_complete);
+        assert_eq!(native.files[0].status, native_status);
+        assert!(native.files[0].traversal_finished);
+        assert_eq!(native.files[0].path, scan.sources[0].path);
+        assert_eq!(native.files[0].module, scan.sources[0].module);
+        assert_eq!(native.files[0].sha256, hash(bytes));
+        let native_json = serde_json::to_value(&native).unwrap();
+        for absent in ["facts", "complete", "snapshotId", "schemaVersion", "pythonVersion"] {
+            assert!(native_json.get(absent).is_none());
+        }
+        assert!(!native_json.to_string().contains("PRIVATE_PARSE_LITERAL"));
+        fs::remove_file(root.path().join("unit.py")).unwrap();
+        assert_eq!(semantics(&ast), semantics(&extract_captured(&python, &scan.sources).unwrap()));
+        assert_eq!(native_json, serde_json::to_value(parse_batch(&scan.sources).unwrap()).unwrap());
+    }
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn private_frontend_exposes_grammar_and_encoding_differences_from_the_ast() {
+    use super::python_native::{parse_batch, ParseStatus};
+
+    let python = oracle();
+    // The pinned grammar accepts Python 2 print syntax; CPython 3 AST does not.
+    // Encoding declarations remain an explicit unsupported native boundary.
+    for (bytes, ast_complete, native_status) in [
+        (b"print 1\n".as_slice(), false, ParseStatus::SyntaxAccepted),
+        (
+            b"# coding: utf-8\ndef ready():\n    pass\n".as_slice(),
+            true,
+            ParseStatus::UnsupportedEncoding,
+        ),
+        (
+            b"# coding: latin-1\ndef caf\xe9():\n    pass\n".as_slice(),
+            true,
+            ParseStatus::UnsupportedEncoding,
+        ),
+        (
+            b"\r# coding: ascii\nvalue = 1\n".as_slice(),
+            true,
+            ParseStatus::UnsupportedEncoding,
+        ),
+        (
+            b"\r# coding: latin-1\nvalue = '\xe9'\n".as_slice(),
+            true,
+            ParseStatus::UnsupportedEncoding,
+        ),
+    ] {
+        let (_, scan) = capture(&[("unit.py", bytes)]);
+        let ast = extract_captured(&python, &scan.sources).unwrap();
+        let native = parse_batch(&scan.sources).unwrap();
+        assert_eq!(ast.complete, ast_complete);
+        assert_eq!(native.files[0].status, native_status);
+        assert_eq!(native.files[0].sha256, hash(bytes));
+        assert_ne!(native.identity.policy, EXTRACTOR_VERSION);
+    }
+}
+
+fn assert_declaration_candidates_match_ast(python: &Path, scan: &Scan) -> Value {
+    use super::python_native::{extract_fact_candidates, CandidateStatus};
+
+    let ast = extract_captured(python, &scan.sources).unwrap();
+    assert!(ast.complete && ast.diagnostics.is_empty());
+    let native = extract_fact_candidates(&scan.sources).unwrap();
+    assert!(
+        native
+            .files
+            .iter()
+            .all(|file| file.status == CandidateStatus::AcceptedFacts),
+        "{native:?}"
+    );
+    // Compare the whole ordered AST vector: never filter it to supported kinds.
+    assert_eq!(
+        serde_json::to_value(&native.facts).unwrap(),
+        serde_json::to_value(&ast.facts).unwrap()
+    );
+    for (file, source) in native.files.iter().zip(&scan.sources) {
+        assert_eq!(file.path, source.path);
+        assert_eq!(file.module, source.module);
+        assert_eq!(file.sha256, hash(&source.bytes));
+    }
+    assert_ne!(native.identity.policy, EXTRACTOR_VERSION);
+    let value = serde_json::to_value(native).unwrap();
+    for absent in ["complete", "schemaVersion", "snapshotId", "pythonVersion"] {
+        assert!(value.get(absent).is_none());
+    }
+    value
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn declaration_candidate_supported_whole_files_match_every_ast_fact() {
+    let python = oracle();
+    for text in [
+        "",
+        "# a plain comment\npass\n",
+        "# Unicode comment: \u{3bb}\u{1f642}\r\npass\r\n",
+        "def f(): pass\n",
+        "async def f(): pass\n",
+        "def f(a, /, b, *rest, k, **opts):\n    pass\n",
+        "def f(*rest):\n    pass\n",
+        "def f(**opts,): pass\n",
+        "def f(a, /,): pass\n",
+        "def f(*, required): pass\n",
+        "def type(match, case, print, exec): pass\n",
+        "def f(\n    a, # first\n    b, /,\n    c, *rest,\n    z, y, **opts,\n):\n    # before\n    pass\n    # trailing\n# final\n",
+        "def outer(a):\n    async def inner(b):\n        pass\n        # trailing inner\n    pass\n    # trailing outer\nasync def sibling():\n    def leaf(): pass\n# final\n",
+        "def outer(a):\n    def inner(b):\n        pass\n    async def leaf():\n        pass\ndef outer(a):\n    pass\n",
+        "\u{feff}def f(a):\r\n    pass\r\n",
+    ] {
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        assert_declaration_candidates_match_ast(&python, &scan);
+    }
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn declaration_candidate_signature_boundaries_preserve_parameters() {
+    let python = oracle();
+    for count in [128, 129] {
+        let names = (0..count).map(|n| format!("p{n}")).collect::<Vec<_>>();
+        let text = format!("def f({}, *rest, **opts):\n    pass\n", names.join(", "));
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        let native = assert_declaration_candidates_match_ast(&python, &scan);
+        let facts = native["facts"].as_array().unwrap();
+        assert_eq!(
+            facts
+                .iter()
+                .filter(|fact| fact["kind"] == "parameter")
+                .count(),
+            count + 2
+        );
+        let signature = facts
+            .iter()
+            .find(|fact| fact["kind"] == "signature")
+            .unwrap();
+        assert_eq!(signature["value"] == r#"{"truncated":true}"#, count > 128);
+    }
+    let overhead = r#"{"keywordOnly":[],"positional":[""],"positionalOnly":0}"#.len();
+    for size in [16_384, 16_385] {
+        let name = "a".repeat(size - overhead);
+        let text = format!("def f({name}):\n    pass\n");
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        let native = assert_declaration_candidates_match_ast(&python, &scan);
+        let signature = native["facts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|fact| fact["kind"] == "signature")
+            .unwrap();
+        if size == 16_384 {
+            assert_eq!(signature["value"].as_str().unwrap().len(), size);
+        } else {
+            assert_eq!(signature["value"], r#"{"truncated":true}"#);
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn declaration_candidate_unicode_metadata_and_empty_module_keep_exact_ids() {
+    let python = oracle();
+    for module in ["", "pkg.caf\u{e9}\u{1f642}", "pkg.\u{7f}\n\"\\\u{1f642}"] {
+        let (_, mut scan) = capture(&[("caf\u{e9}\u{1f642}.py", b"def f(a, *, b):\n    pass\n")]);
+        scan.sources[0].module = module.into();
+        assert_declaration_candidates_match_ast(&python, &scan);
+    }
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn declaration_candidate_unsupported_forms_never_leak_a_declaration_prefix() {
+    use super::python_native::{extract_fact_candidates, CandidateStatus};
+
+    let python = oracle();
+    for unsupported in [
+        "import tools\n",
+        "class Hidden:\n    pass\n",
+        "hidden()\n",
+        "value = 1\n",
+        "def f(a=1): pass\n",
+        "def f(a=build()): pass\n",
+        "def f(a: marker()): pass\n",
+        "def f() -> marker(): pass\n",
+        "@decorate()\ndef f(): pass\n",
+        "def f[T: build()](): pass\n",
+        "def f():\n    return\n",
+        "def f():\n    'PRIVATE_DECL_LITERAL'\n",
+        "def f():\n    f'{hidden()}'\n",
+        "def f(): pass; hidden()\n",
+        "def f():\n    pass\n    hidden()\n",
+        "def f():\n    async def nested():\n        hidden()\n",
+        "def f():\n    if True:\n        pass\n",
+        "def f():\n    global value\n",
+        "def f():\n    nonlocal value\n",
+        "def f(a, a): pass\n",
+        "def f(*, **opts): pass\n",
+        "def f(a, /, /): pass\n",
+        "def f((a,b)): pass\n",
+        "def caf\u{e9}(): pass\n",
+        "def \u{212a}(): pass\n",
+        "def f(\u{212a}): pass\n",
+        "def f():\n\tpass\n",
+        "def f():\n  pass\n    pass\n",
+        "def \\\nf():\n    pass\n",
+        "\u{200b}def f(): pass\n",
+        "# type: ignore\n",
+        "def f(\n a,\n): pass\n",
+        "print 1\n",
+        "# \0\n",
+    ] {
+        let text = format!("def before(): pass\n{unsupported}\ndef after(): pass\n");
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        let _ast = extract_captured(&python, &scan.sources).unwrap();
+        let native = extract_fact_candidates(&scan.sources).unwrap();
+        assert_ne!(
+            native.files[0].status,
+            CandidateStatus::AcceptedFacts,
+            "{unsupported:?}"
+        );
+        assert_eq!(
+            serde_json::to_value(&native.facts).unwrap(),
+            json!(expected("unit.py", &[(1, 1, "module", "unit", "unit")]))
+        );
+        assert!(!serde_json::to_string(&native)
+            .unwrap()
+            .contains("PRIVATE_DECL_LITERAL"));
+    }
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn declaration_candidate_file_transactions_order_and_replay_use_captured_inputs() {
+    use super::python_native::{extract_fact_candidates, CandidateStatus};
+
+    let python = oracle();
+    let (root, mut scan) = capture(&[
+        ("a.py", b"def before(): pass\ndef hidden(a=build()): pass\n"),
+        ("b.py", b"async def ready(a, /, *, k):\n    pass\n"),
+    ]);
+    let native = extract_fact_candidates(&scan.sources).unwrap();
+    assert_eq!(native.files[0].status, CandidateStatus::UnsupportedSyntax);
+    assert_eq!(native.files[1].status, CandidateStatus::AcceptedFacts);
+    let ast_good = extract_captured(&python, &scan.sources[1..]).unwrap();
+    assert!(ast_good.complete && ast_good.diagnostics.is_empty());
+    let mut wanted = expected("a.py", &[(1, 1, "module", "a", "a")]);
+    wanted.extend(
+        serde_json::to_value(&ast_good.facts)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .cloned(),
+    );
+    assert_eq!(serde_json::to_value(&native.facts).unwrap(), json!(wanted));
+    let first_facts = serde_json::to_value(&native.facts).unwrap();
+    let first_report = serde_json::to_value(native).unwrap();
+    fs::remove_file(root.path().join("a.py")).unwrap();
+    fs::remove_file(root.path().join("b.py")).unwrap();
+    assert_eq!(
+        first_report,
+        serde_json::to_value(extract_fact_candidates(&scan.sources).unwrap()).unwrap()
+    );
+    scan.sources.reverse();
+    let reversed = extract_fact_candidates(&scan.sources).unwrap();
+    assert_eq!(first_facts, serde_json::to_value(&reversed.facts).unwrap());
+}

@@ -32,9 +32,11 @@ Native JS/TS Tree-sitter has scoped acceptance for source facts, useful rendered
 views and an external explicit-configuration consumer slice, in addition to the
 parser regressions and extracted-package checks. This is not blanket framework,
 runtime or release approval. See the [dated validation record](docs/javascript-typescript-analysis.md#validation-tooling).
-Python migration has started with a private captured-source parity foundation;
-the trusted Python >=3.12 AST helper remains the production default. Native Python
-and Rust analysis are not implemented. See the [Python parity gates](docs/python-analysis.md#native-migration-parity-foundation).
+Python migration now has AST parity gates, a private captured-byte Tree-sitter
+front-end and a narrow native declaration-fact candidate. The trusted Python >=3.12
+AST helper remains the production default; a production native Python fact backend
+and Rust analysis are not delivered.
+See the [Python parity gates](docs/python-analysis.md#native-migration-parity-foundation).
 Release/history review remains separate—not a reason to add codebase-specific
 rules to the engine or claim complete application understanding.
 See the [release/package checklist](docs/releasing.md) for the enforced crate

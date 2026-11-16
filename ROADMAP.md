@@ -23,7 +23,7 @@ or that a whole application is understood. There are no promised dates.
 | I2 | Read-only facts and validated class-model augmentation | Synthetic integration and a bounded real-source explicit-configuration slice accepted | Preserve immutability, identity checks and provenance; broader framework/runtime interpretation remains separate |
 | I3 | Harden and release the consumable engine | **Next: release and history review** | An approved immutable release works as an upstream or mirrored dependency |
 | P0 | Shared parser backend and native JS/TS Tree-sitter migration | Scoped source/facts, rendered-diagram usefulness and external explicit-configuration boundary accepted; release gates separate | Preserve fact/proof/output contracts; no Node discovery prerequisite; package/consumer checks and supported-platform release validation |
-| P1 | Python Tree-sitter backend | In progress: captured-source parity foundation; native backend not implemented | Preserve Python facts, FastAPI boundaries and explicit incompleteness; retain current Python >=3.12 AST helper until replacement is validated |
+| P1 | Python Tree-sitter backend | In progress: AST parity gates, private parse front-end and declaration-fact candidates; production native backend not enabled | Preserve Python facts, FastAPI boundaries and explicit incompleteness; retain current Python >=3.12 AST helper until replacement is validated |
 | P2 | Rust Tree-sitter backend and language facts | Next parser milestone; Rust analysis not implemented | Model Rust structs, enums, traits, impls, functions and modules honestly; no build scripts or macro execution |
 | I4 | Broader language/model capabilities | Later | Independent use cases justify each extension without weakening the boundary |
 
@@ -58,11 +58,17 @@ Node/Chromium tooling independently of JS/TS discovery.
   package consumer exercises fresh dependency resolution, typed facts, validated
   synthetic claims, stale-claim rejection and source-deleted diagram reuse. See the
   [validation record](docs/javascript-typescript-analysis.md#validation-tooling).
-- P1's first increment exposes only a private captured-source helper seam and
-  independently synthetic semantic fixtures. The explicit Python >=3.12 oracle
-  gate checks exact fact arrays/IDs, redaction, binding guards, decoding, per-file
-  rollback and captured-byte replay. No native grammar, public toolchain variant,
-  evidence identity or extraction default changes in this increment. See the
+- P1's initial captured-source AST fixtures check exact fact arrays/IDs, redaction,
+  binding guards, decoding, per-file rollback and replay. The next private parse-only
+  front-end pins Python grammar 0.25.0 with the existing runtime 0.25.10 and ABI
+  bridge 0.1.5. Its parse report remains classification-only. A separate private
+  candidate entry point collects exact module/function/parameter/signature facts
+  only when the entire file fits a declaration-only whitelist; every rejected file
+  retains only its module baseline. No candidate becomes Evidence or a trusted
+  snapshot. Grammar acceptance is not Python AST acceptance; encoding declarations,
+  calls, bindings, classes, imports and annotated/defaulted headers remain outside
+  this fact slice. No public toolchain variant,
+  production evidence identity or extraction default changes. See the
   [Python parity gates](docs/python-analysis.md#native-migration-parity-foundation).
 - Python migration must preserve language-specific semantics, not merely accept
   syntax. Rust facts must distinguish structs, traits and impls rather than calling
