@@ -10,6 +10,28 @@ from check_package import PolicyError, checked_path, inventory, verify
 
 
 class PackagePolicyTests(unittest.TestCase):
+    def test_development_profiles_keep_low_disk_defaults(self):
+        root = Path(__file__).resolve().parent.parent
+        manifest = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["profile"], {
+            "dev": {"debug": "line-tables-only", "incremental": False},
+            "test": {"debug": "line-tables-only", "incremental": False},
+        })
+
+    def test_developer_guidance_stays_out_of_runtime_skill_package(self):
+        root = Path(__file__).resolve().parent.parent
+        manifest = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
+        self.assertNotIn("/AGENTS.md", manifest["package"]["include"])
+        self.assertFalse(any(pattern.startswith("/.agents")
+                             for pattern in manifest["package"]["include"]))
+        expected = inventory((root / "docs/package-files.txt").read_text(encoding="utf-8"))
+        self.assertNotIn("AGENTS.md", expected)
+        self.assertFalse(any(name.startswith(".agents/") for name in expected))
+        self.assertEqual({name for name in expected if name.startswith("skills/")}, {
+            "skills/architecture-interpretation/SKILL.md",
+            "skills/workflow-focus/SKILL.md",
+        })
+
     def test_selected_dependency_notices_are_in_reviewed_package_scope(self):
         root = Path(__file__).resolve().parent.parent
         name = "docs/third-party-notices.md"

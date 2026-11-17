@@ -37,3 +37,12 @@ tree-sitter-language = "=0.1.5"
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs", "process"] }
+
+# Keep local validation small; feature closeout removes the disposable target tree.
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
+[profile.test]
+debug = "line-tables-only"
+incremental = false

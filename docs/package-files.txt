@@ -14,6 +14,7 @@ docs/adapter-contract.schema.json
 docs/adapters.md
 docs/agent-workflow.md
 docs/discovery.md
+docs/development-workflow.md
 docs/engine-api.md
 docs/engine-api.schema.json
 docs/javascript-typescript-analysis.md
@@ -39,9 +40,11 @@ makefile
 scripts/check_package.py
 scripts/check_package_archive.py
 scripts/check_package_consumer.py
+scripts/feature_cache.py
 scripts/test_package_archive.py
 scripts/test_package_consumer.py
 scripts/test_package_policy.py
+scripts/test_feature_cache.py
 src/adapters/fastapi.rs
 src/adapters/mod.rs
 src/adapters/vendor_sdk.rs

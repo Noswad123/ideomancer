@@ -35,6 +35,13 @@ NORMALIZED = (checker.NORMALIZED_HEADER + ORIGINAL.replace(b'[lib]\n', NORMALIZE
               + b'path = "src/lib.rs"\n'
               b'[[bin]]\nname = "ideomancer"\npath = "src/main.rs"\n')
 VCS = {"git": {"sha1": "a" * 40, "dirty": True}, "path_in_vcs": ""}
+PROFILES = b'''[profile.dev]
+debug = "line-tables-only"
+incremental = false
+[profile.test]
+debug = "line-tables-only"
+incremental = false
+'''
 
 
 class ArchiveTests(unittest.TestCase):
@@ -176,6 +183,73 @@ default = ["plain/std", "dep:custom"]
                                          "Cargo.toml": NORMALIZED + normalized})
             with self.assertRaises(PolicyError):
                 self.verify()
+
+    def test_reviewed_profiles_retained_in_archive(self):
+        self.contents.update({"Cargo.toml": NORMALIZED + PROFILES,
+                              "Cargo.toml.orig": ORIGINAL + PROFILES})
+        self.write_archive()
+        source = self.tree("source", source=True)
+        extracted = self.tree("extracted")
+        receipt = self.verify(source_dir=source, extracted_dir=extracted)
+        self.assertEqual(receipt["status"], "passed")
+        self.assertTrue(receipt["matched_source"])
+        self.assertTrue(receipt["matched_extracted"])
+
+    def test_profile_parity_is_semantic_not_textual(self):
+        equivalent = b'''[profile]
+test = { incremental = false, debug = 'line-tables-only' }
+dev = { incremental = false, debug = 'line-tables-only' }
+'''
+        package = checker.validate_manifests(NORMALIZED + equivalent, ORIGINAL + PROFILES,
+                                             self.expected)
+        self.assertEqual(package["name"], "ideomancer")
+
+    def test_profiles_must_be_present_in_both_manifests(self):
+        for original, normalized in ((ORIGINAL, NORMALIZED + PROFILES),
+                                     (ORIGINAL + PROFILES, NORMALIZED)):
+            with self.subTest(original=original), self.assertRaises(PolicyError):
+                checker.validate_manifests(normalized, original, self.expected)
+
+    def test_unreviewed_and_malformed_profiles_rejected_even_when_equal(self):
+        # Prefix root keys so malformed shapes are not accidentally library fields.
+        invalid = [b'profile = false\n', b'profile = 0\n', b'profile = "dev"\n',
+                   b'profile = []\n', b'[profile]\n',
+                   PROFILES.split(b'[profile.test]')[0],
+                   b'[profile.test]' + PROFILES.split(b'[profile.test]')[1]]
+        for extra in (b'[profile.release]\n', b'[profile.custom]\n',
+                      b'[profile.dev.build-override]\n',
+                      b'[profile.dev.package.dependency]\n',
+                      b'[profile.test.build-override]\n',
+                      b'[profile.test.package."*"]\n',
+                      b'[profile.package]\n', b'[profile.build-override]\n'):
+            invalid.append(PROFILES + extra)
+        for name in (b'dev', b'test'):
+            block = b'[profile.' + name + b']\n'
+            for value in (b'false', b'0', b'[]', b'"dev"'):
+                other = b'test' if name == b'dev' else b'dev'
+                invalid.append(b'[profile]\n' + name + b' = ' + value + b'\n'
+                               + b'[profile.' + other + b']\n'
+                               + b'debug = "line-tables-only"\nincremental = false\n')
+            for settings in (b'incremental = false\n', b'debug = "line-tables-only"\n',
+                             b'debug = "line-tables-only"\nincremental = false\nopt-level = 0\n'):
+                invalid.append(PROFILES.replace(
+                    block + b'debug = "line-tables-only"\nincremental = false\n', block + settings))
+            for flag, values in ((b'debug', (b'"full"', b'"limited"', b'"none"', b'0',
+                                            b'1', b'2', b'false', b'[]', b'{}')),
+                                 (b'incremental', (b'true', b'0', b'0.0', b'"false"', b'[]', b'{}'))):
+                for value in values:
+                    settings = (b'debug = ' + (value if flag == b'debug' else b'"line-tables-only"')
+                                + b'\nincremental = ' + (value if flag == b'incremental' else b'false')
+                                + b'\n')
+                    invalid.append(PROFILES.replace(
+                        block + b'debug = "line-tables-only"\nincremental = false\n', block + settings))
+        for profiles in invalid:
+            for original, normalized in ((profiles, PROFILES), (PROFILES, profiles),
+                                         (profiles, profiles)):
+                with self.subTest(original=original, normalized=normalized):
+                    with self.assertRaises(PolicyError):
+                        checker.validate_manifests(checker.NORMALIZED_HEADER + normalized + NORMALIZED[
+                            len(checker.NORMALIZED_HEADER):], original + ORIGINAL, self.expected)
 
     def test_build_hooks_bin_paths_and_library_overrides_rejected(self):
         mutations = [NORMALIZED.replace(b'build = false', b'build="src/main.rs"'),

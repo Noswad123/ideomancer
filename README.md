@@ -863,12 +863,26 @@ models a web service. `examples/project.idman.yaml` is a compact component map.
 
 ## Development
 
+Follow the [resource-bounded development workflow](docs/development-workflow.md).
+Repository-local coding skills are routed by `AGENTS.md`; they are separate from
+the application's bundled interpretation prompts. Use focused tests while editing,
+then validate the feature and run `make cache-clean` before handoff. After retention
+review, the guarded command removes only the local Cargo cache; retained outputs
+belong outside it, and known study files block cleanup.
+
 ```sh
-cargo build --locked
+cargo test --locked --offline --jobs 2 --lib analysis::python_native -- --test-threads=2
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test --locked
+cargo clippy --locked --offline --all-targets --jobs 2 -- -D warnings
+# Broader regression gate when warranted, not after every edit:
+cargo test --locked --offline --jobs 2 -- --test-threads=2
+# Last build-related step after validation and retention review:
+make cache-clean
 ```
+
+Development/test profiles retain line tables but omit full debug data and
+incremental caches. Builds may be slower; the cache is deliberately disposable.
+The next feature rebuilds. Never store acceptance evidence in `target/`.
 
 The core tests use synthetic sources and agent/renderer stubs, need no provider
 credentials or `mmdc`, and need no Node/browser installation. Install Python 3.12
@@ -945,7 +959,9 @@ and independent-consumer commands and their limits.
 `make` (or `make build`) performs a locked release build and copies only the
 executable into `bin/`; it does not install it. `make install` explicitly builds
 and installs. `make test` runs locked tests, and `make check` checks formatting
-and runs clippy with warnings denied. `make clean` cleans Cargo build artifacts
+and runs clippy with warnings denied; concurrency defaults to two. `make cache-status`
+preflights the local cache, and `make cache-clean` safely cleans only that fixed
+cache after feature validation. `make clean` cleans Cargo build artifacts
 and removes only `bin/ideomancer`, leaving other local binaries alone.
 `APP_NAME`, `BIN_DIR`, `INSTALL_DIR` (default `$HOME/.local/bin`), `TARGET_DIR`,
 and `CARGO` can be overridden, for example:

@@ -191,9 +191,24 @@ def validate_manifests(normalized, original, paths):
             if package.get(field) != value or old.get(field) != value:
                 raise ValueError
         allowed = {"package", "lib", "bin", "test", "dependencies", "dev-dependencies",
-                   "build-dependencies", "target", "features"}
+                   "build-dependencies", "target", "features", "profile"}
         if set(manifest) - allowed or set(source) - (allowed - {"bin", "test"}):
             raise ValueError
+        if source.get("profile") != manifest.get("profile"):
+            raise ValueError
+        # Only the reviewed cache-saving pair is supported, without defaults.
+        for table in (source, manifest):
+            if "profile" not in table:
+                continue
+            profiles = table["profile"]
+            if not isinstance(profiles, dict) or set(profiles) != {"dev", "test"}:
+                raise ValueError
+            for profile in profiles.values():
+                if (not isinstance(profile, dict) or set(profile) != {"debug", "incremental"}
+                        or not isinstance(profile["debug"], str)
+                        or profile["debug"] != "line-tables-only"
+                        or profile["incremental"] is not False):
+                    raise ValueError
         # Cargo adds discovery switches, inferred readme, and build=false. All
         # other package fields must stay identical to the checked original.
         packages = []
