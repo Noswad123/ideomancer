@@ -1,9 +1,13 @@
 //! Deliberately small, transactional candidate policy. Not production evidence.
 use super::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
 
-const FACT_POLICY: &str = "python-native-private-facts-1";
+#[path = "expressions.rs"]
+mod expressions;
+use expressions::{Expression, Mode};
+
+const FACT_POLICY: &str = "python-native-private-facts-6";
 const MAX_FACTS: usize = 100_000;
 const SIGNATURE_WORK: usize = 2 * 16384 + 17;
 
@@ -32,6 +36,7 @@ pub(in crate::analysis) enum CandidateStatus {
 pub(in crate::analysis) enum CandidateDiagnostic {
     UnsupportedSyntax,
     FactLimit,
+    WarningLimit,
     OutputLimit,
     WorkingLimit,
     Parse(DiagnosticCode),
@@ -49,16 +54,25 @@ pub(in crate::analysis) struct CandidateFile<'a> {
     pub(in crate::analysis) traversal_finished: bool,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub(in crate::analysis) struct CandidateWarning {
+    pub(in crate::analysis) code: &'static str,
+    pub(in crate::analysis) path: String,
+    pub(in crate::analysis) message: String,
+}
+
 #[derive(Debug, Serialize)]
 pub(in crate::analysis) struct CandidateReport<'a> {
     pub(in crate::analysis) identity: BatchParserIdentity,
     pub(in crate::analysis) files: Vec<CandidateFile<'a>>,
     pub(in crate::analysis) facts: Vec<CandidateFact>,
+    pub(in crate::analysis) diagnostics: Vec<CandidateWarning>,
 }
 
 #[derive(Clone, Copy)]
 struct FactLimits {
     count: usize,
+    warnings: usize,
     bytes: usize,
     // Separate from encoded output: pending owned text, conservative container
     // capacity, and stage temporaries. Fixed cursor frames remain depth-bounded;
@@ -70,6 +84,7 @@ impl Default for FactLimits {
     fn default() -> Self {
         Self {
             count: MAX_FACTS,
+            warnings: MAX_FACTS,
             bytes: super::super::MAX_OUTPUT,
             working: super::super::MAX_OUTPUT,
         }
@@ -143,6 +158,7 @@ fn reserve_candidates<F: FnMut(Checkpoint) -> bool>(
         identity: header,
         files: Vec::new(),
         facts: Vec::new(),
+        diagnostics: Vec::new(),
     };
     let mut summary = json_size(&empty, limits.report)?;
     let mut baselines = 0;
@@ -208,6 +224,7 @@ fn extract<F: FnMut(Checkpoint) -> bool>(
         candidate_identity.sha256.as_bytes(),
         FACT_POLICY.as_bytes(),
         include_bytes!("facts.rs").as_slice(),
+        include_bytes!("expressions.rs").as_slice(),
     ] {
         hash.update((part.len() as u64).to_le_bytes());
         for chunk in part.chunks(4096) {
@@ -238,14 +255,22 @@ fn extract<F: FnMut(Checkpoint) -> bool>(
         identity: candidate_identity,
         files: Vec::new(),
         facts: baselines,
+        diagnostics: Vec::new(),
     };
     let mut collector = Collector {
         sources,
         index: 0,
         facts: &mut result.facts,
+        diagnostics: &mut result.diagnostics,
+        warning_start: 0,
+        warning_text: 0,
+        start_warning_text: 0,
+        warning_slots: 0,
+        scopes: Vec::new(),
         files: Vec::new(),
         frames: Vec::new(),
         functions: Vec::new(),
+        function_frames: 0,
         unsupported: false,
         limited: None,
         terminal_end: 0,
@@ -254,6 +279,12 @@ fn extract<F: FnMut(Checkpoint) -> bool>(
         start_used: reserved,
         limits: fact_limits,
         pending: 0,
+        expression: None,
+        parameter: None,
+        body: None,
+        import: None,
+        terminal_line: 0,
+        delimiter_depth: 0,
     };
     let parsed = run_admitted(sources, limits, &cancel, &mut collector)?;
     result.files = std::mem::take(&mut collector.files);
@@ -264,9 +295,23 @@ fn extract<F: FnMut(Checkpoint) -> bool>(
         .facts
         .retain(|f| cancel.at(Checkpoint::Sort) || ids.insert(f.id.clone()));
     sort_facts(&mut result.facts, &cancel);
+    interruptible_sort(&mut result.diagnostics, &cancel, |a, b| {
+        for (a, b) in [
+            (a.path.as_str(), b.path.as_str()),
+            (a.code, b.code),
+            (a.message.as_str(), b.message.as_str()),
+        ] {
+            let order = compare_text(a, b, &cancel)?;
+            if !order.is_eq() {
+                return Some(order);
+            }
+        }
+        Some(std::cmp::Ordering::Equal)
+    });
     let output_ok = cancel.expired.get() || measured(&result, fact_limits.bytes, &cancel).is_some();
     if cancel.at(Checkpoint::FinalOutput) || cancel.at(Checkpoint::Final) || !output_ok {
         result.facts.retain(|f| f.kind == "module");
+        result.diagnostics.clear();
         // Only bounded mandatory metadata remains if sorting was interrupted.
         result.facts.sort_unstable_by(|a, b| a.path.cmp(&b.path));
         for file in &mut result.files {
@@ -295,11 +340,37 @@ fn sort_facts<F: FnMut(Checkpoint) -> bool>(facts: &mut [CandidateFact], cancel:
             &f.path, f.line, f.end_line, &f.kind, &f.symbol, &f.value, &f.id,
         )
     }
-    fn sift<F: FnMut(Checkpoint) -> bool>(
-        facts: &mut [CandidateFact],
+    interruptible_sort(facts, cancel, |a, b| Some(key(a).cmp(&key(b))));
+}
+
+fn compare_text<F: FnMut(Checkpoint) -> bool>(
+    a: &str,
+    b: &str,
+    cancel: &Cancellation<F>,
+) -> Option<std::cmp::Ordering> {
+    for (a, b) in a.as_bytes().chunks(256).zip(b.as_bytes().chunks(256)) {
+        if cancel.at(Checkpoint::Sort) {
+            return None;
+        }
+        let order = a.cmp(b);
+        if !order.is_eq() {
+            return Some(order);
+        }
+    }
+    Some(a.len().cmp(&b.len()))
+}
+
+fn interruptible_sort<T, F: FnMut(Checkpoint) -> bool>(
+    facts: &mut [T],
+    cancel: &Cancellation<F>,
+    compare: impl Fn(&T, &T) -> Option<std::cmp::Ordering>,
+) {
+    fn sift<T, F: FnMut(Checkpoint) -> bool>(
+        facts: &mut [T],
         mut root: usize,
         end: usize,
         cancel: &Cancellation<F>,
+        compare: &impl Fn(&T, &T) -> Option<std::cmp::Ordering>,
     ) -> bool {
         loop {
             if cancel.at(Checkpoint::Sort) {
@@ -309,12 +380,19 @@ fn sort_facts<F: FnMut(Checkpoint) -> bool>(facts: &mut [CandidateFact], cancel:
             if left >= end {
                 return true;
             }
-            let child = if left + 1 < end && key(&facts[left]) < key(&facts[left + 1]) {
-                left + 1
-            } else {
-                left
+            let mut child = left;
+            if left + 1 < end {
+                let Some(order) = compare(&facts[left], &facts[left + 1]) else {
+                    return false;
+                };
+                if order.is_lt() {
+                    child += 1;
+                }
+            }
+            let Some(order) = compare(&facts[root], &facts[child]) else {
+                return false;
             };
-            if key(&facts[root]) >= key(&facts[child]) {
+            if !order.is_lt() {
                 return true;
             }
             facts.swap(root, child);
@@ -325,7 +403,7 @@ fn sort_facts<F: FnMut(Checkpoint) -> bool>(facts: &mut [CandidateFact], cancel:
         return;
     }
     for root in (0..facts.len() / 2).rev() {
-        if !sift(facts, root, facts.len(), cancel) {
+        if !sift(facts, root, facts.len(), cancel, &compare) {
             return;
         }
     }
@@ -334,7 +412,7 @@ fn sort_facts<F: FnMut(Checkpoint) -> bool>(facts: &mut [CandidateFact], cancel:
             return;
         }
         facts.swap(0, end);
-        if !sift(facts, 0, end, cancel) {
+        if !sift(facts, 0, end, cancel, &compare) {
             return;
         }
     }
@@ -350,6 +428,7 @@ struct Frame {
 
 #[derive(Default)]
 struct Function {
+    scope_id: usize,
     working: usize,
     name: String,
     symbol: String,
@@ -367,15 +446,188 @@ struct Function {
     kwarg: Option<String>,
     signature: String,
     header_end: usize,
+    positional_default: bool,
+}
+
+struct Parameter {
+    name: String,
+    line: usize,
+    end: usize,
+    annotation: Option<String>,
+    working: usize,
+}
+
+struct BodyStatement {
+    line: usize,
+    target: Option<String>,
+    source: Option<String>,
+    binding: bool,
+    working: usize,
+}
+
+struct ImportToken {
+    kind: &'static str,
+    span: std::ops::Range<usize>,
+}
+
+struct ImportStatement {
+    start: usize,
+    line: usize,
+    from: bool,
+    tokens: Vec<ImportToken>,
+    working: usize,
+    parenthesized: bool,
+    closed: bool,
+}
+
+#[derive(Serialize)]
+struct ImportName {
+    asname: Option<String>,
+    name: String,
+}
+
+#[derive(Serialize)]
+struct ImportMetadata {
+    level: usize,
+    module: String,
+    names: Vec<ImportName>,
+}
+
+fn constructor_terminal(name: &[u8]) -> bool {
+    matches!(name, b"FastAPI" | b"APIRouter")
+}
+
+fn dynamic_terminal(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"__import__"
+            | b"import_module"
+            | b"iter_modules"
+            | b"walk_packages"
+            | b"entry_points"
+            | b"load_entry_point"
+            | b"find_spec"
+            | b"exec"
+            | b"eval"
+    )
+}
+
+impl ImportStatement {
+    // Consume only descriptors from the observer, never tokenize source again.
+    fn name<F: FnMut(Checkpoint) -> bool>(
+        &self,
+        at: &mut usize,
+        dotted: bool,
+        bytes: &[u8],
+        cancel: &Cancellation<F>,
+    ) -> Option<String> {
+        let start = *at;
+        if self.tokens.get(*at)?.kind != "identifier" {
+            return None;
+        }
+        *at += 1;
+        while dotted && self.tokens.get(*at).is_some_and(|t| t.kind == ".") {
+            if cancel.at(Checkpoint::Collector) {
+                return None;
+            }
+            *at += 1;
+            if self.tokens.get(*at)?.kind != "identifier" {
+                return None;
+            }
+            *at += 1;
+        }
+        let size = self.tokens[start..*at].iter().try_fold(0usize, |n, t| {
+            if cancel.at(Checkpoint::Collector) {
+                None
+            } else {
+                n.checked_add(t.span.len())
+            }
+        })?;
+        let mut result = String::with_capacity(size);
+        for token in &self.tokens[start..*at] {
+            for chunk in bytes[token.span.clone()].chunks(256) {
+                if cancel.at(Checkpoint::Collector) {
+                    return None;
+                }
+                result.push_str(std::str::from_utf8(chunk).ok()?);
+            }
+        }
+        Some(result)
+    }
+}
+
+// Fixed-size hashed keys keep map hashing/comparison bounded. Retain the full
+// spelling and fail closed on a collision rather than conflating scope/alias keys.
+// Every new entry is charged for four buckets plus allocator/control overhead.
+#[derive(Default)]
+struct AliasScope {
+    parent: Option<usize>,
+    children: HashMap<[u8; 32], (String, usize)>,
+    aliases: HashMap<[u8; 32], (String, String)>,
+}
+
+fn alias_key<F: FnMut(Checkpoint) -> bool>(
+    text: &str,
+    cancel: &Cancellation<F>,
+) -> Option<[u8; 32]> {
+    let mut hash = Sha256::new();
+    for chunk in text.as_bytes().chunks(256) {
+        if cancel.at(Checkpoint::Collector) {
+            return None;
+        }
+        hash.update(chunk);
+    }
+    Some(hash.finalize().into())
+}
+
+fn copy_text<F: FnMut(Checkpoint) -> bool>(text: &str, cancel: &Cancellation<F>) -> Option<String> {
+    let mut result = String::with_capacity(text.len());
+    for (i, ch) in text.chars().enumerate() {
+        if i % 256 == 0 && cancel.at(Checkpoint::Collector) {
+            return None;
+        }
+        result.push(ch);
+    }
+    Some(result)
+}
+
+fn same_text<F: FnMut(Checkpoint) -> bool>(a: &str, b: &str, cancel: &Cancellation<F>) -> bool {
+    a.len() == b.len()
+        && a.as_bytes()
+            .chunks(256)
+            .zip(b.as_bytes().chunks(256))
+            .all(|(a, b)| !cancel.at(Checkpoint::Collector) && a == b)
+}
+
+fn terminal_name<'a, F: FnMut(Checkpoint) -> bool>(
+    text: &'a str,
+    cancel: &Cancellation<F>,
+) -> Option<&'a str> {
+    for (i, b) in text.bytes().rev().enumerate() {
+        if i % 256 == 0 && cancel.at(Checkpoint::Collector) {
+            return None;
+        }
+        if b == b'.' {
+            return Some(&text[text.len() - i..]);
+        }
+    }
+    Some(text)
 }
 
 struct Collector<'a, 'b> {
     sources: &'a [Source],
     index: usize,
     facts: &'b mut Vec<CandidateFact>,
+    diagnostics: &'b mut Vec<CandidateWarning>,
+    warning_start: usize,
+    warning_text: usize,
+    start_warning_text: usize,
+    warning_slots: usize,
+    scopes: Vec<AliasScope>,
     files: Vec<CandidateFile<'a>>,
     frames: Vec<Frame>,
     functions: Vec<Function>,
+    function_frames: usize,
     unsupported: bool,
     limited: Option<CandidateDiagnostic>,
     terminal_end: usize,
@@ -384,6 +636,12 @@ struct Collector<'a, 'b> {
     start_used: usize,
     limits: FactLimits,
     pending: usize,
+    expression: Option<Expression>,
+    parameter: Option<Parameter>,
+    body: Option<BodyStatement>,
+    import: Option<ImportStatement>,
+    terminal_line: usize,
+    delimiter_depth: usize,
 }
 
 fn identifier<F: FnMut(Checkpoint) -> bool>(name: &str, cancel: &Cancellation<F>) -> bool {
@@ -456,6 +714,671 @@ fn join_symbol<F: FnMut(Checkpoint) -> bool>(
 }
 
 impl Collector<'_, '_> {
+    fn scope(&self) -> usize {
+        self.functions.last().map_or(0, |f| f.scope_id)
+    }
+
+    fn enter_scope<F: FnMut(Checkpoint) -> bool>(&mut self, name: &str, cancel: &Cancellation<F>) {
+        let parent = self.functions.iter().rev().nth(1).map_or(0, |f| f.scope_id);
+        let Some(key) = alias_key(name, cancel) else {
+            return;
+        };
+        if let Some((stored, id)) = self.scopes[parent].children.get(&key) {
+            if !same_text(stored, name, cancel) {
+                self.unsupported = true;
+                return;
+            }
+            self.functions.last_mut().unwrap().scope_id = *id;
+            return;
+        }
+        let charge = 4
+            * (std::mem::size_of::<AliasScope>()
+                + std::mem::size_of::<([u8; 32], (String, usize))>()
+                + 64)
+            + name.len();
+        if !self.reserve_work(charge, cancel) {
+            return;
+        }
+        let Some(name) = copy_text(name, cancel) else {
+            return;
+        };
+        let id = self.scopes.len();
+        self.scopes.push(AliasScope {
+            parent: Some(parent),
+            ..AliasScope::default()
+        });
+        self.scopes[parent].children.insert(key, (name, id));
+        self.functions.last_mut().unwrap().scope_id = id;
+    }
+
+    fn import_alias<F: FnMut(Checkpoint) -> bool>(
+        &mut self,
+        local: &str,
+        prefix: &str,
+        name: &str,
+        cancel: &Cancellation<F>,
+    ) {
+        let Some(key) = alias_key(local, cancel) else {
+            return;
+        };
+        let scope = self.scope();
+        let old_size = if let Some((stored, target)) = self.scopes[scope].aliases.get(&key) {
+            if !same_text(stored, local, cancel) {
+                self.unsupported = true;
+                return;
+            }
+            Some(target.len())
+        } else {
+            None
+        };
+        let target_size = prefix.len() + usize::from(!prefix.is_empty()) + name.len();
+        let entry = if old_size.is_none() {
+            local.len() + 4 * (std::mem::size_of::<([u8; 32], (String, String))>() + 64)
+        } else {
+            0
+        };
+        if !self.reserve_work(target_size + entry, cancel) {
+            return;
+        }
+        let target = if prefix.is_empty() {
+            copy_text(name, cancel)
+        } else {
+            join_symbol(prefix, name, target_size, cancel)
+        };
+        let Some(target) = target else {
+            return;
+        };
+        if let Some(old_size) = old_size {
+            self.scopes[scope].aliases.get_mut(&key).unwrap().1 = target;
+            self.pending -= old_size;
+        } else {
+            let Some(local) = copy_text(local, cancel) else {
+                return;
+            };
+            self.scopes[scope].aliases.insert(key, (local, target));
+        }
+    }
+
+    fn warn_call<F: FnMut(Checkpoint) -> bool>(
+        &mut self,
+        callee: &str,
+        line: usize,
+        cancel: &Cancellation<F>,
+    ) {
+        let head_end = callee.find('.').unwrap_or(callee.len());
+        let head = &callee[..head_end];
+        let Some(key) = alias_key(head, cancel) else {
+            return;
+        };
+        let mut scope = self.scope();
+        let mut target = None;
+        loop {
+            if cancel.at(Checkpoint::Collector) {
+                return;
+            }
+            if let Some((stored, value)) = self.scopes[scope].aliases.get(&key) {
+                if !same_text(stored, head, cancel) {
+                    self.unsupported = true;
+                    return;
+                }
+                target = Some(value.as_str());
+                break;
+            }
+            let Some(parent) = self.scopes[scope].parent else {
+                break;
+            };
+            scope = parent;
+        }
+        let prefix = target.unwrap_or(head);
+        let tail = &callee[head_end..];
+        // The tail is already bounded by expression(func); only a bare head can
+        // acquire a different terminal. Never reclip the full imported target.
+        let Some(terminal) = terminal_name(if tail.is_empty() { prefix } else { tail }, cancel)
+        else {
+            return;
+        };
+        if !dynamic_terminal(terminal.as_bytes()) {
+            return;
+        }
+        let expanded_len = prefix.len() + tail.len();
+        if self.diagnostics.len() >= self.limits.warnings {
+            self.limited = Some(CandidateDiagnostic::WarningLimit);
+            return;
+        }
+        let path_len = self.sources[self.index].path.len();
+        let message_len = "line : ; runtime targets are not inferred".len()
+            + line.max(1).ilog10() as usize
+            + 1
+            + expanded_len;
+        // Bound the message before expansion. Descriptors are ASCII; paths may
+        // require JSON escaping, so preview the exact record before retaining it.
+        if message_len > self.limits.bytes.saturating_sub(self.used) {
+            self.limited = Some(CandidateDiagnostic::OutputLimit);
+            return;
+        }
+        let slot_charge = 4 * std::mem::size_of::<CandidateWarning>();
+        // Logical-slot high water covers initial/geometric Vec capacity and
+        // survives rollback. Text charges roll back independently with warnings.
+        let grow = usize::from(self.diagnostics.len() == self.warning_slots) * slot_charge;
+        let text_charge = message_len + path_len;
+        let scope_target = target.is_some();
+        // End the borrowed arena reference before reserving; retrieve by fixed key.
+        if !self.reserve_work(grow + text_charge, cancel) {
+            return;
+        }
+        let prefix = if scope_target {
+            self.scopes[scope].aliases.get(&key).unwrap().1.as_str()
+        } else {
+            head
+        };
+        let mut message = String::with_capacity(message_len);
+        use std::fmt::Write as _;
+        write!(&mut message, "line {line}: ").unwrap();
+        for part in [prefix, tail] {
+            for chunk in part.as_bytes().chunks(256) {
+                if cancel.at(Checkpoint::Collector) {
+                    return;
+                }
+                message.push_str(std::str::from_utf8(chunk).unwrap());
+            }
+        }
+        message.push_str("; runtime targets are not inferred");
+        debug_assert_eq!(message.len(), message_len);
+        #[derive(Serialize)]
+        struct Preview<'a> {
+            code: &'static str,
+            path: &'a str,
+            message: &'a str,
+        }
+        let code = "dynamic_discovery_unresolved";
+        let preview = Preview {
+            code,
+            path: &self.sources[self.index].path,
+            message: &message,
+        };
+        let Some(size) = measured(
+            &preview,
+            self.limits
+                .bytes
+                .saturating_sub(self.used)
+                .saturating_sub(1),
+            cancel,
+        ) else {
+            self.limited = Some(CandidateDiagnostic::OutputLimit);
+            return;
+        };
+        let Some(path) = copy_text(&self.sources[self.index].path, cancel) else {
+            return;
+        };
+        self.used += size + 1;
+        self.warning_text += text_charge;
+        if grow != 0 {
+            self.warning_slots += 1;
+        }
+        self.diagnostics.push(CandidateWarning {
+            code,
+            path,
+            message,
+        });
+    }
+
+    fn finish_import<F: FnMut(Checkpoint) -> bool>(&mut self, cancel: &Cancellation<F>) {
+        let import = self.import.take().unwrap();
+        let bytes = self.sources[self.index]
+            .bytes
+            .strip_prefix(b"\xef\xbb\xbf")
+            .unwrap_or(&self.sources[self.index].bytes);
+        // All canonical names, aliases and module text together are shorter
+        // than the source span. Charge that storage before any string allocation.
+        let text_work = self.terminal_end - import.start;
+        let mut text_size = 0;
+        let mut names = 1;
+        let mut aliases = 0;
+        for token in &import.tokens {
+            if cancel.at(Checkpoint::Collector) {
+                return;
+            }
+            if matches!(token.kind, "identifier" | ".") {
+                text_size += token.span.len();
+            }
+            names += usize::from(token.kind == ",");
+            aliases += usize::from(token.kind == "as");
+        }
+        // A trailing comma inside the single admitted pair adds no alias.
+        if import.parenthesized
+            && import.tokens.len() >= 2
+            && import.tokens[import.tokens.len() - 2].kind == ","
+        {
+            names -= 1;
+        }
+        let mut level = 0usize;
+        if import.from {
+            for token in import.tokens.iter().skip(1) {
+                if cancel.at(Checkpoint::Collector) {
+                    return;
+                }
+                if !matches!(token.kind, "." | "...") {
+                    break;
+                }
+                level += token.span.len();
+                if token.kind == "." {
+                    text_size -= 1;
+                }
+            }
+        }
+        // Exact compact metadata size for valid ASCII descriptors, including
+        // explicit nulls. Invalid descriptor sequences still fail closed below.
+        let metadata_size = "{\"level\":0,\"module\":\"\",\"names\":[]}".len()
+            + level.max(1).ilog10() as usize
+            + text_size
+            + names * "{\"asname\":null,\"name\":\"\"}".len()
+            + names
+            - 1;
+        let Some(metadata_size) = metadata_size.checked_sub(2 * aliases) else {
+            self.unsupported = true;
+            return;
+        };
+        if metadata_size > self.limits.bytes.saturating_sub(self.used) {
+            self.limited = Some(CandidateDiagnostic::OutputLimit);
+            return;
+        }
+        if !self.reserve_work(text_work, cancel) {
+            return;
+        }
+        let mut metadata = ImportMetadata {
+            level: 0,
+            module: String::new(),
+            names: Vec::new(),
+        };
+        let mut at = 1;
+        if import.from {
+            while import
+                .tokens
+                .get(at)
+                .is_some_and(|t| matches!(t.kind, "." | "..."))
+            {
+                if cancel.at(Checkpoint::Collector) {
+                    return;
+                }
+                metadata.level += import.tokens[at].span.len();
+                at += 1;
+            }
+            if import
+                .tokens
+                .get(at)
+                .is_some_and(|t| t.kind == "identifier")
+            {
+                let Some(module) = import.name(&mut at, true, bytes, cancel) else {
+                    self.unsupported = true;
+                    return;
+                };
+                metadata.module = module;
+            } else if metadata.level == 0 {
+                self.unsupported = true;
+                return;
+            }
+            if import.tokens.get(at).is_none_or(|t| t.kind != "import") {
+                self.unsupported = true;
+                return;
+            }
+            at += 1;
+        }
+        let names_end = if import.parenthesized {
+            if !import.closed
+                || !import.from
+                || import.tokens.get(at).is_none_or(|t| t.kind != "(")
+                || import.tokens.last().is_none_or(|t| t.kind != ")")
+            {
+                self.unsupported = true;
+                return;
+            }
+            at += 1;
+            import.tokens.len() - 1
+        } else {
+            import.tokens.len()
+        };
+        let mut names_work = 0;
+        loop {
+            if cancel.at(Checkpoint::Collector) {
+                return;
+            }
+            let name_start = at;
+            let Some(name) = import.name(&mut at, !import.from, bytes, cancel) else {
+                self.unsupported = true;
+                return;
+            };
+            let name_end = at - 1;
+            let asname = if import.tokens.get(at).is_some_and(|t| t.kind == "as") {
+                at += 1;
+                let Some(alias) = import.name(&mut at, false, bytes, cancel) else {
+                    self.unsupported = true;
+                    return;
+                };
+                Some(alias)
+            } else {
+                None
+            };
+            // Constructor metadata remains outside this slice, even for an
+            // unused/overwritten alias. Dynamic imports now populate the table.
+            let terminal = &import.tokens[if !import.from && asname.is_none() {
+                name_start
+            } else {
+                name_end
+            }];
+            if metadata.level == 0 && constructor_terminal(&bytes[terminal.span.clone()]) {
+                self.unsupported = true;
+                return;
+            }
+            let charge = 4 * std::mem::size_of::<ImportName>();
+            if !self.reserve_work(charge, cancel) {
+                return;
+            }
+            names_work += charge;
+            metadata.names.push(ImportName { asname, name });
+            if at == names_end {
+                break;
+            }
+            if import.tokens[at].kind != "," {
+                self.unsupported = true;
+                return;
+            }
+            at += 1;
+            if import.parenthesized && at == names_end {
+                break;
+            }
+        }
+        if metadata.level == 0 {
+            for item in &metadata.names {
+                if cancel.at(Checkpoint::Collector) {
+                    return;
+                }
+                let local = item
+                    .asname
+                    .as_deref()
+                    .unwrap_or_else(|| item.name.split('.').next().unwrap());
+                let target = if !import.from && item.asname.is_none() {
+                    local
+                } else {
+                    &item.name
+                };
+                self.import_alias(local, &metadata.module, target, cancel);
+                if self.unsupported || self.limited.is_some() {
+                    return;
+                }
+            }
+        }
+        let Some(size) = measured(
+            &metadata,
+            self.limits.bytes.saturating_sub(self.used),
+            cancel,
+        ) else {
+            self.limited = Some(CandidateDiagnostic::OutputLimit);
+            return;
+        };
+        debug_assert_eq!(size, metadata_size);
+        let owner = self
+            .functions
+            .last()
+            .map_or(&self.sources[self.index].module, |f| &f.symbol);
+        // Metadata buffer, fact ownership, serialization/ID and dedup copies.
+        let temporary = 4 * size + 4 * owner.len() + 4 * self.sources[self.index].path.len() + 1024;
+        if !self.reserve_work(temporary, cancel) {
+            return;
+        }
+        struct Writer<'a, F> {
+            bytes: Vec<u8>,
+            cancel: &'a Cancellation<F>,
+        }
+        impl<F: FnMut(Checkpoint) -> bool> Write for Writer<'_, F> {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                for chunk in bytes.chunks(256) {
+                    if self.cancel.at(Checkpoint::Collector) {
+                        return Err(io::Error::other("deadline"));
+                    }
+                    self.bytes.extend_from_slice(chunk);
+                }
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut writer = Writer {
+            bytes: Vec::with_capacity(size),
+            cancel,
+        };
+        if serde_json::to_writer(&mut writer, &metadata).is_err() {
+            return;
+        }
+        let value = String::from_utf8(writer.bytes).unwrap();
+        #[derive(Serialize)]
+        struct BorrowedFact<'a> {
+            id: &'a str,
+            kind: &'a str,
+            path: &'a str,
+            line: usize,
+            #[serde(rename = "endLine")]
+            end_line: usize,
+            symbol: &'a str,
+            value: &'a str,
+        }
+        let kind = if import.from { "from_import" } else { "import" };
+        let preview = BorrowedFact {
+            id: concat!(
+                "fact_",
+                "0000000000000000000000000000000000000000000000000000000000000000"
+            ),
+            kind,
+            path: &self.sources[self.index].path,
+            line: import.line,
+            end_line: self.terminal_line,
+            symbol: self
+                .functions
+                .last()
+                .map_or(&self.sources[self.index].module, |f| &f.symbol),
+            value: &value,
+        };
+        if measured(
+            &preview,
+            self.limits
+                .bytes
+                .saturating_sub(self.used)
+                .saturating_sub(1),
+            cancel,
+        )
+        .is_none()
+        {
+            self.limited = Some(CandidateDiagnostic::OutputLimit);
+            return;
+        }
+        let owner = self
+            .functions
+            .last()
+            .map_or(&self.sources[self.index].module, |f| &f.symbol)
+            .clone();
+        self.add(kind, import.line, self.terminal_line, owner, value, cancel);
+        self.pending -= import.working + text_work + names_work + temporary;
+    }
+
+    fn finish_expression<F: FnMut(Checkpoint) -> bool>(&mut self, cancel: &Cancellation<F>) {
+        let expression = self.expression.take().unwrap();
+        if matches!(expression.mode, Mode::BodyValue | Mode::AssignmentTarget) {
+            self.finish_body_expression(expression, cancel);
+            return;
+        }
+        let function = self.functions.last().unwrap();
+        let temporary = Expression::RENDER_WORK
+            + 2 * (function.symbol.len() + self.parameter.as_ref().map_or(0, |p| p.name.len() + 1));
+        if !self.reserve_work(temporary, cancel) {
+            return;
+        }
+        let bytes = self.sources[self.index]
+            .bytes
+            .strip_prefix(b"\xef\xbb\xbf")
+            .unwrap_or(&self.sources[self.index].bytes);
+        // Compact only the final shape, not the bounded recursive scratch buffers.
+        let value = expression
+            .render(bytes, cancel)
+            .into_boxed_str()
+            .into_string();
+        let (line, end) = expression.span();
+        match expression.mode {
+            Mode::Annotation => {
+                let p = self.parameter.as_mut().unwrap();
+                p.annotation = Some(value);
+                p.end = expression.terminal_end_line;
+                p.working += temporary;
+            }
+            Mode::Return => {
+                let f = self.functions.last_mut().unwrap();
+                f.header_end = expression.terminal_end_line - 1;
+                let symbol = f.symbol.clone();
+                self.add("return_annotation", line, end, symbol, value, cancel);
+                self.pending -= temporary;
+            }
+            Mode::Default => {
+                let symbol = join_symbol(
+                    &self.functions.last().unwrap().symbol,
+                    &self.parameter.as_ref().unwrap().name,
+                    self.limits.bytes.saturating_sub(self.used),
+                    cancel,
+                );
+                if let Some(symbol) = symbol {
+                    self.add("parameter_default", line, end, symbol, value, cancel);
+                } else {
+                    self.limited = Some(CandidateDiagnostic::OutputLimit);
+                }
+                self.pending -= temporary;
+            }
+            Mode::BodyValue | Mode::AssignmentTarget => unreachable!(),
+        }
+        self.pending -= expression.working;
+    }
+
+    fn finish_body_expression<F: FnMut(Checkpoint) -> bool>(
+        &mut self,
+        expression: Expression,
+        cancel: &Cancellation<F>,
+    ) {
+        let owner_len = self
+            .functions
+            .last()
+            .map_or(self.sources[self.index].module.len(), |f| f.symbol.len());
+        let retained = 512;
+        let temporary = Expression::RENDER_WORK + owner_len;
+        if !self.reserve_work(temporary + retained, cancel) {
+            return;
+        }
+        let bytes = self.sources[self.index]
+            .bytes
+            .strip_prefix(b"\xef\xbb\xbf")
+            .unwrap_or(&self.sources[self.index].bytes);
+        if expression.mode == Mode::AssignmentTarget {
+            let target = expression
+                .render(bytes, cancel)
+                .into_boxed_str()
+                .into_string();
+            let body = self.body.as_mut().unwrap();
+            body.target = Some(target);
+            body.working += retained;
+        } else {
+            for index in expression.calls(cancel) {
+                if cancel.at(Checkpoint::Collector) || self.limited.is_some() {
+                    break;
+                }
+                let bytes = self.sources[self.index]
+                    .bytes
+                    .strip_prefix(b"\xef\xbb\xbf")
+                    .unwrap_or(&self.sources[self.index].bytes);
+                let value = expression.render_call(index, bytes, cancel);
+                let callee = expression.render_callee(index, bytes, cancel);
+                let (line, end) = expression.call_span(index);
+                self.warn_call(&callee, line, cancel);
+                let owner = self
+                    .functions
+                    .last()
+                    .map_or(&self.sources[self.index].module, |f| &f.symbol)
+                    .clone();
+                self.add("call", line, end, owner, value, cancel);
+            }
+            let bytes = self.sources[self.index]
+                .bytes
+                .strip_prefix(b"\xef\xbb\xbf")
+                .unwrap_or(&self.sources[self.index].bytes);
+            if let Some(body) = self.body.as_mut().filter(|b| b.target.is_some()) {
+                body.binding = expression.binding();
+                if body.binding {
+                    body.source = Some(
+                        expression
+                            .render(bytes, cancel)
+                            .into_boxed_str()
+                            .into_string(),
+                    );
+                }
+                body.working += retained;
+            } else {
+                self.pending -= retained;
+            }
+        }
+        self.pending -= expression.working + temporary;
+    }
+
+    fn finish_body_statement<F: FnMut(Checkpoint) -> bool>(&mut self, cancel: &Cancellation<F>) {
+        let body = self.body.take().unwrap();
+        if let Some(target) = body.target.as_deref() {
+            #[derive(Serialize)]
+            struct Binding<'a> {
+                #[serde(skip_serializing_if = "Option::is_none")]
+                source: Option<&'a str>,
+                target: &'a str,
+            }
+            let metadata = Binding {
+                source: body.source.as_deref(),
+                target,
+            };
+            let Some(size) = measured(
+                &metadata,
+                self.limits.bytes.saturating_sub(self.used),
+                cancel,
+            ) else {
+                self.limited = Some(CandidateDiagnostic::OutputLimit);
+                return;
+            };
+            let owner = self
+                .functions
+                .last()
+                .map_or(&self.sources[self.index].module, |f| &f.symbol);
+            let temporary = 2 * size + owner.len();
+            if !self.reserve_work(temporary, cancel) {
+                return;
+            }
+            let mut value = Vec::with_capacity(size);
+            if serde_json::to_writer(&mut value, &metadata).is_err() {
+                unreachable!("string metadata");
+            }
+            let value = String::from_utf8(value).unwrap();
+            let owner = self
+                .functions
+                .last()
+                .map_or(&self.sources[self.index].module, |f| &f.symbol)
+                .clone();
+            self.add(
+                if body.binding {
+                    "binding"
+                } else {
+                    "binding_invalidation"
+                },
+                body.line,
+                self.terminal_line,
+                owner,
+                value,
+                cancel,
+            );
+            self.pending -= temporary;
+        }
+        self.pending -= body.working;
+    }
+
     fn reserve_work<F: FnMut(Checkpoint) -> bool>(
         &mut self,
         bytes: usize,
@@ -525,7 +1448,11 @@ impl Collector<'_, '_> {
         }
         let inline = suite.kind == "block" && point.row == suite.row;
         if inline {
-            if node.kind() != "pass_statement" || suite.last_end.is_some() {
+            if !matches!(
+                node.kind(),
+                "pass_statement" | "expression_statement" | "return_statement"
+            ) || suite.last_end.is_some()
+            {
                 self.unsupported = true;
             }
         } else {
@@ -556,13 +1483,24 @@ impl Collector<'_, '_> {
 impl Observer for Collector<'_, '_> {
     fn begin(&mut self) {
         self.start = self.facts.len();
+        self.warning_start = self.diagnostics.len();
+        self.start_warning_text = self.warning_text;
         self.start_used = self.used;
         self.unsupported = false;
         self.limited = None;
         self.terminal_end = 0;
         self.frames.clear();
-        self.functions.clear();
-        self.pending = 0;
+        self.functions = Vec::new();
+        self.function_frames = 0;
+        self.pending =
+            self.warning_text + self.warning_slots * 4 * std::mem::size_of::<CandidateWarning>();
+        self.scopes = Vec::new();
+        self.expression = None;
+        self.parameter = None;
+        self.body = None;
+        self.import = None;
+        self.terminal_line = 0;
+        self.delimiter_depth = 0;
     }
 
     fn enter<F: FnMut(Checkpoint) -> bool>(
@@ -576,191 +1514,457 @@ impl Observer for Collector<'_, '_> {
             return;
         }
         let kind = node.kind();
+        // CPython's delimiter limit spans enclosing headers and arguments too.
+        // Only punctuation events count, never string/comment payload bytes.
+        if !node.is_named() {
+            match kind {
+                "(" | "[" | "{" => {
+                    self.delimiter_depth += 1;
+                    if self.delimiter_depth > 200 {
+                        self.unsupported = true;
+                        return;
+                    }
+                }
+                ")" | "]" | "}" => {
+                    let Some(depth) = self.delimiter_depth.checked_sub(1) else {
+                        self.unsupported = true;
+                        return;
+                    };
+                    self.delimiter_depth = depth;
+                }
+                _ => {}
+            }
+        }
         let parent = self.frames.last().map(|f| f.kind).unwrap_or("");
+        let mode = match (parent, field) {
+            ("typed_parameter" | "typed_default_parameter", Some("type")) => Some(Mode::Annotation),
+            ("default_parameter" | "typed_default_parameter", Some("value")) => Some(Mode::Default),
+            ("function_definition", Some("return_type")) => Some(Mode::Return),
+            ("assignment", Some("left")) => Some(Mode::AssignmentTarget),
+            ("assignment", Some("right")) => Some(Mode::BodyValue),
+            ("expression_statement", _) if kind != "assignment" && kind != "comment" => {
+                Some(Mode::BodyValue)
+            }
+            ("return_statement", _) if node.is_named() && kind != "comment" => {
+                Some(Mode::BodyValue)
+            }
+            _ => None,
+        };
+        if let Some(mode) = mode {
+            if self.expression.is_some() {
+                self.unsupported = true;
+                return;
+            }
+            if mode == Mode::Return
+                && node.start_position().row != self.functions.last().unwrap().header_end
+            {
+                self.unsupported = true;
+                return;
+            }
+            if mode == Mode::BodyValue
+                && matches!(parent, "assignment" | "return_statement")
+                && node.start_position().row + 1 != self.terminal_line
+            {
+                self.unsupported = true;
+                return;
+            }
+            self.expression = Some(Expression::new(mode, node.start_byte()));
+        }
+        let previous_terminal_end = self.terminal_end;
         if node.child_count() == 0 && kind != "module" {
             let gap = &bytes[self.terminal_end..node.start_byte()];
-            if !trivia(gap, cancel) {
+            if !trivia(gap, cancel)
+                || self.expression.as_mut().is_some_and(|e| {
+                    !e.terminal(
+                        node,
+                        &bytes[self.terminal_end.max(e.start)..node.start_byte()],
+                        cancel,
+                    )
+                })
+            {
                 self.unsupported = true;
             }
             self.terminal_end = node.end_byte();
+            if kind != "comment" {
+                self.terminal_line = node.end_position().row + 1;
+            }
         }
-        match kind {
-            "module" if parent.is_empty() => {
-                for (chunk_index, chunk) in bytes.chunks(4096).enumerate() {
-                    if cancel.at(Checkpoint::Collector) {
+        if self.import.is_some() {
+            if node.child_count() == 0 {
+                let import = self.import.as_ref().unwrap();
+                // Comments are observed leaves but never semantic descriptors.
+                // Use the previous leaf, not the previous semantic token, so
+                // a comment's payload cannot be mistaken for inter-token trivia.
+                let previous = previous_terminal_end.max(import.start);
+                let in_list = import.parenthesized && !import.closed;
+                let word = |kind| matches!(kind, "identifier" | "import" | "from" | "as");
+                // Only the single enclosing from-import pair grants implicit
+                // continuation; prefix tokens and '(' stay on the first line.
+                if import.closed
+                    || (!in_list
+                        && (!bytes[previous..node.start_byte()].chunks(256).all(|chunk| {
+                            !cancel.at(Checkpoint::Collector) && chunk.iter().all(|&b| b == b' ')
+                        }) || node.start_position().row + 1 != import.line
+                            || node.end_position().row + 1 != import.line))
+                    || (previous == node.start_byte()
+                        && word(kind)
+                        && import.tokens.last().is_some_and(|t| word(t.kind)))
+                    || !matches!(
+                        kind,
+                        "identifier"
+                            | "import"
+                            | "from"
+                            | "as"
+                            | "."
+                            | "..."
+                            | ","
+                            | "("
+                            | ")"
+                            | "comment"
+                    )
+                    || (kind == "identifier"
+                        && !identifier(
+                            std::str::from_utf8(&bytes[node.start_byte()..node.end_byte()])
+                                .unwrap_or(""),
+                            cancel,
+                        ))
+                {
+                    self.unsupported = true;
+                    return;
+                }
+                match kind {
+                    "comment" => {
+                        if !in_list
+                            || type_comment(&bytes[node.start_byte()..node.end_byte()], cancel)
+                        {
+                            self.unsupported = true;
+                        }
+                    }
+                    "(" => {
+                        if import.parenthesized
+                            || !import.from
+                            || import.tokens.last().is_none_or(|t| t.kind != "import")
+                        {
+                            self.unsupported = true;
+                            return;
+                        }
+                        self.import.as_mut().unwrap().parenthesized = true;
+                    }
+                    ")" => {
+                        if !in_list {
+                            self.unsupported = true;
+                            return;
+                        }
+                        self.import.as_mut().unwrap().closed = true;
+                    }
+                    _ => {}
+                }
+                if kind != "comment" {
+                    let charge = 4 * std::mem::size_of::<ImportToken>();
+                    if !self.reserve_work(charge, cancel) {
                         return;
                     }
-                    if chunk.iter().enumerate().any(|(offset, &b)| {
-                        b == 0
-                            || (b == b'\r'
-                                && bytes.get(chunk_index * 4096 + offset + 1) != Some(&b'\n'))
-                    }) {
+                    let import = self.import.as_mut().unwrap();
+                    import.working += charge;
+                    import.tokens.push(ImportToken {
+                        kind,
+                        span: node.start_byte()..node.end_byte(),
+                    });
+                }
+            } else if !matches!(
+                kind,
+                "dotted_name" | "aliased_import" | "relative_import" | "import_prefix"
+            ) {
+                self.unsupported = true;
+                return;
+            }
+        } else if self.expression.is_some() {
+            if !self.reserve_work(Expression::ENTRY_WORK, cancel) {
+                return;
+            }
+            if !self.expression.as_mut().unwrap().enter(node, bytes, cancel) {
+                self.unsupported = true;
+                return;
+            }
+        } else {
+            match kind {
+                "module" if parent.is_empty() => {
+                    if !self.reserve_work(4 * std::mem::size_of::<AliasScope>(), cancel) {
+                        return;
+                    }
+                    self.scopes.push(AliasScope::default());
+                    for (chunk_index, chunk) in bytes.chunks(4096).enumerate() {
+                        if cancel.at(Checkpoint::Collector) {
+                            return;
+                        }
+                        if chunk.iter().enumerate().any(|(offset, &b)| {
+                            b == 0
+                                || (b == b'\r'
+                                    && bytes.get(chunk_index * 4096 + offset + 1) != Some(&b'\n'))
+                        }) {
+                            self.unsupported = true;
+                        }
+                    }
+                }
+                "comment" => {
+                    let text = &bytes[node.start_byte()..node.end_byte()];
+                    if type_comment(text, cancel) {
                         self.unsupported = true;
                     }
                 }
-            }
-            "comment" => {
-                let text = &bytes[node.start_byte()..node.end_byte()];
-                if type_comment(text, cancel) {
-                    self.unsupported = true;
+                "function_definition" => {
+                    self.statement(node, bytes);
+                    // Keep the vector's high-water capacity charged even after
+                    // nested functions unwind. Drop that capacity between files.
+                    if self.functions.len() == self.function_frames {
+                        if !self.reserve_work(4 * std::mem::size_of::<Function>(), cancel) {
+                            return;
+                        }
+                        self.function_frames += 1;
+                    }
+                    cancel.at(Checkpoint::FunctionFrame);
+                    self.functions.push(Function {
+                        line: node.start_position().row + 1,
+                        ..Function::default()
+                    });
                 }
-            }
-            "function_definition" => {
-                self.statement(node, bytes);
-                let working = 2 * std::mem::size_of::<Function>();
-                if !self.reserve_work(working, cancel) {
-                    return;
+                "block" if parent == "function_definition" && field == Some("body") => {}
+                "pass_statement" => self.statement(node, bytes),
+                "import_statement" | "import_from_statement" => {
+                    self.statement(node, bytes);
+                    if self.facts.len() >= self.limits.count {
+                        self.limited = Some(CandidateDiagnostic::FactLimit);
+                        return;
+                    }
+                    self.import = Some(ImportStatement {
+                        start: node.start_byte(),
+                        line: node.start_position().row + 1,
+                        from: kind == "import_from_statement",
+                        tokens: Vec::new(),
+                        working: 0,
+                        parenthesized: false,
+                        closed: false,
+                    });
                 }
-                cancel.at(Checkpoint::FunctionFrame);
-                self.functions.push(Function {
-                    working,
-                    line: node.start_position().row + 1,
-                    ..Function::default()
-                });
-            }
-            "block" if parent == "function_definition" && field == Some("body") => {}
-            "pass_statement" => self.statement(node, bytes),
-            "parameters" if parent == "function_definition" && field == Some("parameters") => {
-                if node.start_position().row + 1 != self.functions.last().unwrap().line {
-                    self.unsupported = true;
+                "expression_statement" | "return_statement" => {
+                    self.statement(node, bytes);
+                    if self.body.is_some()
+                        || (kind == "return_statement" && self.functions.is_empty())
+                    {
+                        self.unsupported = true;
+                        return;
+                    }
+                    let working = 2 * std::mem::size_of::<BodyStatement>();
+                    if !self.reserve_work(working, cancel) {
+                        return;
+                    }
+                    self.body = Some(BodyStatement {
+                        line: node.start_position().row + 1,
+                        target: None,
+                        source: None,
+                        binding: false,
+                        working,
+                    });
                 }
-            }
-            "identifier" => {
-                let name =
-                    std::str::from_utf8(&bytes[node.start_byte()..node.end_byte()]).unwrap_or("");
-                if !identifier(name, cancel) {
-                    self.unsupported = true;
-                    return;
-                }
-                if parent == "function_definition" && field == Some("name") {
+                "assignment" if parent == "expression_statement" => {}
+                "=" if parent == "assignment" && !node.is_named() => {}
+                "return" if parent == "return_statement" && !node.is_named() => {}
+                "parameters" if parent == "function_definition" && field == Some("parameters") => {
                     if node.start_position().row + 1 != self.functions.last().unwrap().line {
                         self.unsupported = true;
                     }
-                    let prefix = if self.functions.len() > 1 {
-                        &self.functions[self.functions.len() - 2].symbol
-                    } else {
-                        &self.sources[self.index].module
-                    };
-                    // Charge retained names and both symbol copies (including
-                    // the eventual unwind clone) before allocating either.
-                    let working = name.len() + 2 * (prefix.len() + name.len() + 1);
+                }
+                "typed_parameter" | "typed_default_parameter" | "default_parameter"
+                    if parent == "parameters" =>
+                {
+                    let working = 2 * std::mem::size_of::<Parameter>();
                     if !self.reserve_work(working, cancel) {
                         return;
                     }
-                    self.functions.last_mut().unwrap().working += working;
-                    let prefix = if self.functions.len() > 1 {
-                        &self.functions[self.functions.len() - 2].symbol
-                    } else {
-                        &self.sources[self.index].module
-                    };
-                    if let Some(symbol) = join_symbol(
-                        prefix,
-                        name,
-                        self.limits.bytes.saturating_sub(self.used),
-                        cancel,
+                    self.parameter = Some(Parameter {
+                        name: String::new(),
+                        line: 0,
+                        end: 0,
+                        annotation: None,
+                        working,
+                    });
+                }
+                "identifier" => {
+                    let name = std::str::from_utf8(&bytes[node.start_byte()..node.end_byte()])
+                        .unwrap_or("");
+                    if !identifier(name, cancel) {
+                        self.unsupported = true;
+                        return;
+                    }
+                    if parent == "function_definition" && field == Some("name") {
+                        if node.start_position().row + 1 != self.functions.last().unwrap().line {
+                            self.unsupported = true;
+                        }
+                        self.enter_scope(name, cancel);
+                        if self.unsupported || self.limited.is_some() || cancel.expired.get() {
+                            return;
+                        }
+                        let prefix = if self.functions.len() > 1 {
+                            &self.functions[self.functions.len() - 2].symbol
+                        } else {
+                            &self.sources[self.index].module
+                        };
+                        // Charge retained names and both symbol copies (including
+                        // the eventual unwind clone) before allocating either.
+                        let working = name.len() + 2 * (prefix.len() + name.len() + 1);
+                        if !self.reserve_work(working, cancel) {
+                            return;
+                        }
+                        self.functions.last_mut().unwrap().working += working;
+                        let prefix = if self.functions.len() > 1 {
+                            &self.functions[self.functions.len() - 2].symbol
+                        } else {
+                            &self.sources[self.index].module
+                        };
+                        if let Some(symbol) = join_symbol(
+                            prefix,
+                            name,
+                            self.limits.bytes.saturating_sub(self.used),
+                            cancel,
+                        ) {
+                            let f = self.functions.last_mut().unwrap();
+                            f.name = name.into();
+                            f.symbol = symbol;
+                        } else {
+                            self.limited = Some(CandidateDiagnostic::OutputLimit);
+                        }
+                    } else if matches!(
+                        parent,
+                        "parameters"
+                            | "list_splat_pattern"
+                            | "dictionary_splat_pattern"
+                            | "typed_parameter"
+                            | "typed_default_parameter"
+                            | "default_parameter"
                     ) {
-                        let f = self.functions.last_mut().unwrap();
-                        f.name = name.into();
-                        f.symbol = symbol;
+                        // Signature/set names and the deferred parameter name,
+                        // plus HashSet buckets and geometric Vec growth.
+                        let working = 3 * name.len() + 256;
+                        if !self.reserve_work(working, cancel) {
+                            return;
+                        }
+                        let Some(f) = self.functions.last_mut() else {
+                            self.unsupported = true;
+                            return;
+                        };
+                        f.working += working;
+                        if !f.names.insert(name.into()) || f.kwarg.is_some() {
+                            self.unsupported = true;
+                        }
+                        match parent {
+                            "list_splat_pattern" => {
+                                f.vararg = Some(name.into());
+                            }
+                            "dictionary_splat_pattern" => {
+                                f.kwarg = Some(name.into());
+                            }
+                            _ if f.star => f.keyword.push(name.into()),
+                            _ => {
+                                let default = matches!(
+                                    parent,
+                                    "default_parameter" | "typed_default_parameter"
+                                );
+                                if f.positional_default && !default {
+                                    self.unsupported = true;
+                                }
+                                f.positional_default |= default;
+                                f.positional.push(name.into());
+                            }
+                        }
+                        if let Some(parameter) = self.parameter.as_mut() {
+                            parameter.name = name.into();
+                            parameter.line = node.start_position().row + 1;
+                            parameter.end = node.end_position().row + 1;
+                        } else {
+                            let temporary = f.symbol.len() + 2 * name.len() + 1;
+                            if !self.reserve_work(temporary, cancel) {
+                                return;
+                            }
+                            let Some(symbol) = join_symbol(
+                                &self.functions.last().unwrap().symbol,
+                                name,
+                                self.limits.bytes.saturating_sub(self.used),
+                                cancel,
+                            ) else {
+                                self.limited = Some(CandidateDiagnostic::OutputLimit);
+                                return;
+                            };
+                            self.add(
+                                "parameter",
+                                node.start_position().row + 1,
+                                node.end_position().row + 1,
+                                symbol,
+                                name.into(),
+                                cancel,
+                            );
+                            self.pending -= temporary;
+                        }
                     } else {
-                        self.limited = Some(CandidateDiagnostic::OutputLimit);
-                    }
-                } else if matches!(
-                    parent,
-                    "parameters" | "list_splat_pattern" | "dictionary_splat_pattern"
-                ) {
-                    // Two owned name copies plus conservative per-entry space
-                    // for HashSet buckets and geometric Vec growth.
-                    let working = 2 * name.len() + 256;
-                    if !self.reserve_work(working, cancel) {
-                        return;
-                    }
-                    let Some(f) = self.functions.last_mut() else {
-                        self.unsupported = true;
-                        return;
-                    };
-                    f.working += working;
-                    if !f.names.insert(name.into()) || f.kwarg.is_some() {
                         self.unsupported = true;
                     }
-                    match parent {
-                        "list_splat_pattern" => {
-                            f.vararg = Some(name.into());
-                        }
-                        "dictionary_splat_pattern" => {
-                            f.kwarg = Some(name.into());
-                        }
-                        _ if f.star => f.keyword.push(name.into()),
-                        _ => f.positional.push(name.into()),
+                }
+                "positional_separator" if parent == "parameters" => {
+                    let f = self.functions.last_mut().unwrap();
+                    if f.slash || f.star || f.kwarg.is_some() || f.positional.is_empty() {
+                        self.unsupported = true;
                     }
-                    let temporary = f.symbol.len() + 2 * name.len() + 1;
-                    if !self.reserve_work(temporary, cancel) {
-                        return;
+                    f.slash = true;
+                    f.positional_only = f.positional.len();
+                }
+                "keyword_separator" | "list_splat_pattern"
+                    if matches!(parent, "parameters" | "typed_parameter") =>
+                {
+                    let f = self.functions.last_mut().unwrap();
+                    if f.star || f.kwarg.is_some() {
+                        self.unsupported = true;
                     }
-                    let Some(symbol) = join_symbol(
-                        &self.functions.last().unwrap().symbol,
-                        name,
-                        self.limits.bytes.saturating_sub(self.used),
-                        cancel,
-                    ) else {
-                        self.limited = Some(CandidateDiagnostic::OutputLimit);
-                        return;
-                    };
-                    self.add(
-                        "parameter",
-                        node.start_position().row + 1,
-                        node.end_position().row + 1,
-                        symbol,
-                        name.into(),
-                        cancel,
-                    );
-                    self.pending -= temporary;
-                } else {
-                    self.unsupported = true;
+                    f.star = true;
+                    f.bare_star = kind == "keyword_separator";
                 }
+                "dictionary_splat_pattern"
+                    if matches!(parent, "parameters" | "typed_parameter") =>
+                {
+                    if self.functions.last().unwrap().kwarg.is_some() {
+                        self.unsupported = true;
+                    }
+                }
+                "async" | "def" if parent == "function_definition" && !node.is_named() => {
+                    let f = self.functions.last_mut().unwrap();
+                    if node.start_position().row + 1 != f.line {
+                        self.unsupported = true;
+                    }
+                    if kind == "async" {
+                        f.asynchronous = true;
+                    }
+                }
+                ":" if parent == "function_definition" && !node.is_named() => {
+                    if node.start_position().row != self.functions.last().unwrap().header_end {
+                        self.unsupported = true;
+                    }
+                }
+                "(" | ")" | "," if parent == "parameters" && !node.is_named() => {}
+                ":" | "="
+                    if matches!(
+                        parent,
+                        "typed_parameter" | "typed_default_parameter" | "default_parameter"
+                    ) && !node.is_named() => {}
+                "->" if parent == "function_definition" && !node.is_named() => {
+                    if node.start_position().row != self.functions.last().unwrap().header_end {
+                        self.unsupported = true;
+                    }
+                }
+                "/" if parent == "positional_separator" && !node.is_named() => {}
+                "*" if matches!(parent, "keyword_separator" | "list_splat_pattern")
+                    && !node.is_named() => {}
+                "**" if parent == "dictionary_splat_pattern" && !node.is_named() => {}
+                "pass" if parent == "pass_statement" && !node.is_named() => {}
+                _ => self.unsupported = true,
             }
-            "positional_separator" if parent == "parameters" => {
-                let f = self.functions.last_mut().unwrap();
-                if f.slash || f.star || f.kwarg.is_some() || f.positional.is_empty() {
-                    self.unsupported = true;
-                }
-                f.slash = true;
-                f.positional_only = f.positional.len();
-            }
-            "keyword_separator" | "list_splat_pattern" if parent == "parameters" => {
-                let f = self.functions.last_mut().unwrap();
-                if f.star || f.kwarg.is_some() {
-                    self.unsupported = true;
-                }
-                f.star = true;
-                f.bare_star = kind == "keyword_separator";
-            }
-            "dictionary_splat_pattern" if parent == "parameters" => {
-                if self.functions.last().unwrap().kwarg.is_some() {
-                    self.unsupported = true;
-                }
-            }
-            "async" | "def" if parent == "function_definition" && !node.is_named() => {
-                let f = self.functions.last_mut().unwrap();
-                if node.start_position().row + 1 != f.line {
-                    self.unsupported = true;
-                }
-                if kind == "async" {
-                    f.asynchronous = true;
-                }
-            }
-            ":" if parent == "function_definition" && !node.is_named() => {
-                if node.start_position().row != self.functions.last().unwrap().header_end {
-                    self.unsupported = true;
-                }
-            }
-            "(" | ")" | "," if parent == "parameters" && !node.is_named() => {}
-            "/" if parent == "positional_separator" && !node.is_named() => {}
-            "*" if matches!(parent, "keyword_separator" | "list_splat_pattern")
-                && !node.is_named() => {}
-            "**" if parent == "dictionary_splat_pattern" && !node.is_named() => {}
-            "pass" if parent == "pass_statement" && !node.is_named() => {}
-            _ => self.unsupported = true,
         }
         let point = node.start_position();
         let (row, column) = if kind == "block" {
@@ -784,6 +1988,45 @@ impl Observer for Collector<'_, '_> {
             return;
         }
         self.frames.pop();
+        if self.import.is_some() {
+            if matches!(node.kind(), "import_statement" | "import_from_statement") {
+                let end = self.terminal_line;
+                self.finish_import(cancel);
+                if let Some(f) = self.functions.last_mut() {
+                    f.end = end;
+                }
+                if let Some(suite) = self.frames.last_mut() {
+                    suite.last_end = Some(end - 1);
+                }
+            }
+            return;
+        }
+        if self.expression.is_some() {
+            let scratch = if node.kind() == "call" {
+                Expression::RENDER_WORK
+            } else {
+                0
+            };
+            if scratch != 0 && !self.reserve_work(scratch, cancel) {
+                return;
+            }
+            let bytes = self.sources[self.index]
+                .bytes
+                .strip_prefix(b"\xef\xbb\xbf")
+                .unwrap_or(&self.sources[self.index].bytes);
+            let result = self.expression.as_mut().unwrap().exit(bytes, cancel);
+            self.pending -= scratch;
+            match result {
+                Ok(false) => return,
+                Err(()) => {
+                    self.unsupported = true;
+                    return;
+                }
+                Ok(true) => {}
+            }
+            self.finish_expression(cancel);
+            return;
+        }
         match node.kind() {
             "module" => {
                 // The final gap can include bytes ignored by the grammar.
@@ -809,8 +2052,50 @@ impl Observer for Collector<'_, '_> {
                 f.signature = signature(f, cancel);
                 f.header_end = node.end_position().row;
             }
-            "pass_statement" => {
-                let end = node.end_position().row + 1;
+            "typed_parameter" | "typed_default_parameter" | "default_parameter" => {
+                let parameter = self.parameter.take().unwrap();
+                let temporary =
+                    self.functions.last().unwrap().symbol.len() + parameter.name.len() + 1;
+                if !self.reserve_work(temporary, cancel) {
+                    return;
+                }
+                let symbol = join_symbol(
+                    &self.functions.last().unwrap().symbol,
+                    &parameter.name,
+                    self.limits.bytes.saturating_sub(self.used),
+                    cancel,
+                );
+                let Some(symbol) = symbol else {
+                    self.limited = Some(CandidateDiagnostic::OutputLimit);
+                    return;
+                };
+                if let Some(annotation) = parameter.annotation {
+                    // The second symbol copy is covered by the expression's
+                    // retained temporary reservation until this parameter exits.
+                    self.add(
+                        "parameter_annotation",
+                        parameter.line,
+                        parameter.end,
+                        symbol.clone(),
+                        annotation,
+                        cancel,
+                    );
+                }
+                self.add(
+                    "parameter",
+                    parameter.line,
+                    parameter.end,
+                    symbol,
+                    parameter.name,
+                    cancel,
+                );
+                self.pending -= parameter.working + temporary;
+            }
+            "pass_statement" | "expression_statement" | "return_statement" => {
+                let end = self.terminal_line;
+                if node.kind() != "pass_statement" {
+                    self.finish_body_statement(cancel);
+                }
                 if let Some(f) = self.functions.last_mut() {
                     f.end = end;
                 }
@@ -878,6 +2163,8 @@ impl Observer for Collector<'_, '_> {
         };
         if status != CandidateStatus::AcceptedFacts {
             self.facts.truncate(self.start);
+            self.diagnostics.truncate(self.warning_start);
+            self.warning_text = self.start_warning_text;
             self.used = self.start_used;
         }
         self.files.push(CandidateFile {
@@ -1038,6 +2325,7 @@ mod tests {
         CandidateReport {
             identity: result.identity,
             facts: result.facts,
+            diagnostics: result.diagnostics,
             files: result
                 .files
                 .into_iter()
@@ -1058,6 +2346,1786 @@ mod tests {
             "{result:?}"
         );
         result
+    }
+
+    const DYNAMIC_NAMES: [&str; 9] = [
+        "__import__",
+        "import_module",
+        "iter_modules",
+        "walk_packages",
+        "entry_points",
+        "load_entry_point",
+        "find_spec",
+        "exec",
+        "eval",
+    ];
+
+    fn warning_messages<'a>(result: &'a CandidateReport<'_>) -> Vec<&'a str> {
+        assert!(result
+            .diagnostics
+            .iter()
+            .all(|d| d.code == "dynamic_discovery_unresolved"));
+        result
+            .diagnostics
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect()
+    }
+
+    fn warning(line: usize, callee: &str) -> String {
+        format!("line {line}: {callee}; runtime targets are not inferred")
+    }
+
+    #[test]
+    fn dynamic_warnings_keep_duplicates_and_sort_globally_as_text() {
+        let sources = [
+            source("z.py", "z", "eval()\n"),
+            source(
+                "a.py",
+                "a",
+                "pass\nouter(eval(), eval())\npass\npass\npass\npass\npass\npass\npass\nexec()\n",
+            ),
+        ];
+        let result = extract_fact_candidates(&sources).unwrap();
+        assert!(result
+            .files
+            .iter()
+            .all(|f| f.status == CandidateStatus::AcceptedFacts));
+        assert_eq!(
+            serde_json::to_value(&result.diagnostics).unwrap(),
+            serde_json::json!([
+                {"code":"dynamic_discovery_unresolved", "path":"a.py", "message":warning(10, "exec")},
+                {"code":"dynamic_discovery_unresolved", "path":"a.py", "message":warning(2, "eval")},
+                {"code":"dynamic_discovery_unresolved", "path":"a.py", "message":warning(2, "eval")},
+                {"code":"dynamic_discovery_unresolved", "path":"z.py", "message":warning(1, "eval")},
+            ])
+        );
+        assert_eq!(
+            result
+                .facts
+                .iter()
+                .filter(|f| f.path == "a.py" && f.value == "eval()")
+                .count(),
+            1
+        );
+        assert_eq!(result.identity.policy, "python-native-private-facts-6");
+    }
+
+    #[test]
+    fn dynamic_imports_move_from_exclusions_to_supported_aliases() {
+        for terminal in DYNAMIC_NAMES {
+            for import in [
+                format!("from pkg import (\n safe, # ordinary\n {terminal} as unused,\n)"),
+                format!("import safe, pkg.{terminal} as unused, other"),
+                format!("import safe, {terminal}.child, other"),
+                format!("from pkg import safe, {terminal} as unused, other"),
+                format!("import {}.{terminal} as unused", "a".repeat(900)),
+                format!("def scoped():\n    from pkg import {terminal} as unused\n    unused=1"),
+            ] {
+                let result = accepted(format!("import safe\ndef before(): pass\n{import}\n"));
+                assert!(result.diagnostics.is_empty(), "{import}");
+            }
+            for import in [
+                format!("import pkg.{terminal}"),
+                format!("from .pkg import {terminal} as alias\nalias()"),
+                format!("from ... import {terminal} as alias\nalias()"),
+                format!("from .pkg import (\n {terminal} as alias,\n)\nalias()"),
+                format!("import pkg.{terminal}.ordinary as alias\nalias()"),
+            ] {
+                assert!(accepted(import).diagnostics.is_empty());
+            }
+            let result = accepted(format!("from pkg import {terminal} as go\ngo()\n"));
+            assert_eq!(
+                warning_messages(&result),
+                [warning(2, &format!("pkg.{terminal}"))]
+            );
+        }
+        assert_eq!(
+            warning_messages(&accepted("import tools\nobj.import_module()")),
+            [warning(2, "obj.import_module")]
+        );
+    }
+
+    #[test]
+    fn dynamic_aliases_overwrite_suppress_do_not_recurse_or_invalidate() {
+        let result = accepted(concat!(
+            "from pkg import eval as go\n",        // 1
+            "go()\n",                              // 2
+            "from safe import ordinary as go\n",   // 3
+            "go()\n",                              // 4
+            "from safe import ordinary as eval\n", // 5
+            "eval()\n",                            // 6
+            "import eval as go\n",                 // 7: no recursive expansion through eval
+            "go()\n",                              // 8
+            "from .safe import ordinary as go\n",  // 9: no invalidation
+            "go=None\n",                           // 10
+            "def go(): pass\n",                    // 11: no invalidation
+            "go()\n",                              // 12
+            "import exec.child\n",                 // 13: target is exec, not exec.child
+            "exec()\n",                            // 14
+            "import pkg.eval\n",                   // 15: target is pkg
+            "pkg()\n",                             // 16
+            "pkg.eval()\n",                        // 17
+        ));
+        assert_eq!(
+            warning_messages(&result),
+            [
+                warning(12, "eval"),
+                warning(14, "exec"),
+                warning(17, "pkg.eval"),
+                warning(2, "pkg.eval"),
+                warning(8, "eval")
+            ]
+        );
+        assert_eq!(
+            warning_messages(&accepted("from pkg import eval as go, exec as go\ngo()")),
+            [warning(2, "pkg.exec")]
+        );
+        for text in [
+            "import ordinary as FastAPI\nFastAPI()",
+            "import ordinary as APIRouter\nAPIRouter()",
+            "from pkg import FastAPI as x\nimport ordinary as x\nx()",
+            "from pkg import APIRouter as x\nimport ordinary as x\nx()",
+        ] {
+            assert_eq!(
+                candidates(text).files[0].status,
+                CandidateStatus::UnsupportedSyntax
+            );
+        }
+    }
+
+    #[test]
+    fn dynamic_scope_keys_persist_by_name_not_module_or_declaration() {
+        let text = concat!(
+            "from pkg import eval as go\n", // root
+            "def outer(go):\n",
+            "    go=None\n",
+            "    go()\n", // parameters/writes do not shadow imports
+            "    def inner():\n",
+            "        from nested import exec as go\n",
+            "        go()\n",
+            "    go()\n", // nearest parent, not exited child
+            "def outer():\n",
+            "    def inner():\n",
+            "        go()\n", // reuses outer/inner aliases
+            "    from safe import ordinary as go\n",
+            "    go()\n",
+            "def outer():\n",
+            "    go()\n", // reuses outer safe alias
+            "go()\n",     // root unchanged
+        );
+        let expected = [
+            warning(11, "nested.exec"),
+            warning(16, "pkg.eval"),
+            warning(4, "pkg.eval"),
+            warning(7, "nested.exec"),
+            warning(8, "pkg.eval"),
+        ];
+        for module in ["sample", "", "odd.outer.inner", "odd..outer."] {
+            let sources = [source("a.py", module, text)];
+            let result = extract_fact_candidates(&sources).unwrap();
+            assert_eq!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{result:?}"
+            );
+            assert_eq!(warning_messages(&result), expected);
+        }
+    }
+
+    #[test]
+    fn dynamic_callees_clip_fresh_roots_and_expand_full_targets_once() {
+        for length in [511, 512, 513] {
+            let local = "n".repeat(length.min(512));
+            let spelling = "n".repeat(length);
+            let target = format!("{}.eval", "p".repeat(900));
+            let result = accepted(format!("import {target} as {local}\n{spelling}()\n"));
+            assert_eq!(warning_messages(&result), [warning(2, &target)]);
+            let fact = result.facts.iter().find(|f| f.kind == "call").unwrap();
+            assert_eq!(
+                fact.value,
+                format!(
+                    "{}{}",
+                    &spelling[..length.min(512)],
+                    if length < 512 { "(" } else { "" }
+                )
+            );
+        }
+        // Raw alias length 513 is not a match for the rendered 512-byte head.
+        let local = "n".repeat(513);
+        assert!(
+            accepted(format!("from pkg import eval as {local}\n{local}()\n"))
+                .diagnostics
+                .is_empty()
+        );
+        let target = format!("{}.ordinary", "p".repeat(900));
+        assert_eq!(
+            warning_messages(&accepted(format!("import {target} as go\ngo.eval()"))),
+            [warning(2, &format!("{target}.eval"))]
+        );
+        for terminal in DYNAMIC_NAMES {
+            let n = 512 - terminal.len() - 1;
+            for length in [n - 1, n, n + 1] {
+                let callee = format!("{}.{}Extra", "a".repeat(length), terminal);
+                let result = accepted(format!("{callee}()"));
+                let expected = if length == n {
+                    vec![warning(1, &callee[..512])]
+                } else {
+                    vec![]
+                };
+                assert_eq!(warning_messages(&result), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn dynamic_nested_calls_warn_even_when_parent_shape_hides_them() {
+        let padding = std::iter::repeat_n("ok()", 17)
+            .collect::<Vec<_>>()
+            .join(",");
+        let exhausted = (0..16)
+            .map(|i| format!("k{i}=f(a,b,c,d,e,f)"))
+            .collect::<Vec<_>>()
+            .join(",");
+        for terminal in DYNAMIC_NAMES {
+            // These were all previously negative fixtures, including literal args.
+            let call = format!("{terminal}('x')");
+            let clipped = format!(
+                "{}.{}Extra()",
+                "a".repeat(512 - terminal.len() - 1),
+                terminal
+            );
+            for (call, callee) in [
+                (call, terminal.to_string()),
+                (clipped.clone(), clipped[..512].to_string()),
+                (format!("pkg.{terminal}()"), format!("pkg.{terminal}")),
+            ] {
+                for rhs in [
+                    call.clone(),
+                    format!("outer({padding},{call})"),
+                    format!("outer({exhausted},bad={call})"),
+                    format!("{}{}{}", "f(".repeat(15), call, ")".repeat(15)),
+                    format!("{}(x={call})", "a".repeat(600)),
+                ] {
+                    let result =
+                        accepted(format!("def before(): pass\nx={rhs}\ndef after(): pass\n"));
+                    assert_eq!(warning_messages(&result), [warning(2, &callee)], "{rhs}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dynamic_warning_limits_rollback_and_alias_storage_is_bounded() {
+        let sources = [
+            source("a.py", "a", "outer(eval(), eval(), eval())"),
+            source("b.py", "b", "eval()"),
+        ];
+        let result = extract(
+            &sources,
+            Limits::default(),
+            FactLimits {
+                warnings: 2,
+                ..FactLimits::default()
+            },
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(
+            result.files[0].diagnostic,
+            Some(CandidateDiagnostic::WarningLimit)
+        );
+        assert_eq!(result.files[1].status, CandidateStatus::AcceptedFacts);
+        assert_eq!(warning_messages(&result), [warning(1, "eval")]);
+        assert_eq!(result.diagnostics[0].path, "b.py");
+        let target = format!("{}.eval", "p".repeat(2000));
+        // Replacing the same alias and reusing the same function scope must not
+        // accumulate old target/name/container charges indefinitely.
+        let sources = [source(
+            "a.py",
+            "a",
+            format!("def f():\n    import {target} as go\n").repeat(100),
+        )];
+        let result = extract(
+            &sources,
+            Limits::default(),
+            FactLimits {
+                working: 80_000,
+                ..FactLimits::default()
+            },
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(
+            result.files[0].status,
+            CandidateStatus::AcceptedFacts,
+            "{result:?}"
+        );
+        let sources = [source(
+            "a.py",
+            "a",
+            (0..100)
+                .map(|i| format!("def f{i}():\n    import {target} as go\n"))
+                .collect::<String>(),
+        )];
+        let result = extract(
+            &sources,
+            Limits::default(),
+            FactLimits {
+                working: 80_000,
+                ..FactLimits::default()
+            },
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(
+            result.files[0].diagnostic,
+            Some(CandidateDiagnostic::WorkingLimit)
+        );
+        assert!(result.diagnostics.is_empty());
+        let sources = [source(
+            "a.py",
+            "a",
+            format!("import {target} as go\n{}", "go()\n".repeat(20)),
+        )];
+        let full = extract_fact_candidates(&sources).unwrap();
+        for limits in [
+            FactLimits {
+                working: 10_000,
+                ..FactLimits::default()
+            },
+            FactLimits {
+                bytes: serde_json::to_vec(&full).unwrap().len() - 1,
+                ..FactLimits::default()
+            },
+        ] {
+            let result = extract(&sources, Limits::default(), limits, |_| false).unwrap();
+            assert_eq!(result.files[0].status, CandidateStatus::ResourceLimit);
+            assert!(result.diagnostics.is_empty());
+            assert_eq!(result.facts.len(), 1);
+        }
+        let sources = [
+            source("a.py", "a", "eval()\n".repeat(100)),
+            source("b.py", "b", "eval()\n".repeat(100)),
+        ];
+        let result = extract(
+            &sources,
+            Limits::default(),
+            FactLimits {
+                working: 60_000,
+                ..FactLimits::default()
+            },
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(result.files[0].status, CandidateStatus::AcceptedFacts);
+        assert_eq!(
+            result.files[1].diagnostic,
+            Some(CandidateDiagnostic::WorkingLimit)
+        );
+        assert_eq!(result.diagnostics.len(), 100);
+        assert!(result.diagnostics.iter().all(|d| d.path == "a.py"));
+    }
+
+    #[test]
+    fn dynamic_warning_capacity_reuses_after_rollback_and_alias_arenas_reset() {
+        fn minimum_working(sources: &[Source]) -> usize {
+            let mut low = 0;
+            let mut high = 64 * 1024;
+            let accepts = |working| {
+                extract(
+                    sources,
+                    Limits::default(),
+                    FactLimits {
+                        working,
+                        ..FactLimits::default()
+                    },
+                    |_| false,
+                )
+                .unwrap()
+                .files
+                .iter()
+                .all(|f| f.status == CandidateStatus::AcceptedFacts)
+            };
+            assert!(accepts(high));
+            while low < high {
+                let middle = low + (high - low) / 2;
+                if accepts(middle) {
+                    high = middle;
+                } else {
+                    low = middle + 1;
+                }
+            }
+            low
+        }
+
+        let count = 128;
+        let calls = "eval()\n".repeat(count);
+        let warning_work = minimum_working(&[source("a.py", "a", &calls)]);
+        let function_work = minimum_working(&[source("b.py", "b", "def f(): pass\n")]);
+        let working = warning_work.max(function_work);
+        let retained_slots = count * 4 * std::mem::size_of::<CandidateWarning>();
+        assert!(retained_slots > working - function_work);
+        let discarded_text: usize = (1..=count)
+            .map(|line| warning(line, "eval").len() + "a.py".len())
+            .sum();
+        assert!(discarded_text > working - warning_work);
+        // Measure the single-file peaks rather than pinning allocator/layout
+        // constants. The same warnings fit again only if discarded text is freed
+        // and existing vector slots are reused without being charged twice.
+        let sources = [
+            source("a.py", "a", format!("{calls}class Unsupported: pass\n")),
+            source("b.py", "b", &calls),
+        ];
+        let result = extract(
+            &sources,
+            Limits::default(),
+            FactLimits {
+                working,
+                ..FactLimits::default()
+            },
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(result.files[0].status, CandidateStatus::UnsupportedSyntax);
+        assert_eq!(result.files[1].status, CandidateStatus::AcceptedFacts);
+        assert_eq!(result.diagnostics.len(), count);
+        assert!(result.diagnostics.iter().all(|d| d.path == "b.py"));
+        assert_eq!(result.facts.iter().filter(|f| f.path == "a.py").count(), 1);
+
+        // A function fits by itself, but not alongside the discarded file's
+        // retained warning-vector capacity. Capacity must stay charged even
+        // though no warning text or records remain after rollback.
+        let sources = [
+            source("a.py", "a", format!("{calls}class Unsupported: pass\n")),
+            source("b.py", "b", "def f(): pass\n"),
+        ];
+        let result = extract(
+            &sources,
+            Limits::default(),
+            FactLimits {
+                working,
+                ..FactLimits::default()
+            },
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(result.files[0].status, CandidateStatus::UnsupportedSyntax);
+        assert_eq!(
+            result.files[1].diagnostic,
+            Some(CandidateDiagnostic::WorkingLimit)
+        );
+        assert!(result.diagnostics.is_empty());
+        assert!(result.diagnostics.capacity() >= count);
+
+        let target = format!("{}.ordinary", "p".repeat(2000));
+        let mut text = "from pkg import eval as go\n".to_string();
+        for i in 0..24 {
+            text.push_str(&format!("def f{i}():\n    import {target} as local\n"));
+        }
+        let sources = [
+            source("a.py", "a", text),
+            source("b.py", "b", "go()\ndef f(): pass\n"),
+        ];
+        // As in the existing 80k retained-alias test, distinct persistent scopes
+        // exhaust this budget. Neither their charges nor aliases may leak files.
+        let result = extract(
+            &sources,
+            Limits::default(),
+            FactLimits {
+                working: 80_000,
+                ..FactLimits::default()
+            },
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(
+            result.files[0].diagnostic,
+            Some(CandidateDiagnostic::WorkingLimit)
+        );
+        assert_eq!(result.files[1].status, CandidateStatus::AcceptedFacts);
+        assert!(result.diagnostics.is_empty());
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.path == "b.py" && f.value == "go()"));
+    }
+
+    #[test]
+    fn dynamic_alias_size_changes_warning_output_and_long_comparison_are_bounded() {
+        let target = format!("{}.eval", "p".repeat(2000));
+        let rounds = 40;
+        let working = 64 * 1024;
+        assert!(rounds * target.len() > working);
+        let mut text =
+            format!("import {target} as go\nfrom pkg import exec as go\n").repeat(rounds);
+        text.push_str("go()\n");
+        let sources = [source("a.py", "a", text)];
+        // 64 KiB admits one import's target/metadata/scratch, not cumulative
+        // copies of all forty long targets. Alternation exercises both shrink
+        // and grow replacements rather than only equal-size replacement.
+        let result = extract(
+            &sources,
+            Limits::default(),
+            FactLimits {
+                working,
+                ..FactLimits::default()
+            },
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(result.files[0].status, CandidateStatus::AcceptedFacts);
+        assert_eq!(
+            warning_messages(&result),
+            [warning(2 * rounds + 1, "pkg.exec")]
+        );
+
+        let path = "escaped\"\t\u{e9}.py";
+        let import = format!("import {target} as go\n");
+        let sources = [
+            source(path, "a", format!("{import}go()\ngo()\n")),
+            source("good.py", "good", "ordinary()\n"),
+        ];
+        let full = extract_fact_candidates(&sources).unwrap();
+        assert!(full
+            .files
+            .iter()
+            .all(|f| f.status == CandidateStatus::AcceptedFacts));
+        assert_eq!(
+            warning_messages(&full),
+            [warning(2, &target), warning(3, &target)]
+        );
+        let encoded = serde_json::to_string(&full.diagnostics[0]).unwrap();
+        assert!(encoded.contains("\\\"") && encoded.contains("\\t") && encoded.contains('\u{e9}'));
+        let cancel = Cancellation {
+            expired: Cell::new(false),
+            check: RefCell::new(|_| false),
+        };
+        let reserved =
+            reserve_candidates(&sources, Limits::default(), FactLimits::default(), &cancel)
+                .unwrap();
+        let import_fact = full
+            .facts
+            .iter()
+            .find(|f| f.path == path && f.kind == "import")
+            .unwrap();
+        let first_call = full
+            .facts
+            .iter()
+            .find(|f| f.path == path && f.kind == "call" && f.line == 2)
+            .unwrap();
+        // Admit the import, first warning and first call, then leave the second
+        // warning's exact record size but not its required comma byte. Include
+        // escaped UTF-8 path serialization in every record's measured size.
+        let bytes = reserved
+            + serde_json::to_vec(import_fact).unwrap().len()
+            + 1
+            + encoded.len()
+            + 1
+            + serde_json::to_vec(first_call).unwrap().len()
+            + 1
+            + serde_json::to_vec(&full.diagnostics[1]).unwrap().len();
+        let prefix = [
+            source(path, "a", format!("{import}go()\n")),
+            source("good.py", "good", "ordinary()\n"),
+        ];
+        let admitted_prefix = extract(
+            &prefix,
+            Limits::default(),
+            FactLimits {
+                bytes,
+                ..FactLimits::default()
+            },
+            |_| false,
+        )
+        .unwrap();
+        assert!(admitted_prefix
+            .files
+            .iter()
+            .all(|f| f.status == CandidateStatus::AcceptedFacts));
+        assert!(admitted_prefix
+            .facts
+            .iter()
+            .any(|f| f.path == path && f.kind == "import"));
+        assert_eq!(warning_messages(&admitted_prefix), [warning(2, &target)]);
+        let result = extract(
+            &sources,
+            Limits::default(),
+            FactLimits {
+                bytes,
+                ..FactLimits::default()
+            },
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(
+            result.files[0].diagnostic,
+            Some(CandidateDiagnostic::OutputLimit)
+        );
+        assert_eq!(result.files[1].status, CandidateStatus::AcceptedFacts);
+        assert!(result.diagnostics.is_empty());
+        assert_eq!(result.facts.iter().filter(|f| f.path == path).count(), 1);
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.path == "good.py" && f.value == "ordinary()"));
+        assert!(serde_json::to_vec(&result).unwrap().len() <= bytes);
+
+        let shared = "p".repeat(4096);
+        let mut warnings: Vec<_> = ["exec", "eval"]
+            .into_iter()
+            .map(|terminal| CandidateWarning {
+                code: "dynamic_discovery_unresolved",
+                path: "a.py".into(),
+                message: warning(1, &format!("{shared}.{terminal}")),
+            })
+            .collect();
+        let before = warnings.clone();
+        let in_comparison = Cell::new(false);
+        let comparison_hits = Cell::new(0);
+        let interrupted = Cell::new(false);
+        let cancel = Cancellation {
+            expired: Cell::new(false),
+            check: RefCell::new(|phase| {
+                if phase == Checkpoint::Sort && in_comparison.get() {
+                    comparison_hits.set(comparison_hits.get() + 1);
+                    return comparison_hits.get() == 3;
+                }
+                false
+            }),
+        };
+        interruptible_sort(&mut warnings, &cancel, |a, b| {
+            in_comparison.set(true);
+            let order = compare_text(&a.message, &b.message, &cancel);
+            in_comparison.set(false);
+            interrupted.set(order.is_none());
+            order
+        });
+        assert!(interrupted.get());
+        assert_eq!(comparison_hits.get(), 3);
+        assert!(cancel.expired.get());
+        assert!(cancel.at(Checkpoint::Sort));
+        assert_eq!(
+            compare_text(&warnings[0].message, &warnings[1].message, &cancel),
+            None
+        );
+        assert_eq!(warnings, before);
+    }
+
+    #[test]
+    fn dynamic_warnings_share_cancellation_transactions_and_single_walk() {
+        let sources = [
+            source(
+                "a.py",
+                "a",
+                "from pkg import eval as go\ndef f():\n    go()\n",
+            ),
+            source("b.py", "b", "go()\nexec()\neval()\n"),
+        ];
+        let mut parses = 0;
+        let mut totals = [0; 3];
+        let checkpoints = [Checkpoint::Collector, Checkpoint::Working, Checkpoint::Sort];
+        let full = extract(
+            &sources,
+            Limits::default(),
+            FactLimits::default(),
+            |phase| {
+                parses += usize::from(phase == Checkpoint::PostParse);
+                for (i, point) in checkpoints.iter().enumerate() {
+                    totals[i] += usize::from(phase == *point);
+                }
+                false
+            },
+        )
+        .unwrap();
+        assert_eq!(parses, 2);
+        assert_eq!(full.diagnostics.len(), 3); // no alias leak into b.py
+        let parsed = parse_batch(&sources).unwrap();
+        for (file, parsed) in full.files.iter().zip(&parsed.files) {
+            assert_eq!(file.nodes_visited, parsed.nodes_visited);
+            assert_eq!(file.max_depth, parsed.max_depth);
+        }
+        for (i, point) in checkpoints.iter().enumerate() {
+            for stop in 1..=totals[i] {
+                let mut visits = 0;
+                let result = extract(
+                    &sources,
+                    Limits::default(),
+                    FactLimits::default(),
+                    |phase| {
+                        visits += usize::from(phase == *point);
+                        visits == stop
+                    },
+                )
+                .unwrap();
+                assert!(result.diagnostics.is_empty(), "{point:?} {stop}");
+                assert!(result.facts.iter().all(|f| f.kind == "module"));
+                assert!(result
+                    .files
+                    .iter()
+                    .all(|f| f.status == CandidateStatus::ResourceLimit));
+            }
+        }
+        for point in [
+            Checkpoint::Output,
+            Checkpoint::FinalOutput,
+            Checkpoint::Final,
+        ] {
+            let mut visits = 0;
+            extract(
+                &sources,
+                Limits::default(),
+                FactLimits::default(),
+                |phase| {
+                    visits += usize::from(phase == point);
+                    false
+                },
+            )
+            .unwrap();
+            let mut seen = 0;
+            let result = extract(
+                &sources,
+                Limits::default(),
+                FactLimits::default(),
+                |phase| {
+                    seen += usize::from(phase == point);
+                    seen == visits
+                },
+            )
+            .unwrap();
+            assert!(result.diagnostics.is_empty());
+            assert!(result.facts.iter().all(|f| f.kind == "module"));
+        }
+        for suffix in [
+            "class Unsupported: pass",
+            "def broken(: pass",
+            "from pkg import FastAPI",
+        ] {
+            let sources = [
+                source("a.py", "a", format!("eval()\n{suffix}\n")),
+                source("b.py", "b", "eval()"),
+            ];
+            let result = extract_fact_candidates(&sources).unwrap();
+            assert_ne!(result.files[0].status, CandidateStatus::AcceptedFacts);
+            assert_eq!(result.diagnostics.len(), 1);
+            assert_eq!(result.diagnostics[0].path, "b.py");
+        }
+        let sources = [
+            source("a.py", "a", "eval()"),
+            source("b.py", "b", b"# coding: latin-1\neval()\n\xff"),
+            source("c.py", "c", "exec()"),
+        ];
+        let result = extract_fact_candidates(&sources).unwrap();
+        assert_eq!(result.files[1].status, CandidateStatus::UnsupportedEncoding);
+        assert_eq!(
+            result
+                .diagnostics
+                .iter()
+                .map(|d| d.path.as_str())
+                .collect::<Vec<_>>(),
+            ["a.py", "c.py"]
+        );
+    }
+
+    #[test]
+    fn imports_preserve_metadata_order_ownership_and_statement_extents() {
+        let text = "import a . b as c, a.b, a.b # tail\nfrom a . b import x as y, x, z\ndef outer():\n    import tools\n    def inner():\n        from ....pkg . sub import thing as t\n        # tail\n    from . import local\n# tail\n";
+        let result = accepted(text);
+        let imports: Vec<_> = result
+            .facts
+            .iter()
+            .filter(|f| matches!(f.kind.as_str(), "import" | "from_import"))
+            .map(|f| {
+                (
+                    f.kind.as_str(),
+                    f.line,
+                    f.end_line,
+                    f.symbol.as_str(),
+                    f.value.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(imports, vec![
+            ("import", 1, 1, "sample", "{\"level\":0,\"module\":\"\",\"names\":[{\"asname\":\"c\",\"name\":\"a.b\"},{\"asname\":null,\"name\":\"a.b\"},{\"asname\":null,\"name\":\"a.b\"}]}"),
+            ("from_import", 2, 2, "sample", "{\"level\":0,\"module\":\"a.b\",\"names\":[{\"asname\":\"y\",\"name\":\"x\"},{\"asname\":null,\"name\":\"x\"},{\"asname\":null,\"name\":\"z\"}]}"),
+            ("import", 4, 4, "sample.outer", "{\"level\":0,\"module\":\"\",\"names\":[{\"asname\":null,\"name\":\"tools\"}]}"),
+            ("from_import", 6, 6, "sample.outer.inner", "{\"level\":4,\"module\":\"pkg.sub\",\"names\":[{\"asname\":\"t\",\"name\":\"thing\"}]}"),
+            ("from_import", 8, 8, "sample.outer", "{\"level\":1,\"module\":\"\",\"names\":[{\"asname\":null,\"name\":\"local\"}]}"),
+        ]);
+        for fact in result
+            .facts
+            .iter()
+            .filter(|f| matches!(f.kind.as_str(), "function" | "signature"))
+        {
+            assert_eq!(
+                fact.end_line,
+                if fact.symbol == "sample.outer" { 8 } else { 6 }
+            );
+        }
+        for text in [
+            "import  a  .  b  as  c  ,  d\n",
+            "from . . . . pkg . sub import x as y\n",
+            "from...pkg import x\n",
+            "from.import x\n",
+            "import tools\ntools.run()\ndef f(x: tools.T) -> tools.R:\n    from pkg import run as r\n    return r(x)\n",
+            "\u{feff}import tools\r\nfrom ..pkg import item # tail\r\n",
+        ] { accepted(text); }
+    }
+
+    #[test]
+    fn multiline_import_metadata_and_closing_spans_preserve_ownership() {
+        let text = "from pkg import (x,)\ndef outer():\n    def inner():\n        from ..pkg import ( # opening\n            x # before as\n            as # before alias\n            local,\n            x, # duplicate\n            # before close ) ( , \\\n        ) # trailing\n        # not part of extent\n# final\n";
+        let result = accepted(text);
+        let import = result.facts.iter().find(|f| f.line == 4).unwrap();
+        assert_eq!(import.kind, "from_import");
+        assert_eq!(import.end_line, 10);
+        assert_eq!(import.symbol, "sample.outer.inner");
+        assert_eq!(
+            import.value,
+            r#"{"level":2,"module":"pkg","names":[{"asname":"local","name":"x"},{"asname":null,"name":"x"}]}"#
+        );
+        for f in result
+            .facts
+            .iter()
+            .filter(|f| matches!(f.kind.as_str(), "function" | "signature"))
+        {
+            assert_eq!(f.end_line, 10);
+        }
+        for text in [
+            "from pkg import(x)",
+            "from pkg import (x, y as z,)",
+            "from.import(x,)",
+            "from...pkg import(\nx\nas\ny,\n)",
+            "\u{feff}from ..pkg import (\r\n # comment \u{3bb}\t\u{c}\r\n x,\r\n) # tail\r\n",
+        ] {
+            accepted(text);
+        }
+    }
+
+    #[test]
+    fn multiline_import_continuation_and_grammar_remain_fail_closed() {
+        for text in [
+            "from\npkg import (x)",
+            "from pkg\nimport (x)",
+            "from pkg import\n(x)",
+            "from pkg import # comment\n(x)",
+            "from pkg import ()",
+            "from pkg import (,)",
+            "from pkg import (x,,y)",
+            "from pkg import (x y)",
+            "from pkg import (x.y)",
+            "from pkg import (x as)",
+            "from pkg import ((x))",
+            "from pkg import (x), y",
+            "from pkg import (x) (y)",
+            "from pkg import (x,) as y",
+            "import (pkg)",
+            "from pkg import (x\t)",
+            "from pkg import (\n\tx\n)",
+            "from pkg import (x\u{c})",
+            "from pkg import (\u{212a})",
+            "from pkg import (x as \\\n y)",
+            "from pkg import (x, # type: ignore\n y)",
+            "from pkg import ( #\t type: list[T]\n x)",
+            "from __future__ import (annotations,)",
+            "from pkg import (x); pass",
+            "def f(): from pkg import (x)",
+        ] {
+            let result = candidates(format!(
+                "import safe\ndef before(): pass\n{text}\ndef after(): pass\n"
+            ));
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{text:?}: {result:?}"
+            );
+            assert_eq!(result.facts.len(), 1);
+        }
+    }
+
+    #[test]
+    fn multiline_import_comments_are_borrowed_and_state_is_file_local() {
+        let marker = "PRIVATE_COMMENT_PAYLOAD";
+        let text = format!("from pkg import (\n # {}\n x,\n)\n", marker.repeat(5000));
+        let result = accepted(&text);
+        assert!(!serde_json::to_string(&result).unwrap().contains(marker));
+        let sources = [
+            source("a.py", "a", "from pkg import (\n x, # type: ignore\n)\n"),
+            source("b.py", "b", &text),
+            source("c.py", "c", "from pkg import item\nitem()\n"),
+        ];
+        let result = super::super::extract_fact_candidates(&sources).unwrap();
+        assert_eq!(result.files[0].status, CandidateStatus::UnsupportedSyntax);
+        assert_eq!(result.files[1].status, CandidateStatus::AcceptedFacts);
+        assert_eq!(result.files[2].status, CandidateStatus::AcceptedFacts);
+        assert_eq!(result.facts.iter().filter(|f| f.path == "a.py").count(), 1);
+        // Unsupported syntax does not hide a later parser error.
+        let result = candidates("from pkg import (\n x, # type: ignore\n)\ndef broken(:\n");
+        assert_eq!(result.files[0].status, CandidateStatus::SyntaxError);
+        assert_eq!(result.facts.len(), 1);
+    }
+
+    #[test]
+    fn import_grammar_rejections_rollback_every_candidate() {
+        for text in [
+            "from pkg import *",
+            "from pkg import ((x))",
+            "from pkg import (*)",
+            "import a,",
+            "from pkg import a,",
+            "from pkg import a.b",
+            "from __future__ import annotations",
+            "import a; import b",
+            "import a\t",
+            "import\ta",
+            "from pkg\timport a",
+            "import a\u{c}",
+            "import \u{212a}",
+            "from \u{212a} import x",
+            "import a as \u{212a}",
+            "import a \\\n .b",
+            "from pkg \\\n import x",
+            "from pkg import \\\n x",
+            "import a.\nb",
+            "from pkg\nimport x",
+            "from pkg import x # type: ignore",
+            "def f(): import tools",
+            "def f(): from pkg import item",
+            "import a as class",
+            "from pkg import True",
+            "from pkgimport x",
+        ] {
+            let result = candidates(format!(
+                "import safe\ndef before(): pass\n{text}\ndef after(): pass\n"
+            ));
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{text:?}: {result:?}"
+            );
+            assert_eq!(result.facts.len(), 1, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn imports_still_exclude_full_absolute_constructor_targets() {
+        for terminal in ["FastAPI", "APIRouter"] {
+            for import in [
+                format!("from pkg import (\n safe, # ordinary\n {terminal} as unused,\n)"),
+                format!("import safe, pkg.{terminal} as unused, other"),
+                format!("import safe, {terminal}.child, other"),
+                format!("from pkg import safe, {terminal} as unused, other"),
+                format!("import {}.{terminal} as unused", "a".repeat(900)),
+                format!("def scoped():\n    from pkg import {terminal} as unused\n    unused=1"),
+            ] {
+                let result = candidates(format!("import safe\ndef before(): pass\n{import}\n"));
+                assert_eq!(
+                    result.files[0].status,
+                    CandidateStatus::UnsupportedSyntax,
+                    "{import}: {result:?}"
+                );
+                assert_eq!(result.facts.len(), 1);
+            }
+            // A plain dotted import binds only its first component in the helper.
+            accepted(format!("import pkg.{terminal}\n"));
+            // Relative imports never populate the helper alias map.
+            accepted(format!("from .pkg import {terminal} as alias\nalias()\n"));
+            accepted(format!("from ... import {terminal} as alias\nalias()\n"));
+            accepted(format!(
+                "from .pkg import (\n {terminal} as alias,\n)\nalias()\n"
+            ));
+            accepted(format!(
+                "import pkg.{terminal}.ordinary as alias\nalias()\n"
+            ));
+        }
+        accepted(
+            "import pkg.fastapi as alias\nalias()\nfrom pkg import include_router as r\nr()\n",
+        );
+        for text in [
+            "import tools\nFastAPI()",
+            "from .pkg import FastAPI\nFastAPI()",
+            "import tools\nobj.include_router(x)",
+        ] {
+            let result = candidates(text);
+            assert_eq!(result.files[0].status, CandidateStatus::UnsupportedSyntax);
+            assert_eq!(result.facts.len(), 1);
+        }
+        let long = "a".repeat(900);
+        let result = accepted(format!(
+            "from {long}.pkg import ordinary as alias\nalias()\n"
+        ));
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "from_import" && f.value.contains(&long)));
+    }
+
+    #[test]
+    fn import_limits_cancellation_and_single_counted_walk() {
+        let sources = [source(
+            "a.py",
+            "a",
+            "import safe\nfrom ....pkg . sub import (\n x as y, # ordinary\n x, z,\n)\ny()\n",
+        )];
+        let parsed = parse_batch(&sources).unwrap();
+        let mut parses = 0;
+        let full = extract(
+            &sources,
+            Limits::default(),
+            FactLimits::default(),
+            |phase| {
+                parses += usize::from(phase == Checkpoint::PostParse);
+                false
+            },
+        )
+        .unwrap();
+        assert_eq!(parses, 1);
+        assert_eq!(full.files[0].status, CandidateStatus::AcceptedFacts);
+        assert_eq!(full.files[0].nodes_visited, parsed.files[0].nodes_visited);
+        assert_eq!(full.files[0].max_depth, parsed.files[0].max_depth);
+        for limits in [
+            FactLimits {
+                working: 1,
+                ..FactLimits::default()
+            },
+            FactLimits {
+                count: 2,
+                ..FactLimits::default()
+            },
+            FactLimits {
+                bytes: serde_json::to_vec(&full).unwrap().len() - 1,
+                ..FactLimits::default()
+            },
+        ] {
+            let result = extract(&sources, Limits::default(), limits, |_| false).unwrap();
+            assert_eq!(
+                result.files[0].status,
+                CandidateStatus::ResourceLimit,
+                "{result:?}"
+            );
+            assert_eq!(result.facts.len(), 1);
+            assert_eq!(result.files[0].nodes_visited, parsed.files[0].nodes_visited);
+        }
+        for checkpoint in [
+            Checkpoint::Collector,
+            Checkpoint::Working,
+            Checkpoint::Output,
+            Checkpoint::FactId,
+        ] {
+            let mut total = 0;
+            extract(
+                &sources,
+                Limits::default(),
+                FactLimits::default(),
+                |phase| {
+                    total += usize::from(phase == checkpoint);
+                    false
+                },
+            )
+            .unwrap();
+            for stop in 1..=total {
+                let mut visits = 0;
+                let result = extract(
+                    &sources,
+                    Limits::default(),
+                    FactLimits::default(),
+                    |phase| {
+                        visits += usize::from(phase == checkpoint);
+                        visits == stop
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    result.files[0].status,
+                    CandidateStatus::ResourceLimit,
+                    "{checkpoint:?} {stop}: {result:?}"
+                );
+                assert_eq!(result.facts.len(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn import_state_and_budget_are_isolated_between_files() {
+        let sources = [
+            source(
+                "a.py",
+                "a",
+                "import safe\nfrom pkg import FastAPI as alias\n",
+            ),
+            source("b.py", "b", "from .pkg import FastAPI as alias\nalias()\n"),
+            source("c.py", "c", "import tools\ntools.run()\n"),
+        ];
+        let result = extract_fact_candidates(&sources).unwrap();
+        assert_eq!(result.files[0].status, CandidateStatus::UnsupportedSyntax);
+        assert_eq!(result.files[1].status, CandidateStatus::AcceptedFacts);
+        assert_eq!(result.files[2].status, CandidateStatus::AcceptedFacts);
+        assert_eq!(result.facts.iter().filter(|f| f.path == "a.py").count(), 1);
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.path == "b.py" && f.kind == "call" && f.value == "alias()"));
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.path == "c.py" && f.kind == "call" && f.value == "tools.run()"));
+        let sources = [
+            source(
+                "a.py",
+                "a",
+                format!("import safe\nimport {}\n", "a".repeat(20_000)),
+            ),
+            source("b.py", "b", "import tools\n".repeat(100)),
+        ];
+        let result = extract(
+            &sources,
+            Limits::default(),
+            FactLimits {
+                working: 4096,
+                ..FactLimits::default()
+            },
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(result.files[0].status, CandidateStatus::ResourceLimit);
+        assert_eq!(
+            result.files[0].diagnostic,
+            Some(CandidateDiagnostic::WorkingLimit)
+        );
+        assert_eq!(result.files[1].status, CandidateStatus::AcceptedFacts);
+        assert_eq!(result.facts.iter().filter(|f| f.path == "a.py").count(), 1);
+        assert_eq!(
+            result
+                .facts
+                .iter()
+                .filter(|f| f.path == "b.py" && f.kind == "import")
+                .count(),
+            100
+        );
+    }
+
+    #[test]
+    fn annotated_parameter_kinds_and_literal_defaults() {
+        let result = accepted("async def f(a: pkg.T = 1, /, b: T[A,] = -2, *args: T[(A, B)], c: 'Forward' = None, d: None, **kw: T[U[V]]) -> (pkg.R):\n    pass # tail\n");
+        let signature = result.facts.iter().find(|f| f.kind == "signature").unwrap();
+        assert_eq!(signature.value, "{\"keywordOnly\":[\"c\",\"d\"],\"kwarg\":\"kw\",\"positional\":[\"a\",\"b\"],\"positionalOnly\":1,\"vararg\":\"args\"}");
+        for (symbol, expected) in [
+            ("a", "pkg.T"),
+            ("b", "T[[A]]"),
+            ("args", "T[[A, B]]"),
+            ("c", "<literal>"),
+            ("d", "<literal>"),
+            ("kw", "T[U[V]]"),
+        ] {
+            assert!(
+                result.facts.iter().any(|f| f.kind == "parameter_annotation"
+                    && f.symbol == format!("sample.f.{symbol}")
+                    && f.value == expected),
+                "{symbol}: {result:?}"
+            );
+        }
+        assert!(result.facts.iter().any(|f| f.kind == "return_annotation"
+            && f.symbol == "sample.f"
+            && f.value == "pkg.R"));
+        assert_eq!(
+            result
+                .facts
+                .iter()
+                .filter(|f| f.kind == "parameter")
+                .count(),
+            6
+        );
+        assert_eq!(
+            result
+                .facts
+                .iter()
+                .filter(|f| f.kind == "parameter_default")
+                .count(),
+            3
+        );
+        for annotation in [
+            "A",
+            "pkg.A",
+            "None",
+            "...",
+            "'Forward'",
+            "r'Forward'",
+            "u'Forward'",
+            "'''Forward'''",
+            "'For' 'ward'",
+            "(T[(A)])",
+            "T[A]",
+            "T[A,]",
+            "T[A,B]",
+            "T[(A,B)]",
+            "T[()]",
+            "pkg.T[U[V], None, ...]",
+        ] {
+            accepted(format!("def f(x: {annotation}) -> {annotation}: pass"));
+        }
+        for default in [
+            "None",
+            "True",
+            "False",
+            "...",
+            "0",
+            "0_0",
+            "12_345",
+            "0x_Ff",
+            "0O_17",
+            "0b_101",
+            "1.",
+            ".5",
+            "01.2",
+            "1_0.2_3e+4_5",
+            "1e-3",
+            "00e2",
+            "1j",
+            "01j",
+            "1.2e3J",
+            "+(2)",
+            "-(0xF)",
+            "+1j",
+            "'text'",
+            "R'text'",
+            "U'text'",
+            "'''text'''",
+            "b'abc'",
+            "Br'abc'",
+            "rB'abc'",
+            "b'a' b'b'",
+            "'a' r'b'",
+        ] {
+            let result = accepted(format!("def f(x={default}): pass"));
+            let fact = result
+                .facts
+                .iter()
+                .find(|f| f.kind == "parameter_default")
+                .unwrap();
+            assert_eq!(
+                fact.value,
+                if default.starts_with(['+', '-']) {
+                    "<UnaryOp>"
+                } else {
+                    "<literal>"
+                },
+                "{default}"
+            );
+        }
+    }
+
+    #[test]
+    fn grouped_expression_spans_follow_ast_not_cst_wrappers() {
+        let text = "def f(\n x: (\n  T[A]\n ) = (\n  - (\n   2\n  )\n ),\n y=(\n  'hidden' # between\n  'payload'\n ),\n) -> (\n pkg.R\n):\n    pass\n    # tail\n";
+        let result = accepted(text);
+        for (kind, symbol, line, end) in [
+            ("parameter", "sample.f.x", 2, 4),
+            ("parameter_annotation", "sample.f.x", 2, 4),
+            ("parameter_default", "sample.f.x", 5, 7),
+            ("parameter", "sample.f.y", 9, 9),
+            ("parameter_default", "sample.f.y", 10, 11),
+            ("return_annotation", "sample.f", 14, 14),
+            ("function", "sample.f", 1, 16),
+            ("signature", "sample.f", 1, 16),
+        ] {
+            let fact = result
+                .facts
+                .iter()
+                .find(|f| f.kind == kind && f.symbol == symbol)
+                .unwrap();
+            assert_eq!(
+                (fact.line, fact.end_line),
+                (line, end),
+                "{kind} {symbol}: {result:?}"
+            );
+        }
+        let report = serde_json::to_string(&result).unwrap();
+        for secret in ["hidden", "payload", "between", "tail"] {
+            assert!(!report.contains(secret));
+        }
+        accepted("def f(x: T = 1):\r\n    pass # end\r\n");
+    }
+
+    #[test]
+    fn expression_line_breaks_require_implicit_continuation() {
+        for newline in ["\n", "\r\n"] {
+            for header in [
+                "def f() -> pkg.\nT:\n    pass\n",
+                "def f() -> pkg\n.T:\n    pass\n",
+                "def f() -> pkg. # continued?\nT:\n    pass\n",
+                "def f() -> T\n[A]:\n    pass\n",
+                "def f() -> (T) # comment\n:\n    pass\n",
+                "def f() -> (\n T\n)\n# extra\n:\n    pass\n",
+                "def f() -> T[A]\n# extra\n:\n    pass\n",
+                "def f() -> 'forward'\n'continuation':\n    pass\n",
+            ] {
+                let text = format!("def before(): pass\n{header}def after(): pass\n")
+                    .replace('\n', newline);
+                let result = candidates(&text);
+                assert_ne!(
+                    result.files[0].status,
+                    CandidateStatus::AcceptedFacts,
+                    "{text:?}: {result:?}"
+                );
+                assert_eq!(result.facts.len(), 1, "{text:?}");
+            }
+            for header in [
+                "def f() -> (pkg.\n T):\n    pass\n",
+                "def f() -> pkg.T[\n U[V],\n W,\n]:\n    pass\n",
+                "def f() -> (\n pkg. # ][()\n T[\n U,\n V\n ]\n):\n    pass\n",
+                "def f(x: pkg.\n T = (\n -(\n 2\n )\n)) -> pkg.T:\n    pass\n",
+                "def f(x: # annotation\n pkg.\n T,\n y= # default\n -\n 1,\n):\n    pass\n",
+                "def f(x: (T # inner\n ) = 1, y: T # before default\n = 1, z = 2\n):\n    pass\n",
+            ] {
+                let text = format!("def before(): pass\n{header}def after(): pass\n")
+                    .replace('\n', newline);
+                let result = candidates(&text);
+                assert_eq!(
+                    result.files[0].status,
+                    CandidateStatus::AcceptedFacts,
+                    "{text:?}: {result:?}"
+                );
+                let sources = [source("sample.py", "sample", &text)];
+                let parsed = parse_batch(&sources).unwrap();
+                assert_eq!(result.files[0].nodes_visited, parsed.files[0].nodes_visited);
+                assert_eq!(result.files[0].max_depth, parsed.files[0].max_depth);
+            }
+        }
+        let result = candidates("def f() -> pkg.\nT:\n    pass\n");
+        assert_eq!(result.files[0].status, CandidateStatus::UnsupportedSyntax);
+    }
+
+    #[test]
+    fn only_triple_quoted_literals_allow_physical_body_newlines() {
+        for newline in ["\n", "\r\n"] {
+            for prefix in ["", "r", "u", "b", "br", "rb", "R", "BR"] {
+                for quote in ["'", "\""] {
+                    let literal = format!("{prefix}{quote}{newline}value{quote}");
+                    let mut headers = vec![format!("def f(x={literal}):\n    pass\n")];
+                    if !prefix.to_ascii_lowercase().contains('b') {
+                        headers.push(format!("def f(x: {literal}):\n    pass\n"));
+                        headers.push(format!("def f() -> {literal}:\n    pass\n"));
+                    }
+                    for header in headers {
+                        let text = format!("def before(): pass\n{header}def after(): pass\n");
+                        let result = candidates(&text);
+                        assert_ne!(
+                            result.files[0].status,
+                            CandidateStatus::AcceptedFacts,
+                            "{text:?}: {result:?}"
+                        );
+                        assert_eq!(result.facts.len(), 1, "{text:?}");
+                    }
+                    let literal = format!("{prefix}{quote}{quote}{quote}{newline}[value](){newline}{quote}{quote}{quote}");
+                    accepted(format!("def f(x={literal}):\n    pass\n"));
+                    if !prefix.to_ascii_lowercase().contains('b') {
+                        accepted(format!("def f(x: {literal}):\n    pass\n"));
+                        accepted(format!("def f() -> {literal}:\n    pass\n"));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn retained_expression_values_have_compact_capacity() {
+        let result = accepted("def f(x: 'Forward' = -(1), y: T[A] = 'hidden') -> None: pass");
+        let mut count = 0;
+        for fact in &result.facts {
+            if matches!(
+                fact.kind.as_str(),
+                "parameter_annotation" | "parameter_default" | "return_annotation"
+            ) {
+                assert_eq!(fact.value.capacity(), fact.value.len(), "{fact:?}");
+                count += 1;
+            }
+        }
+        assert_eq!(count, 5);
+    }
+
+    #[test]
+    fn expression_rejections_are_whole_file_transactions() {
+        for annotation in [
+            "(A,B)",
+            "[A]",
+            "{A}",
+            "{'a': A}",
+            "T[A:B]",
+            "T[*A]",
+            "A | B",
+            "Callable[[A],B]",
+            "T[A][B]",
+            "T[call()]",
+            "call()",
+            "f'text'",
+            "b'text'",
+            "True",
+            "123",
+            "-1",
+            "T[1]",
+            "T[(A, (B,C))]",
+            "T[A for A in B]",
+            "T[A].B",
+        ] {
+            let result = candidates(format!("def prefix(): pass\ndef f(x: {annotation}): pass"));
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{annotation}: {result:?}"
+            );
+            assert_eq!(result.facts.len(), 1, "{annotation}");
+        }
+        for default in [
+            "DEFAULT",
+            "math.inf",
+            "Ellipsis",
+            "[]",
+            "{}",
+            "()",
+            "{1}",
+            "1+2j",
+            "--1",
+            "+-1",
+            "-True",
+            "+False",
+            "call()",
+            "f'text'",
+            "f'{call()}'",
+            "t'text'",
+            "ur'text'",
+            "'a' b'b'",
+            "b'a' 'b'",
+            "r'a\\b'",
+            "'a\\n'",
+            "b'\u{03bb}'",
+            "1L",
+            "0xffL",
+            "0123",
+            "0_1",
+            "1_",
+            "1__2",
+            "0x__1",
+            "0b102",
+            "1e_2",
+            "1._2",
+            "1e2_",
+            "T[A]",
+        ] {
+            let result = candidates(format!("def prefix(): pass\ndef f(x={default}): pass"));
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{default}: {result:?}"
+            );
+            assert_eq!(result.facts.len(), 1, "{default}");
+        }
+        for text in [
+            "def f(x=1, /, y): pass",
+            "def f(x: A=1, y: B): pass",
+            "def f(x:A, x:B=2): pass",
+            "def f(*x:A, **x:B): pass",
+            "def f(**x:A, y:B): pass",
+            "def f(*x:A, *y:B): pass",
+            "def f(*x:A=1): pass",
+            "def f(**x:A=1): pass",
+            "def f(x:\tA): pass",
+            "def f(x:A): # type: ignore\n pass",
+            "def f(x:A\n): pass",
+            "def f() -> (\n A\n): pass",
+        ] {
+            let result = candidates(text);
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{text}: {result:?}"
+            );
+            assert_eq!(result.facts.len(), 1);
+        }
+        accepted("def f(x=1, /, y=2, *, required, z: T): pass");
+        accepted("def f(x: T, /, y: T=2, *args: T, required: T, **kw: T): pass");
+        assert_ne!(
+            candidates(format!("def f(x={}): pass", "1".repeat(513))).files[0].status,
+            CandidateStatus::AcceptedFacts
+        );
+    }
+
+    #[test]
+    fn shape_limits_do_not_hide_unsupported_descendants() {
+        let tuple = std::iter::repeat_n("A", 17).collect::<Vec<_>>().join(",");
+        let result = accepted(format!("def f(x:T[{tuple}]): pass"));
+        assert_eq!(
+            result
+                .facts
+                .iter()
+                .find(|f| f.kind == "parameter_annotation")
+                .unwrap()
+                .value,
+            format!(
+                "T[[{}]]",
+                std::iter::repeat_n("A", 16).collect::<Vec<_>>().join(", ")
+            )
+        );
+        for shape in [
+            format!("T[{tuple}, call()]"),
+            format!("{}call(){}", "T[".repeat(15), "]".repeat(15)),
+            format!(
+                "T[{}, T[{}]]",
+                std::iter::repeat_n("T[A,A,A,A,A,A]", 15)
+                    .collect::<Vec<_>>()
+                    .join(","),
+                "call()"
+            ),
+            format!("{}.T[call()]", "A".repeat(600)),
+        ] {
+            let result = candidates(format!("def f(x:{shape}): pass"));
+            assert_eq!(
+                result.files[0].status,
+                CandidateStatus::UnsupportedSyntax,
+                "{shape}: {result:?}"
+            );
+            assert_eq!(result.facts.len(), 1);
+        }
+        for (shape, expected) in [
+            (
+                format!("{}A{}", "T[".repeat(14), "]".repeat(14)),
+                format!("{}...[...]{}", "T[".repeat(12), "]".repeat(12)),
+            ),
+            (format!("{}.B", "A".repeat(600)), "A".repeat(512)),
+        ] {
+            let result = accepted(format!("def f(x:{shape}): pass"));
+            assert_eq!(
+                result
+                    .facts
+                    .iter()
+                    .find(|f| f.kind == "parameter_annotation")
+                    .unwrap()
+                    .value,
+                expected
+            );
+        }
+        let shape = std::iter::repeat_n("T[A,A,A,A,A,A]", 16)
+            .collect::<Vec<_>>()
+            .join(",");
+        let result = accepted(format!("def f(x:T[{shape}]): pass"));
+        let expected = format!(
+            "T[[{}, T[[A, A, ..., ..., ..., ...]], {}]]",
+            std::iter::repeat_n("T[[A, A, A, A, A, A]]", 8)
+                .collect::<Vec<_>>()
+                .join(", "),
+            std::iter::repeat_n("...", 7).collect::<Vec<_>>().join(", ")
+        );
+        assert_eq!(
+            result
+                .facts
+                .iter()
+                .find(|f| f.kind == "parameter_annotation")
+                .unwrap()
+                .value,
+            expected
+        );
+    }
+
+    #[test]
+    fn typed_signatures_keep_exact_count_and_byte_boundaries() {
+        for count in [128, 129] {
+            let params = (0..count)
+                .map(|i| format!("p{i}: T[A] = 1"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let result = accepted(format!("def f({params}): pass"));
+            assert_eq!(
+                result
+                    .facts
+                    .iter()
+                    .find(|f| f.kind == "signature")
+                    .unwrap()
+                    .value
+                    == "{\"truncated\":true}",
+                count == 129
+            );
+            assert_eq!(
+                result
+                    .facts
+                    .iter()
+                    .filter(|f| f.kind == "parameter_annotation")
+                    .count(),
+                count
+            );
+            assert_eq!(
+                result
+                    .facts
+                    .iter()
+                    .filter(|f| f.kind == "parameter_default")
+                    .count(),
+                count
+            );
+        }
+        let overhead = "{\"keywordOnly\":[],\"positional\":[\"\"],\"positionalOnly\":0}".len();
+        for length in [16384, 16385] {
+            let result = accepted(format!(
+                "def f({}: T[A] = None): pass",
+                "x".repeat(length - overhead)
+            ));
+            let value = &result
+                .facts
+                .iter()
+                .find(|f| f.kind == "signature")
+                .unwrap()
+                .value;
+            assert_eq!(value == "{\"truncated\":true}", length > 16384);
+            if length == 16384 {
+                assert_eq!(value.len(), length);
+            }
+        }
+    }
+
+    #[test]
+    fn large_literal_bodies_are_borrowed_and_report_stays_redacted() {
+        let payload = "private_payload_".repeat(20_000);
+        // Fixed alias-arena/render-scratch overhead still fits far below the
+        // near-1-MiB literal data. This is only an injected test budget.
+        let working = 64 * 1024;
+        let sources = [source(
+            "a.py",
+            "sample",
+            format!("def f(x: '{payload}' = r'''{payload}''') -> '{payload}':\n pass"),
+        )];
+        let result = extract_fact_candidates(&sources).unwrap();
+        assert_eq!(result.files[0].status, CandidateStatus::AcceptedFacts);
+        assert!(serde_json::to_vec(&result).unwrap().len() < 4096);
+        assert!(!serde_json::to_string(&result)
+            .unwrap()
+            .contains("private_payload_"));
+        let result = extract(
+            &sources,
+            Limits::default(),
+            FactLimits {
+                working,
+                ..FactLimits::default()
+            },
+            |_| false,
+        )
+        .unwrap();
+        // The near-megabyte source's literal bodies never enter pending storage.
+        assert_eq!(
+            result.files[0].status,
+            CandidateStatus::AcceptedFacts,
+            "{result:?}"
+        );
+        let body_sources = [source(
+            "a.py",
+            "sample",
+            format!("def f():\n x = r'''{payload}'''\n sink(b'''{payload}''')\n return '''{payload}'''\n"),
+        )];
+        let result = extract(
+            &body_sources,
+            Limits::default(),
+            FactLimits {
+                working,
+                ..FactLimits::default()
+            },
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(
+            result.files[0].status,
+            CandidateStatus::AcceptedFacts,
+            "{result:?}"
+        );
+        assert!(serde_json::to_vec(&result).unwrap().len() < 4096);
+        assert!(!serde_json::to_string(&result.facts)
+            .unwrap()
+            .contains("private_payload_"));
+    }
+
+    #[test]
+    fn expression_limits_cancellation_and_single_counted_parse() {
+        let sources = [source(
+            "a.py",
+            "a",
+            "def f(x: T[U[A], B] = -(2)) -> T[A,]:\n pass",
+        )];
+        let parsed = parse_batch(&sources).unwrap();
+        let mut parses = 0;
+        let mut working = 0;
+        let mut collecting = 0;
+        let full = extract(
+            &sources,
+            Limits::default(),
+            FactLimits::default(),
+            |phase| {
+                parses += usize::from(phase == Checkpoint::PostParse);
+                if parses > 0 {
+                    working += usize::from(phase == Checkpoint::Working);
+                    collecting += usize::from(phase == Checkpoint::Collector);
+                }
+                false
+            },
+        )
+        .unwrap();
+        assert_eq!(full.files[0].status, CandidateStatus::AcceptedFacts);
+        assert_eq!(parses, 1);
+        assert_eq!(full.files[0].nodes_visited, parsed.files[0].nodes_visited);
+        assert_eq!(full.files[0].max_depth, parsed.files[0].max_depth);
+        for stop in 1..=working {
+            let mut visits = 0;
+            let result = extract(
+                &sources,
+                Limits::default(),
+                FactLimits::default(),
+                |phase| {
+                    visits += usize::from(phase == Checkpoint::Working);
+                    visits == stop
+                },
+            )
+            .unwrap();
+            assert_eq!(result.files[0].status, CandidateStatus::ResourceLimit);
+            assert_eq!(result.facts.len(), 1);
+        }
+        // Every collector checkpoint includes descriptor normalization, lexical
+        // validation, and every bounded renderer node, not only CST entry.
+        for stop in 1..=collecting {
+            let mut visits = 0;
+            let result = extract(
+                &sources,
+                Limits::default(),
+                FactLimits::default(),
+                |phase| {
+                    visits += usize::from(phase == Checkpoint::Collector);
+                    visits == stop
+                },
+            )
+            .unwrap();
+            assert_eq!(result.files[0].status, CandidateStatus::ResourceLimit);
+            assert_eq!(result.facts.len(), 1);
+        }
+        for limits in [
+            FactLimits {
+                working: 2048,
+                ..FactLimits::default()
+            },
+            FactLimits {
+                working: 12000,
+                ..FactLimits::default()
+            },
+            FactLimits {
+                count: 3,
+                ..FactLimits::default()
+            },
+            FactLimits {
+                bytes: serde_json::to_vec(&full).unwrap().len() - 1,
+                ..FactLimits::default()
+            },
+        ] {
+            let result = extract(&sources, Limits::default(), limits, |_| false).unwrap();
+            assert_eq!(
+                result.files[0].status,
+                CandidateStatus::ResourceLimit,
+                "{result:?}"
+            );
+            assert_eq!(result.facts.len(), 1);
+            assert_eq!(result.files[0].nodes_visited, parsed.files[0].nodes_visited);
+        }
     }
 
     #[test]
@@ -1184,16 +4252,13 @@ mod tests {
     #[test]
     fn unsupported_forms_rollback_the_entire_file() {
         for text in [
-            "def f(x=1): pass",
-            "def f(x: int): pass",
-            "def f() -> int: pass",
+            "def f(x=call()): pass",
+            "def f(x: call()): pass",
+            "def f() -> call(): pass",
             "@wrap\ndef f(): pass",
             "class C: pass",
-            "import sys",
-            "from x import y",
-            "def f():\n    pass\n    call()",
-            "def f():\n    'doc'\n    pass",
-            "'doc'",
+            "import sys,",
+            "from x import *",
             "def \u{212a}(): pass",
             "def f(\u{212a}): pass",
             "def f(x, x): pass",
@@ -1220,8 +4285,6 @@ mod tests {
             "def f(): # type: () -> None\n    pass",
             "def f():\n    global x",
             "def f():\n    nonlocal x",
-            "def f():\n    return",
-            "def f():\n    x=1",
             "def f():\n    if True: pass",
             "pass\rpass",
             "# hidden\rimport x",
@@ -1235,6 +4298,635 @@ mod tests {
             );
             assert_eq!(result.facts.len(), 1, "{text:?}");
             assert_eq!(result.facts[0].kind, "module");
+        }
+    }
+
+    #[test]
+    fn body_facts_calls_bindings_and_literal_invalidations() {
+        let text = "'private doc'\nx = (pkg.value)\ny = -2\nself.field = builder(x, option=inner('private'))\ncls.field = None\nregister_url_convertor('private', x)\nalias = register_url_convertor\ndef f(x: T=1) -> T:\n    'private doc'\n    self.field = x\n    cls.field = -1\n    return pkg.run(x, key=helper())\n";
+        let result = accepted(text);
+        let facts: Vec<_> = result
+            .facts
+            .iter()
+            .filter(|f| matches!(f.kind.as_str(), "call" | "binding" | "binding_invalidation"))
+            .map(|f| {
+                (
+                    f.kind.as_str(),
+                    f.line,
+                    f.end_line,
+                    f.symbol.as_str(),
+                    f.value.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(facts, vec![
+            ("binding", 2, 2, "sample", "{\"source\":\"pkg.value\",\"target\":\"x\"}"),
+            ("binding_invalidation", 3, 3, "sample", "{\"target\":\"y\"}"),
+            ("binding", 4, 4, "sample", "{\"source\":\"builder(x, option=inner(<literal>))\",\"target\":\"self.field\"}"),
+            ("call", 4, 4, "sample", "builder(x, option=inner(<literal>))"),
+            ("call", 4, 4, "sample", "inner(<literal>)"),
+            ("binding_invalidation", 5, 5, "sample", "{\"target\":\"cls.field\"}"),
+            ("call", 6, 6, "sample", "register_url_convertor(<literal>, x)"),
+            ("binding", 7, 7, "sample", "{\"source\":\"register_url_convertor\",\"target\":\"alias\"}"),
+            ("binding", 10, 10, "sample.f", "{\"source\":\"x\",\"target\":\"self.field\"}"),
+            ("binding_invalidation", 11, 11, "sample.f", "{\"target\":\"cls.field\"}"),
+            ("call", 12, 12, "sample.f", "helper()"),
+            ("call", 12, 12, "sample.f", "pkg.run(x, key=helper())"),
+        ]);
+        assert!(!serde_json::to_string(&result)
+            .unwrap()
+            .contains("private doc"));
+        assert!(!serde_json::to_string(&result.facts)
+            .unwrap()
+            .contains("private"));
+        assert!(!result.facts.iter().any(|f| f.kind == "return"));
+        for text in [
+            "def f(): return",
+            "def f(): return x",
+            "def f(): helper()",
+            "def f(): x=build()",
+            "def f(): 'doc'",
+            "def f():\n    pass\n    call()",
+            "def f():\n    'doc'\n    pass",
+            "'doc'",
+            "def f():\n    return",
+            "def f():\n    x=1",
+        ] {
+            accepted(text);
+        }
+    }
+
+    #[test]
+    fn body_statement_ranges_are_distinct_from_normalized_expressions() {
+        let text = "def outer():\n    def inner():\n        x = (\n            ((helper))(\n                (nested())\n            )\n        ) # trailing\n        return (\n            x\n        )\n        # tail\n    return (\n        inner()\n    ) # final\n# tail\n";
+        for text in [
+            text.to_owned(),
+            format!("\u{feff}{}", text.replace('\n', "\r\n")),
+        ] {
+            let result = accepted(&text);
+            for (kind, symbol, value, line, end) in [
+                ("function", "sample.outer", "outer", 1, 14),
+                ("function", "sample.outer.inner", "inner", 2, 10),
+                (
+                    "binding",
+                    "sample.outer.inner",
+                    "{\"source\":\"helper(nested())\",\"target\":\"x\"}",
+                    3,
+                    7,
+                ),
+                ("call", "sample.outer.inner", "helper(nested())", 4, 6),
+                ("call", "sample.outer.inner", "nested()", 5, 5),
+                ("call", "sample.outer", "inner()", 13, 13),
+            ] {
+                let fact = result
+                    .facts
+                    .iter()
+                    .find(|f| f.kind == kind && f.symbol == symbol && f.value == value)
+                    .unwrap();
+                assert_eq!((fact.line, fact.end_line), (line, end), "{fact:?}");
+            }
+            for fact in result.facts.iter().filter(|f| f.kind == "signature") {
+                assert_eq!(
+                    fact.end_line,
+                    if fact.symbol == "sample.outer" {
+                        14
+                    } else {
+                        10
+                    }
+                );
+            }
+        }
+        let result = accepted("sink(same(), same())\n");
+        assert_eq!(result.facts.iter().filter(|f| f.kind == "call").count(), 2);
+    }
+
+    #[test]
+    fn every_nested_call_is_emitted_beyond_shape_limits() {
+        for count in [16, 17] {
+            let positional = (0..count)
+                .map(|i| format!("p{i}()"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let keywords = (0..count)
+                .map(|i| format!("k{i}=v{i}()"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let result = accepted(format!("outer({positional},{keywords})"));
+            let outer = result
+                .facts
+                .iter()
+                .find(|f| f.kind == "call" && f.value.starts_with("outer("))
+                .unwrap();
+            let mut args = (0..16).map(|i| format!("p{i}()")).collect::<Vec<_>>();
+            if count == 17 {
+                args.push("...".into());
+            }
+            args.extend((0..16).map(|i| format!("k{i}=v{i}()")));
+            if count == 17 {
+                args.push("...".into());
+            }
+            assert_eq!(outer.value, format!("outer({})", args.join(", ")));
+            assert_eq!(
+                result.facts.iter().filter(|f| f.kind == "call").count(),
+                1 + 2 * count
+            );
+        }
+        let result = accepted(format!(
+            "{}leaf(){}",
+            (0..15).map(|i| format!("f{i}(")).collect::<String>(),
+            ")".repeat(15)
+        ));
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "call" && f.value == "leaf()"));
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "call" && f.value.contains("...")));
+        assert_eq!(result.facts.iter().filter(|f| f.kind == "call").count(), 16);
+        let expected = format!(
+            "{}...(...){}",
+            (0..12).map(|i| format!("f{i}(")).collect::<String>(),
+            ")".repeat(12)
+        );
+        assert!(
+            result
+                .facts
+                .iter()
+                .any(|f| f.kind == "call" && f.value == expected),
+            "{result:?}"
+        );
+        let result = accepted(format!("{}(hidden())", "a".repeat(600)));
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "call" && f.value == "a".repeat(512)));
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "call" && f.value == "hidden()"));
+        let args = (0..16)
+            .map(|i| format!("k{i}=f{i}(a,b,c,d,e,f)"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let result = accepted(format!("callee({args})"));
+        let outer = result
+            .facts
+            .iter()
+            .find(|f| f.kind == "call" && f.value.starts_with("callee("))
+            .unwrap();
+        let expected = format!(
+            "callee({}, k9=f9(a, b, c, d, ..., ...), {})",
+            (0..9)
+                .map(|i| format!("k{i}=f{i}(a, b, c, d, e, f)"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            (10..16)
+                .map(|i| format!("k{i}=..."))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        assert_eq!(outer.value, expected);
+        for fact in result.facts.iter().filter(|f| f.kind == "call") {
+            assert_eq!(fact.value.capacity(), fact.value.len());
+        }
+    }
+
+    #[test]
+    fn body_hidden_unsupported_forms_and_helper_side_outputs_rollback() {
+        let padding = std::iter::repeat_n("ok()", 17)
+            .collect::<Vec<_>>()
+            .join(",");
+        for expression in [
+            "factory()()",
+            "factory().run()",
+            "f(*xs)",
+            "f(**xs)",
+            "f(x for x in xs)",
+            "f(k=x, y)",
+            "f(k=x,k=y)",
+            "await f()",
+            "lambda: x",
+            "[x]",
+            "(x,)",
+            "x[0]",
+            "a+b",
+            "(x:=f())",
+            "FastAPI()",
+            "pkg.APIRouter()",
+            "obj.include_router(x)",
+        ] {
+            for value in [
+                expression.to_owned(),
+                format!("outer({padding},{expression})"),
+                format!("{}{}{}", "f(".repeat(15), expression, ")".repeat(15)),
+                format!("{}(x={expression})", "a".repeat(600)),
+            ] {
+                let result = candidates(format!(
+                    "def before(): pass\nx={value}\ndef after(): pass\n"
+                ));
+                assert_ne!(
+                    result.files[0].status,
+                    CandidateStatus::AcceptedFacts,
+                    "{value}: {result:?}"
+                );
+                assert_eq!(result.facts.len(), 1);
+            }
+        }
+        for target in [
+            "other.field",
+            "self.router",
+            "cls.prefix",
+            "self.router.child",
+            "self.field.router.child",
+            "x[0]",
+            "x,y",
+            "*x",
+            "x=y",
+        ] {
+            let result = candidates(format!("def before(): pass\n{target}=helper()\n"));
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{target}"
+            );
+            assert_eq!(result.facts.len(), 1);
+        }
+        let target = format!("self.{}.router.child", "a".repeat(600));
+        assert_eq!(
+            candidates(format!("{target}=helper()\n")).files[0].status,
+            CandidateStatus::UnsupportedSyntax
+        );
+        for text in [
+            "return",
+            "return x",
+            "x: T = helper()",
+            "x += helper()",
+            "del x",
+            "x=y=z",
+            "x=(y:=z)",
+            "pass; helper()",
+        ] {
+            let result = candidates(text);
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{text}"
+            );
+            assert_eq!(result.facts.len(), 1);
+        }
+    }
+
+    #[test]
+    fn body_newline_gating_and_reviewed_literals() {
+        for newline in ["\n", "\r\n"] {
+            for text in [
+                "x =\nhelper()",
+                "x = # comment\nhelper()",
+                "pkg.\nname",
+                "pkg. # comment\nname",
+                "def f():\n    return pkg. # comment\n    name",
+            ] {
+                let result = candidates(text.replace('\n', newline));
+                assert_ne!(
+                    result.files[0].status,
+                    CandidateStatus::AcceptedFacts,
+                    "{text}: {result:?}"
+                );
+                assert_eq!(result.facts.len(), 1);
+            }
+            for text in [
+                "x = (\nhelper()\n)",
+                "def f():\n    return # comment\n    helper()",
+                "def f():\n    return (\n        helper()\n    )",
+                "(pkg. # comment\n name)(\n x,\n key=helper(),\n)",
+            ] {
+                accepted(text.replace('\n', newline));
+            }
+            // These are two AST expression statements, not a continued call.
+            let result = accepted(format!("f{newline}(x)"));
+            assert_eq!(result.facts.len(), 1);
+        }
+        for expression in [
+            "None",
+            "True",
+            "False",
+            "...",
+            "+(2)",
+            "-(0xF)",
+            "1.2e3J",
+            "b'a' b'b'",
+            "'a' r'b'",
+            "r'''private\npayload'''",
+            "pkg.name",
+            "((name))",
+        ] {
+            accepted(format!(
+                "{expression}\nx={expression}\ndef f():\n    return {expression}\n"
+            ));
+        }
+    }
+
+    #[test]
+    fn assignment_target_shapes_clip_names_and_attributes_for_both_binding_kinds() {
+        for length in [511, 512, 513] {
+            for target in [
+                "n".repeat(length),
+                format!("self.{}", "n".repeat(length - 5)),
+            ] {
+                for (rhs, kind, source) in [
+                    ("helper()", "binding", "\"source\":\"helper()\","),
+                    ("None", "binding_invalidation", ""),
+                ] {
+                    let result = accepted(format!("{target}={rhs}\n"));
+                    let fact = result.facts.iter().find(|f| f.kind == kind).unwrap();
+                    assert_eq!(
+                        fact.value,
+                        format!("{{{source}\"target\":\"{}\"}}", &target[..length.min(512)])
+                    );
+                    assert_eq!(fact.value.capacity(), fact.value.len());
+                }
+            }
+        }
+        let name = "n".repeat(20_000);
+        let sources = [source("sample.py", "sample", format!("{name}=helper()\n"))];
+        let result = extract(
+            &sources,
+            Limits::default(),
+            FactLimits {
+                working: 20_000,
+                ..FactLimits::default()
+            },
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(result.files[0].status, CandidateStatus::AcceptedFacts);
+        let binding = result.facts.iter().find(|f| f.kind == "binding").unwrap();
+        assert_eq!(
+            binding.value,
+            format!(
+                "{{\"source\":\"helper()\",\"target\":\"{}\"}}",
+                &name[..512]
+            )
+        );
+        for working in [2048, 8192] {
+            let result = extract(
+                &sources,
+                Limits::default(),
+                FactLimits {
+                    working,
+                    ..FactLimits::default()
+                },
+                |_| false,
+            )
+            .unwrap();
+            assert_eq!(result.files[0].status, CandidateStatus::ResourceLimit);
+            assert_eq!(
+                result.files[0].diagnostic,
+                Some(CandidateDiagnostic::WorkingLimit)
+            );
+            assert_eq!(result.facts.len(), 1);
+        }
+    }
+
+    #[test]
+    fn standalone_callee_clipping_cannot_hide_helper_side_outputs() {
+        let padding = std::iter::repeat_n("ok()", 17)
+            .collect::<Vec<_>>()
+            .join(",");
+        let exhausted = (0..16)
+            .map(|i| format!("k{i}=f(a,b,c,d,e,f)"))
+            .collect::<Vec<_>>()
+            .join(",");
+        for name in ["APIRouter", "FastAPI"] {
+            let prefix_length = 512 - name.len() - 1;
+            let call = format!("{}.{}Extra()", "a".repeat(prefix_length), name);
+            for rhs in [
+                call.clone(),
+                format!("outer({padding},{call})"),
+                format!("outer({exhausted},bad={call})"),
+                format!("{}{}{}", "f(".repeat(15), call, ")".repeat(15)),
+            ] {
+                let result =
+                    candidates(format!("def before(): pass\nx={rhs}\ndef after(): pass\n"));
+                assert_eq!(
+                    result.files[0].status,
+                    CandidateStatus::UnsupportedSyntax,
+                    "{name}: {result:?}"
+                );
+                assert_eq!(result.facts.len(), 1);
+            }
+            // Adjacent clipping boundaries do not create the special name.
+            for length in [prefix_length - 1, prefix_length + 1] {
+                accepted(format!("x={}.{}Extra()\n", "a".repeat(length), name));
+            }
+        }
+    }
+
+    #[test]
+    fn standalone_callee_scratch_is_reserved_before_the_exit_renderer() {
+        let sources = [source("sample.py", "sample", "probe()\n")];
+        let mut reservations = 0;
+        let result = extract(
+            &sources,
+            Limits::default(),
+            FactLimits {
+                working: 4 * std::mem::size_of::<AliasScope>()
+                    + 2 * std::mem::size_of::<BodyStatement>()
+                    + 5 * Expression::ENTRY_WORK
+                    + Expression::RENDER_WORK
+                    - 1,
+                ..FactLimits::default()
+            },
+            |phase| {
+                reservations += usize::from(phase == Checkpoint::Working);
+                false
+            },
+        )
+        .unwrap();
+        // Root scope, statement, five arena entries, then call-exit scratch.
+        assert_eq!(reservations, 8);
+        assert_eq!(result.files[0].status, CandidateStatus::ResourceLimit);
+        assert_eq!(
+            result.files[0].diagnostic,
+            Some(CandidateDiagnostic::WorkingLimit)
+        );
+        assert_eq!(result.facts.len(), 1);
+    }
+
+    #[test]
+    fn delimiter_nesting_uses_global_anonymous_punctuation_depth() {
+        for depth in [200, 201] {
+            let text = format!(
+                "def before(): pass\nx={}value{}\ndef after(): pass\n",
+                "(".repeat(depth),
+                ")".repeat(depth)
+            );
+            let sources = [source("sample.py", "sample", &text)];
+            let parsed = parse_batch(&sources).unwrap();
+            assert_eq!(parsed.files[0].status, ParseStatus::SyntaxAccepted);
+            let result = candidates(&text);
+            assert_eq!(result.files[0].nodes_visited, parsed.files[0].nodes_visited);
+            assert_eq!(result.files[0].max_depth, parsed.files[0].max_depth);
+            assert!(result.files[0].traversal_finished);
+            assert_eq!(
+                result.files[0].status,
+                if depth == 200 {
+                    CandidateStatus::AcceptedFacts
+                } else {
+                    CandidateStatus::UnsupportedSyntax
+                }
+            );
+            if depth == 201 {
+                assert_eq!(result.facts.len(), 1);
+                let malformed = candidates(format!("{text}def broken(:\n pass\n"));
+                assert_eq!(malformed.files[0].status, CandidateStatus::SyntaxError);
+                assert_eq!(malformed.facts.len(), 1);
+                let limited = extract(
+                    &sources,
+                    Limits {
+                        nodes: parsed.files[0].nodes_visited - 1,
+                        ..Limits::default()
+                    },
+                    FactLimits::default(),
+                    |_| false,
+                )
+                .unwrap();
+                assert_eq!(limited.files[0].status, CandidateStatus::ResourceLimit);
+                assert_eq!(
+                    limited.files[0].diagnostic,
+                    Some(CandidateDiagnostic::Parse(DiagnosticCode::NodeLimit))
+                );
+                assert_eq!(limited.facts.len(), 1);
+            }
+        }
+        for inner in [199, 200] {
+            let groups = format!("{}value{}", "(".repeat(inner), ")".repeat(inner));
+            for text in [
+                format!("x=helper({groups})\n"),
+                format!("def f(x: {groups}): pass\n"),
+                format!(
+                    "def f(x={}1{}): pass\n",
+                    "(".repeat(inner),
+                    ")".repeat(inner)
+                ),
+            ] {
+                let result = candidates(format!("before=helper()\n{text}"));
+                assert_eq!(
+                    result.files[0].status,
+                    if inner == 199 {
+                        CandidateStatus::AcceptedFacts
+                    } else {
+                        CandidateStatus::UnsupportedSyntax
+                    },
+                    "{text}: {result:?}"
+                );
+                if inner == 200 {
+                    assert_eq!(result.facts.len(), 1);
+                }
+            }
+        }
+        for inner in [198, 199] {
+            let result = candidates(format!(
+                "def f(x: T[{}A{}]): pass\n",
+                "(".repeat(inner),
+                ")".repeat(inner)
+            ));
+            assert_eq!(
+                result.files[0].status,
+                if inner == 198 {
+                    CandidateStatus::AcceptedFacts
+                } else {
+                    CandidateStatus::UnsupportedSyntax
+                }
+            );
+            if inner == 199 {
+                assert_eq!(result.facts.len(), 1);
+            }
+        }
+        accepted(format!(
+            "# {}\nx='{}'\ny=helper()\n",
+            "(".repeat(201),
+            ")".repeat(201)
+        ));
+    }
+
+    #[test]
+    fn body_limits_share_single_parse_walk_and_all_rollback_guards() {
+        let sources = [source("sample.py", "sample", "def f(x: T = 1):\n    self.field=outer(x, key=inner())\n    return (\n        other()\n    )\n")];
+        let parsed = parse_batch(&sources).unwrap();
+        let mut parses = 0;
+        let full = extract(
+            &sources,
+            Limits::default(),
+            FactLimits::default(),
+            |phase| {
+                parses += usize::from(phase == Checkpoint::PostParse);
+                false
+            },
+        )
+        .unwrap();
+        assert_eq!(parses, 1);
+        assert_eq!(full.files[0].status, CandidateStatus::AcceptedFacts);
+        assert_eq!(full.files[0].nodes_visited, parsed.files[0].nodes_visited);
+        assert_eq!(full.files[0].max_depth, parsed.files[0].max_depth);
+        for limits in [
+            FactLimits {
+                working: 2048,
+                ..FactLimits::default()
+            },
+            FactLimits {
+                count: 5,
+                ..FactLimits::default()
+            },
+            FactLimits {
+                bytes: serde_json::to_vec(&full).unwrap().len() - 1,
+                ..FactLimits::default()
+            },
+        ] {
+            let result = extract(&sources, Limits::default(), limits, |_| false).unwrap();
+            assert_eq!(result.files[0].status, CandidateStatus::ResourceLimit);
+            assert_eq!(result.facts.len(), 1);
+        }
+        for checkpoint in [
+            Checkpoint::Working,
+            Checkpoint::Collector,
+            Checkpoint::FactId,
+            Checkpoint::Output,
+            Checkpoint::Sort,
+            Checkpoint::FinalOutput,
+        ] {
+            let mut total = 0;
+            extract(
+                &sources,
+                Limits::default(),
+                FactLimits::default(),
+                |phase| {
+                    total += usize::from(phase == checkpoint);
+                    false
+                },
+            )
+            .unwrap();
+            for stop in 1..=total {
+                let mut visits = 0;
+                let result = extract(
+                    &sources,
+                    Limits::default(),
+                    FactLimits::default(),
+                    |phase| {
+                        visits += usize::from(phase == checkpoint);
+                        visits == stop
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    result.files[0].status,
+                    CandidateStatus::ResourceLimit,
+                    "{checkpoint:?} {stop}"
+                );
+                assert_eq!(result.facts.len(), 1);
+            }
         }
     }
 

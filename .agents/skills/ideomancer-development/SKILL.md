@@ -18,8 +18,14 @@ guidance for coding agents, not an interpretation prompt for analyzed applicatio
    `docs/engine-api.md` / `docs/adapter-contract.md` for the public seam.
 3. Define the smallest observable acceptance case. Use independently synthetic
    fixtures. Never move private source, identifiers or context into this repository.
-4. Check `rustc --version`; honor `Cargo.toml`'s MSRV. Use one installed toolchain
-   and the default project `target/`. Do not install or update tools implicitly.
+4. Check `RUSTUP_AUTO_INSTALL=0 rustc --version` using the existing active compiler;
+   honor `Cargo.toml`'s MSRV. Use one installed toolchain and the default project
+   `target/`. Set `RUSTUP_AUTO_INSTALL=0` for every Rust invocation, including probes,
+   Cargo subcommands and delegated commands. Before any explicit `+toolchain`
+   selector, inspect `RUSTUP_AUTO_INSTALL=0 rustup toolchain list` (read-only) and
+   use only an exact installed name. Never infer an installed alias from the
+   reported compiler version or MSRV. A missing toolchain is a blocker: do not
+   install or update tools implicitly, even to probe a version.
 
 ## Low-disk implementation loop
 
@@ -32,8 +38,8 @@ guidance for coding agents, not an interpretation prompt for analyzed applicatio
   suite on each edit. Example:
 
   ```sh
-  cargo test --locked --offline --jobs 2 --lib analysis::python_native -- --test-threads=2
-  cargo test --locked --offline --jobs 2 --test engine_api -- --test-threads=2
+  RUSTUP_AUTO_INSTALL=0 cargo test --locked --offline --jobs 2 --lib analysis::python_native -- --test-threads=2
+  RUSTUP_AUTO_INSTALL=0 cargo test --locked --offline --jobs 2 --test engine_api -- --test-threads=2
   ```
 
 - Do not run concurrent Cargo commands against the shared target directory. Delegate
@@ -46,14 +52,14 @@ guidance for coding agents, not an interpretation prompt for analyzed applicatio
 
 ## Choose the right verification gate
 
-- All Rust changes: `cargo fmt --all --check`, focused tests, and appropriately
-  scoped Clippy with warnings denied. At feature closeout, broaden to the relevant
+- All Rust changes: `RUSTUP_AUTO_INSTALL=0 cargo fmt --all --check`, focused tests,
+  and appropriately scoped Clippy with warnings denied. At feature closeout, broaden to the relevant
   integration targets or full suite once when the affected surface warrants it.
 - Python extraction/candidate changes: explicitly run the oracle gate; ignored or
   unavailable oracle cases do not establish parity:
 
   ```sh
-  IDEOMANCER_TEST_PYTHON="$(command -v python3.12)" \
+  RUSTUP_AUTO_INSTALL=0 IDEOMANCER_TEST_PYTHON="$(command -v python3.12)" \
     cargo test --locked --offline --jobs 2 --lib analysis::python_parity \
     -- --ignored --nocapture --test-threads=2
   ```

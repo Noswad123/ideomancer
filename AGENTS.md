@@ -15,6 +15,12 @@ repository-local developer guidance, not the application prompts in `skills/`.
   or import its modules to inspect it. Native parsing is not runtime verification.
 - Preserve unrelated work. Do not stage, commit, push, rewrite history, install
   tools or change global configuration without explicit authorization.
+- Set `RUSTUP_AUTO_INSTALL=0` for every Rust invocation, including version probes,
+  Cargo subcommands and delegated commands. Use the existing active compiler by
+  default. Before any explicit `+toolchain` selector, inspect the installed names
+  with `RUSTUP_AUTO_INSTALL=0 rustup toolchain list` (read-only). Never infer an
+  installed alias from a reported compiler version or the manifest MSRV. Missing
+  toolchains are blockers, not permission to install, even for a version probe.
 - Use the existing target directory and one active toolchain per feature by default.
   Do not create per-case build caches, parallel Cargo jobs from multiple agents,
   or global/shared target directories. Limit Cargo jobs and test threads to two.

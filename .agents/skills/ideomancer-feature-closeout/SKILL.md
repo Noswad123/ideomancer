@@ -42,6 +42,12 @@ merely because the user asked an informational question.
    calls broad `make clean`, deletes copied/installed binaries, or chooses external
    cache directories. Do not substitute `rm -rf`, force a guard, kill other builds,
    or silently delete a study. Coordinate with other agents before retrying.
+   The helper pins `RUSTUP_AUTO_INSTALL=0` in Cargo's subprocess environment even
+   if the parent enables auto-install. All other Rust invocations require the same
+   guard, including probes and delegated commands. Use the existing active compiler;
+   before an explicit `+toolchain` selector, inspect installed names with read-only
+   `RUSTUP_AUTO_INSTALL=0 rustup toolchain list`. Do not infer aliases from compiler
+   versions or MSRV, or install a missing toolchain to complete cleanup.
 6. Verify without rebuilding:
 
    ```sh

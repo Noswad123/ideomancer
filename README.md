@@ -33,7 +33,9 @@ views and an external explicit-configuration consumer slice, in addition to the
 parser regressions and extracted-package checks. This is not blanket framework,
 runtime or release approval. See the [dated validation record](docs/javascript-typescript-analysis.md#validation-tooling).
 Python migration now has AST parity gates, a private captured-byte Tree-sitter
-front-end and a narrow native declaration-fact candidate. The trusted Python >=3.12
+front-end and native candidates for bounded headers, simple calls/writes and a
+conservative import subset, including parenthesized multiline `from` lists and
+alias-aware dynamic-discovery warnings. The trusted Python >=3.12
 AST helper remains the production default; a production native Python fact backend
 and Rust analysis are not delivered.
 See the [Python parity gates](docs/python-analysis.md#native-migration-parity-foundation).
@@ -871,11 +873,11 @@ review, the guarded command removes only the local Cargo cache; retained outputs
 belong outside it, and known study files block cleanup.
 
 ```sh
-cargo test --locked --offline --jobs 2 --lib analysis::python_native -- --test-threads=2
-cargo fmt --check
-cargo clippy --locked --offline --all-targets --jobs 2 -- -D warnings
+RUSTUP_AUTO_INSTALL=0 cargo test --locked --offline --jobs 2 --lib analysis::python_native -- --test-threads=2
+RUSTUP_AUTO_INSTALL=0 cargo fmt --check
+RUSTUP_AUTO_INSTALL=0 cargo clippy --locked --offline --all-targets --jobs 2 -- -D warnings
 # Broader regression gate when warranted, not after every edit:
-cargo test --locked --offline --jobs 2 -- --test-threads=2
+RUSTUP_AUTO_INSTALL=0 cargo test --locked --offline --jobs 2 -- --test-threads=2
 # Last build-related step after validation and retention review:
 make cache-clean
 ```

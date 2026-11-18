@@ -31,6 +31,16 @@ Cargo jobs/test threads. Do not introduce per-case build caches or arbitrary
 artifacts behind; the transition should clean, validate the new settings, and clean
 again at closeout. Do not rebuild just to prove that cleanup succeeded.
 
+Set `RUSTUP_AUTO_INSTALL=0` for every Rust invocation, including version probes,
+Cargo subcommands and delegated commands. Use the current installed active compiler
+without a selector by default, for example `RUSTUP_AUTO_INSTALL=0 rustc --version`.
+Before any explicit `+toolchain` selector, inspect the exact installed names with
+`RUSTUP_AUTO_INSTALL=0 rustup toolchain list` (read-only). A reported compiler
+version or the manifest MSRV does not prove that a matching alias is installed.
+Missing toolchains must stop the command, never trigger automatic installation,
+even for version probes. Tool installation/removal and global configuration changes
+require separate explicit authorization.
+
 | Work | During iteration | At closeout |
 | --- | --- | --- |
 | Rust behavior | Affected unit filter / integration target | Format, Clippy and broader affected regressions once |
@@ -42,8 +52,10 @@ again at closeout. Do not rebuild just to prove that cleanup succeeded.
 
 `make test` is a broad gate, not the edit loop. `make check` checks formatting and
 all-target Clippy. Both default to two jobs; tests default to two test threads.
-Neither installs tools. Fetch reviewed dependencies explicitly when offline input
-is unavailable instead of weakening the test or silently changing versions.
+The makefile exports `RUSTUP_AUTO_INSTALL := 0` by default to child commands without
+changing the global environment. Neither gate may install tools. Fetch reviewed
+dependencies explicitly when offline input is unavailable instead of weakening
+the test or silently changing versions.
 
 ## Cleanup commands
 
@@ -61,10 +73,13 @@ python3.12 -B scripts/feature_cache.py --apply
 
 The default is dry-run. Apply validates the Git/manifest identity and fixed local
 target, checks process activity and filesystem boundaries, then invokes only
-`cargo --config 'build.build-dir="<project>/target"' clean
+`RUSTUP_AUTO_INSTALL=0 cargo --config 'build.build-dir="<project>/target"' clean
 --manifest-path <project>/Cargo.toml --target-dir <project>/target`.
 The highest-precedence build-directory override prevents newer Cargo versions from
 also deleting an independently configured external/shared intermediate directory.
+The helper copies the parent environment and pins `RUSTUP_AUTO_INSTALL=0` for the
+Cargo subprocess regardless of the parent's value. It preserves other environment
+variables without serializing the environment into the JSON receipt.
 There is no external-path or force option. Unknown process state, active Rust
 processes, target executables, symlinks/special files, mounts and external target
 environment overrides fail closed. Conservative process checks can block for a

@@ -96,6 +96,31 @@ class FeatureCacheTests(unittest.TestCase):
         self.assertEqual([call[0] for call in self.calls], ["git", "ps", "ps", "cargo"])
         self.assertNotIn("private tool", json.dumps(receipt))
 
+    def test_cargo_auto_install_disabled_without_mutating_or_disclosing_parent(self):
+        self.remove_artifact = False
+        self.cargo_code = 1
+        for parent_value in (None, "0", "1"):
+            environment = {"PATH": "/tools", "PRIVATE_TOKEN": "synthetic-secret"}
+            if parent_value is not None:
+                environment["RUSTUP_AUTO_INSTALL"] = parent_value
+            with self.subTest(parent_value=parent_value), patch.dict(
+                    os.environ, environment, clear=True):
+                self.run_mock.reset_mock()
+                receipt = self.run_cache(apply=True)
+                self.assertEqual(receipt["status"], "failed")
+                cargo_call = self.run_mock.call_args
+                self.assertEqual(cargo_call.args[0][0], "cargo")
+                child_environment = cargo_call.kwargs["env"]
+                self.assertEqual(child_environment, {**environment, "RUSTUP_AUTO_INSTALL": "0"})
+                self.assertIsNot(child_environment, os.environ)
+                self.assertEqual(dict(os.environ), environment)
+                for call in self.run_mock.call_args_list[:-1]:
+                    self.assertNotIn("env", call.kwargs)
+                encoded = json.dumps(receipt)
+                for private in ("PRIVATE_TOKEN", "synthetic-secret", "/tools", "RUSTUP_AUTO_INSTALL"):
+                    self.assertNotIn(private, encoded)
+                self.assertTrue(self.artifact.exists())
+
     def test_cli_config_overrides_project_ancestor_and_global(self):
         original = self.root
         checkout = original / "parent/checkout"

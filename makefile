@@ -6,6 +6,7 @@ CARGO ?= cargo
 PYTHON ?= python3.12
 JOBS ?= 2
 TEST_THREADS ?= $(JOBS)
+export RUSTUP_AUTO_INSTALL := 0
 
 .DEFAULT_GOAL := build
 .PHONY: all build install test check clean cache-status cache-clean

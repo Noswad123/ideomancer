@@ -51,6 +51,7 @@ src/adapters/vendor_sdk.rs
 src/analysis.rs
 src/analysis/python_native.rs
 src/analysis/python_native/facts.rs
+src/analysis/python_native/expressions.rs
 src/analysis/python_parity.rs
 src/analyze.rs
 src/catalog.rs

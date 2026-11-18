@@ -204,9 +204,11 @@ def _run(root, *, apply=False):
         build_dir = "build.build-dir=" + json.dumps(str(target), ensure_ascii=False)
         command = ["cargo", "--config", build_dir, "clean", "--manifest-path", str(manifest_path),
                    "--target-dir", str(target)]
+        environment = os.environ.copy()
+        environment["RUSTUP_AUTO_INSTALL"] = "0"
         receipt["tool"]["invoked"] = invoked = True
         result = subprocess.run(command, cwd=root, capture_output=True,
-                                text=True, check=False)
+                                text=True, check=False, env=environment)
         receipt["tool"]["returncode"] = result.returncode
         if result.returncode:
             raise Refusal("cargo clean failed")

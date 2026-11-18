@@ -55,7 +55,7 @@ of a manually curated responsibility-level diagram.
 ## Native migration parity foundation
 
 P1 has a **private captured-source AST parity harness**, a native parse-only
-front-end and a narrow declaration-fact candidate, not a production native Python
+front-end and bounded declaration/header/body/import-fact candidates, not a production native Python
 backend. The production helper, evidence v1 serialization,
 `python-static-8-generic-facts` identity, snapshot formula, scanner/module policy,
 redaction and resource limits remain unchanged. There is no new CLI flag, public
@@ -88,12 +88,29 @@ and intentionally unsupported encodings rather than hiding them as parity.
 Five declaration-candidate oracle cases compare complete, unfiltered ordered AST
 fact vectors for the supported subset, pin signature limits and metadata escaping,
 and verify whole-file rejection, isolated transactions and captured-byte replay.
+Seven header-expression cases add typed/defaulted parameter kinds, multiline spans,
+literal spelling/redaction, exact shape budgets, hidden-call rejection, signature
+limits/replay and malformed physical-newline rejection against the AST oracle.
+Seven body cases compare calls, writes/invalidation, returns, clipping and statement
+extents; verify hidden call retention and helper exclusions; test parser nesting;
+and compare direct-call/shadowing behavior through an isolated resolver fixture.
+Seven import cases add exact metadata/spelling, scope and body combinations,
+absolute-alias side-output exclusions, relative-import neutrality, long targets and
+clipped callees, unreviewed grammar rollback, and captured-byte replay/isolation.
+Six multiline-import cases add parenthesized lists/trailing commas, comment and
+implicit-continuation handling, closing-delimiter spans, unchanged alias exclusions,
+metadata capacity boundaries and replay. A CPython-valid nested dedent that the
+pinned grammar rejects remains an explicit baseline-only classification difference.
+Eight alias-warning cases compare full ordered facts **and diagnostics**, including
+direct/aliased dynamic calls, suppression/overwrite, persistent scope names,
+fresh-callee clipping, full targets, hidden calls, duplicate warnings, lexical sorting,
+transaction isolation, retained constructor exclusions and captured-byte replay.
 
-All fifteen oracle cases are **ignored in the ordinary suite**. Run the gate explicitly
+All fifty oracle cases are **ignored in the ordinary suite**. Run the gate explicitly
 with an absolute path to an installed, trusted Python >=3.12:
 
 ```sh
-IDEOMANCER_TEST_PYTHON="$(command -v python3.12)" \
+RUSTUP_AUTO_INSTALL=0 IDEOMANCER_TEST_PYTHON="$(command -v python3.12)" \
   cargo test --locked --offline --jobs 2 --lib analysis::python_parity \
   -- --ignored --nocapture --test-threads=2
 ```
@@ -146,7 +163,7 @@ before traversal, and bounded digest/report finalization can continue after expi
 Ordinary Rust tests exercise the parser without an interpreter:
 
 ```sh
-cargo test --locked --offline --jobs 2 --lib analysis::python_native -- --test-threads=2
+RUSTUP_AUTO_INSTALL=0 cargo test --locked --offline --jobs 2 --lib analysis::python_native -- --test-threads=2
 ```
 
 ### Private declaration-fact candidates
@@ -160,19 +177,24 @@ source-completeness authority, a Python runtime version or a trusted snapshot.
 
 The accepted file subset is deliberately small:
 
-- Modules containing only supported function declarations, `pass`, and comments.
+- Modules containing supported declarations, `pass`, comments and the limited
+  expression/assignment and import statements described in the slices below.
 - Undecorated synchronous/asynchronous functions, including nested declarations,
-  with bodies containing only `pass` or other supported declarations.
-- Unannotated positional, positional-only, keyword-only, `*args` and `**kwargs`
-  parameters, with validated separators/order and no duplicate names.
+  with bodies containing supported statements. Async declarations do not imply
+  support for `await` or asynchronous execution analysis.
+- Positional, positional-only, keyword-only, `*args` and `**kwargs` parameters,
+  with validated separators/order and no duplicate names. The bounded header
+  annotations/defaults described below are optional; signatures still contain
+  names/order/kinds only.
 - ASCII function/parameter names. Unicode paths and supplied module metadata are
   preserved exactly; identifier normalization is not approximated.
 - Space-based indentation, LF/CRLF and an optional leading UTF-8 BOM. Parameters
   may span lines, but a multiline header with an inline body is not supported.
 
-Defaults, annotations, decorators, type parameters/comments, classes, imports,
-calls, bindings, returns, control flow, literal expressions/docstrings and all
-other unmodeled forms reject the **whole file**. So do non-ASCII identifiers,
+Decorators, function type parameters/comments, classes, unreviewed imports, control flow and
+all other unmodeled forms reject the **whole file**. Calls/writes/returns are
+accepted only through the narrow body slice; calls in headers remain unsupported.
+So do non-ASCII identifiers,
 semicolons, explicit line continuations, NUL, bare CR formatting and unsupported
 whitespace outside comments. Some rejected forms are valid Python; rejection means
 this candidate policy cannot prove whole-file fact parity, not that the AST helper
@@ -194,19 +216,222 @@ evidence identity. The candidate identity also fingerprints the collector policy
 and implementation; equal declaration facts do not erase differing captured inputs.
 
 Existing input, 1 MiB summary, node/depth and cooperative invocation bounds remain.
-Candidate output is separately capped at **100,000 facts including baselines** and
-**32 MiB encoded output**, with another **32 MiB pending working allowance** for
-owned frame text, parameter/signature storage and temporary construction. Admission
+Candidate output is separately capped at **100,000 facts including baselines**,
+**100,000 warnings** and **32 MiB combined encoded output**, with another
+**32 MiB pending working allowance** for owned frame text, parameter/signature
+storage, persistent file-local aliases, retained warning storage and temporary construction. Admission
 and borrowed baseline reservation precede allocation. A file that exhausts its
 allowance rolls back to its module baseline; invocation cancellation also clears
-earlier declaration candidates. These allowances do not bound total process RSS or
+earlier declaration candidates and warnings. These allowances do not bound total process RSS or
 native parser allocation. Tests inject small limits and deterministic cancellation
 checkpoints rather than relying on wall-clock timing.
 
 This foundation does **not** establish full Python parity or a production native
-backend. Calls and lexical binding guards, richer syntax/encoding parity, classes,
+backend. Broader expression/control-flow and encoding parity, full import/alias semantics, classes,
 constructor forwarding, FastAPI semantics, capability/identity design and default
 replacement remain later gates. No existing AST expectations were relaxed.
+
+### Bounded header annotations and literal defaults
+
+The private `python_native/expressions.rs` helper normalizes only expressions
+admitted by a narrow structural policy. It builds borrowed-span descriptors from
+the same counted walk, not a second CST traversal or Python evaluation. Arena
+growth, deferred parameter metadata and renderer scratch are charged before
+allocation to the existing pending-work budget. Final rendered values are compacted
+before entering output facts; literal contents are never retained as owned values.
+The header expansion introduced the private candidate policy's second generation;
+the body expansion introduced `python-native-private-facts-3`, and the import slice
+introduced `python-native-private-facts-4`. Its parenthesized/multiline expansion
+introduced `python-native-private-facts-5`; alias-aware warnings advance it to
+`python-native-private-facts-6`, with the expression
+implementation included in its fingerprint. Production identity is unchanged.
+
+Supported annotations are ASCII names/dotted names, safe quoted text, `None`,
+ellipsis, and reference-based generics with nested annotations or tuple slices.
+For example, `list[Item]`, `dict[str, list[Item]]` and `tuple[Item, ...]` describe
+syntax only, not resolved types or runtime identities. Grouping is normalized:
+`T[A,]` renders `T[[A]]`, whereas `T[(A)]` renders `T[A]`. Standalone tuples,
+unions, slices, starred arguments, list/set/dict expressions, subscripted callees
+such as `T[A][B]`, and arbitrary expression nodes remain unsupported.
+
+Defaults admit reviewed constant spellings: `None`, booleans, ellipsis, numeric
+literals, text and bytes, optionally grouped. Exactly one numeric unary `+` or `-`
+is supported. Constants render `<literal>`; signed numeric defaults render the
+helper's `<UnaryOp>`, not their value. Names such as `DEFAULT`, attribute-valued
+defaults, containers, repeated signs, unary booleans and binary expressions are
+not admitted. Numeric tokens are limited to 1,024 bytes; decimal spellings are
+limited to 512 digits and checked lexically for Python-compatible bases, underscores
+and exponents, without converting values.
+
+Strings use no backslashes, including raw strings. Reviewed prefixes are absent,
+`r`, `u`, `b`, `br` or `rb`, case-insensitively; bytes bodies must be ASCII.
+Adjacent tokens must all be text or all bytes. Ordinary/triple-quoted forms are
+supported, but single-delimiter strings cannot contain physical LF/CR. Formatted
+strings, template strings, mixed text/bytes and unreviewed escapes/prefixes reject
+the whole file. No new literal-retention exception is introduced.
+
+Each shape invocation uses the helper's shared 80-node expression allowance,
+depth 12, first 16 tuple elements and 512-byte UTF-8 clipping at every rendered
+node. These are rendering limits, not validation limits: every descriptor/CST
+descendant is still validated. Calls hidden after a tuple's 16th item, beyond a
+truncated shape or beneath an exhausted expression budget still reject the file.
+
+Parameter and `parameter_annotation` facts share the AST argument extent, from
+the name through its annotation, including annotation grouping but excluding any
+default. Default/return facts use normalized AST-expression extents, excluding
+redundant outer grouping. Return header tracking uses the last non-comment syntax
+token, and physical line breaks require implicit bracket continuation; literal
+payloads cannot spoof bracket depth. Positional defaults remain a suffix across
+`/`; required keyword-only parameters may follow defaulted keyword-only parameters.
+Variadic defaults and duplicate typed/untyped names remain rejected.
+
+### Private body calls and lexical-write facts
+
+The third private candidate policy adds a deliberately small body/module subset:
+
+- Expression statements containing names/dotted references, reviewed scalar
+  literals, supported calls, or grouping. Plain docstrings are evidence-neutral.
+- One assignment target: an ASCII name or a `self`/`cls` attribute chain. These
+  roots are syntax, not proof of a method, class instance or dependency injection.
+- Function-only bare/value returns. No `return` fact or return-dataflow edge is
+  invented; contained calls are retained and statement ends extend function spans.
+- Calls whose callee is a name/dotted reference, with positional arguments followed
+  by explicit named keywords. Argument values can contain supported nested calls.
+
+Assignments with normalized name/attribute/call RHS produce `binding` with compact
+sorted-key `source`/`target` shapes. Reviewed literal/unary RHS produce a
+`binding_invalidation` containing **only** the target. Target shapes, including
+plain names, follow the helper's 512-byte clipping. Binding ownership is the
+enclosing module/function symbol, never a manufactured target declaration.
+
+Calls render the callee first, then at most 16 positional and 16 keyword arguments,
+with separate overflow ellipses. Every nested admitted call still gets its own
+fact even when omitted/clipped in its parent's shape. Each independent call or
+assignment-shape invocation has its own 80-node/depth-12/512-byte allowance; this
+does not reset extraction's shared deadline, traversal, output or working limits.
+Grouping preserves AST expression spans separately from complete statement spans:
+an assignment can end after its nested call's closing parenthesis.
+
+Chained/destructuring, starred/subscript/other-receiver targets, annotated/augmented
+assignments, `del`, assignment expressions, `await`, yield/generators, lambdas,
+comprehensions, call splats, duplicate explicit keywords, containers/operators and
+call-result callees remain unsupported. Calls in annotations/defaults still reject
+the file. Whole-file rollback and later syntax/resource-error precedence remain.
+
+Accepted files must also preserve the helper's complete fact/diagnostic contract.
+Until dedicated support exists, the candidate rejects possible `FastAPI`/`APIRouter`
+constructor calls, `include_router` attribute calls and router/prefix attribute-mutation
+targets. Dynamic-discovery calls now produce the warnings described below. Constructor
+guards check raw names **and**
+fresh standalone callee shapes: clipping can itself create a special terminal name.
+Ordinary converter-registration spellings remain ordinary call/binding evidence,
+without registration interpretation or extra literal retention.
+
+An additional 200-level structural delimiter gate accounts for enclosing function
+parameters and call/generic arguments, not strings/comments or normalized rendering
+depth. It prevents grouping accepted by the grammar from exceeding the Python
+oracle's parser limit; existing CST/deadline gates can reject earlier. New state,
+argument links, scratch, pending statement metadata and ID/JSON construction are
+charged before allocation. Capture digests, single-parse/single-walk behavior and
+transactional limits remain unchanged.
+
+The oracle tests compare complete ordered AST facts, not selected call/binding
+kinds. A **test-only** resolver fixture is constructed only after exact fact
+equality, to compare direct-call links and unresolved/shadowed cases. It is never
+persisted and supplies no production native-to-Evidence conversion. This preserves
+current static resolver semantics, not general function-alias resolution, complete
+whole-function local analysis, execution order or control-flow proof.
+
+### Private bounded import facts
+
+The import subset started with single-physical-line ASCII `import` and `from`
+statements in module/function suites. The fifth candidate policy also admits
+parenthesized `from` lists, on one or more physical lines. Dotted module names, absolute/relative
+`from` levels, ordered comma-separated names and optional `as` aliases retain
+their exact AST metadata. Each statement emits one `import`/`from_import` fact,
+owned by its lexical module/function, with compact sorted-key JSON, explicit
+`asname: null`, untruncated names and source-order duplicates. Imports extend
+function spans but are not call, runtime-loading or binding facts. Parenthesized
+statements end on the closing `)` line, even when the last name appears earlier;
+trailing comments do not extend the span or enter metadata.
+
+A parenthesized list must be nonempty, with exactly one enclosing pair and an
+optional trailing comma. Spaces, LF/CRLF, blank lines and ordinary comments may
+separate tokens inside the pair, including around `as`. Comment payloads are
+opaque and nonsemantic, even when they contain punctuation, Unicode or backslashes.
+Recognized type comments still reject the file. Before the opening delimiter,
+the prefix remains on one physical line with the existing space-only rules;
+implicit continuation is not a general whitespace relaxation. The shared walk
+tracks the previous observed leaf independently from semantic token descriptors,
+so comment contents cannot be reinterpreted as gaps or aliases.
+
+The candidate now reproduces the helper's narrow imported-alias lookup for dynamic
+warnings, not general name/type resolution. Ordinary calls/bindings keep unexpanded
+shapes. Constructor metadata remains unsupported: every absolute import whose helper-
+stored target ends in `FastAPI` or `APIRouter` rejects the whole file, even if unused,
+shadowed or overwritten.
+This is an exact, case-sensitive terminal test on the full target, not a truncated
+shape or a library-identity claim. An unaliased `import a.b` stores only `a`; with
+`as`, it stores `a.b`. A `from a import b` stores `a.b`. Relative imports never
+populate the helper's alias table, so this extra target exclusion does not apply
+to them. Existing raw/fresh-rendered special-callee guards still apply everywhere.
+
+This conservative subset permits supported imports and calls together while
+keeping constructor/framework side outputs outside the admitted boundary.
+Star imports, unparenthesized trailing commas, `__future__` statements,
+inline import suites, non-ASCII identifiers, explicit continuations and unsupported
+whitespace remain excluded. Token descriptors come from the same counted observer
+walk; there is no second parse, source read, module import or source tokenizer.
+Descriptor capacity, canonical text, name lists and JSON/ID temporaries are charged
+before allocation, with shared cancellation and transactional limits unchanged.
+Parser errors are never waived: the pinned grammar can reject CPython-valid
+zero-indented list contents within a function's parenthesized import. An oracle
+fixture records that difference explicitly as `SyntaxError` with module-only output,
+rather than treating every Python-valid formatting choice as supported.
+
+Oracle fixtures compare complete ordered fact and diagnostic vectors; earlier
+warning-free cases additionally retain their empty-diagnostics assertions. Native
+tests cover resource/cancellation rollback, exact walk counters and per-file
+state/budget isolation. Full alias-dependent constructor/framework behavior remains
+a later gate, not implied by retaining import syntax.
+
+### Private alias-aware dynamic warnings
+
+The sixth policy adds a separate private report `diagnostics` vector with the
+helper's `dynamic_discovery_unresolved` records. This is distinct from each file's
+failure classification. A supported dynamic call does not fail the file, execute a
+module or infer a runtime target. Its message is exactly
+`line N: EXPANDED_CALLEE; runtime targets are not inferred`.
+
+For every admitted call, a **fresh** callee-shape rendering uses the existing
+80-node/depth-12/512-byte-per-node limits. The helper's lookup substitutes only the
+head before the first dot, once; the full imported target is not clipped again.
+Warnings use the resulting terminal name: `__import__`, `import_module`,
+`iter_modules`, `walk_packages`, `entry_points`, `load_entry_point`, `find_spec`,
+`exec` or `eval`. This is a spelling rule, not proof of a specific library.
+A safe import can suppress a raw `eval` warning; a long identifier can clip to a
+different imported alias. Ordinary call/binding facts remain unexpanded/redacted.
+Nested calls still warn even when their parent's shape omits or clips them.
+
+Aliases are keyed by explicit function-name scope components, independent of
+supplied module text or declaration identity. Lookup checks the nearest scope,
+enclosing prefixes, then module scope. Entries persist until file end, so repeated
+same-named functions reuse earlier aliases. Imports update entries in visitor
+order; parameters, assignments, literal invalidations and definitions do **not**
+invalidate them. Relative imports do not update or erase them. These are deliberate
+AST-helper compatibility rules—not Python runtime binding semantics or an upgrade
+to the focused resolver's separate lexical proof rules. Calls in headers remain
+unsupported, avoiding a claim about their additional AST visitation-order effects.
+
+Warnings sort globally by `(path, code, message)`, retaining duplicates even when
+identical call facts deduplicate. Line numbers sort as message text (`10` before
+`2`), exactly like the helper. Full targets, interned scopes, alias map capacity,
+replacement storage, warning-vector high-water capacity, strings and renderer
+scratch are charged before allocation. Hashed alias keys retain their full spelling
+and fail closed on a digest collision; long copies/comparisons are cancellable.
+Per-file rejection rolls back facts and warnings together. Invocation cancellation
+or final output exhaustion clears all warnings and non-module facts. No production
+Evidence conversion, completeness authority or public backend switch is introduced.
 
 ## Current extraction boundary
 
