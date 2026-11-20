@@ -7,7 +7,7 @@ use tree_sitter::Node;
 mod expressions;
 use expressions::{Expression, Mode};
 
-const FACT_POLICY: &str = "python-native-private-facts-6";
+const FACT_POLICY: &str = "python-native-private-facts-8";
 const MAX_FACTS: usize = 100_000;
 const SIGNATURE_WORK: usize = 2 * 16384 + 17;
 
@@ -269,8 +269,8 @@ fn extract<F: FnMut(Checkpoint) -> bool>(
         scopes: Vec::new(),
         files: Vec::new(),
         frames: Vec::new(),
-        functions: Vec::new(),
-        function_frames: 0,
+        definitions: Vec::new(),
+        definition_frames: 0,
         unsupported: false,
         limited: None,
         terminal_end: 0,
@@ -427,7 +427,7 @@ struct Frame {
 }
 
 #[derive(Default)]
-struct Function {
+struct Definition {
     scope_id: usize,
     working: usize,
     name: String,
@@ -435,6 +435,8 @@ struct Function {
     line: usize,
     end: usize,
     asynchronous: bool,
+    class: bool,
+    // Classes share ownership/scopes, but never allocate signature state.
     names: HashSet<String>,
     positional: Vec<String>,
     keyword: Vec<String>,
@@ -462,6 +464,10 @@ struct BodyStatement {
     target: Option<String>,
     source: Option<String>,
     binding: bool,
+    has_value: bool,
+    annotation: Option<String>,
+    // Borrowed source spelling, independent of the clipped binding descriptor.
+    field_name: Option<std::ops::Range<usize>>,
     working: usize,
 }
 
@@ -626,8 +632,8 @@ struct Collector<'a, 'b> {
     scopes: Vec<AliasScope>,
     files: Vec<CandidateFile<'a>>,
     frames: Vec<Frame>,
-    functions: Vec<Function>,
-    function_frames: usize,
+    definitions: Vec<Definition>,
+    definition_frames: usize,
     unsupported: bool,
     limited: Option<CandidateDiagnostic>,
     terminal_end: usize,
@@ -715,11 +721,16 @@ fn join_symbol<F: FnMut(Checkpoint) -> bool>(
 
 impl Collector<'_, '_> {
     fn scope(&self) -> usize {
-        self.functions.last().map_or(0, |f| f.scope_id)
+        self.definitions.last().map_or(0, |f| f.scope_id)
     }
 
     fn enter_scope<F: FnMut(Checkpoint) -> bool>(&mut self, name: &str, cancel: &Cancellation<F>) {
-        let parent = self.functions.iter().rev().nth(1).map_or(0, |f| f.scope_id);
+        let parent = self
+            .definitions
+            .iter()
+            .rev()
+            .nth(1)
+            .map_or(0, |f| f.scope_id);
         let Some(key) = alias_key(name, cancel) else {
             return;
         };
@@ -728,7 +739,7 @@ impl Collector<'_, '_> {
                 self.unsupported = true;
                 return;
             }
-            self.functions.last_mut().unwrap().scope_id = *id;
+            self.definitions.last_mut().unwrap().scope_id = *id;
             return;
         }
         let charge = 4
@@ -748,7 +759,7 @@ impl Collector<'_, '_> {
             ..AliasScope::default()
         });
         self.scopes[parent].children.insert(key, (name, id));
-        self.functions.last_mut().unwrap().scope_id = id;
+        self.definitions.last_mut().unwrap().scope_id = id;
     }
 
     fn import_alias<F: FnMut(Checkpoint) -> bool>(
@@ -1117,7 +1128,7 @@ impl Collector<'_, '_> {
         };
         debug_assert_eq!(size, metadata_size);
         let owner = self
-            .functions
+            .definitions
             .last()
             .map_or(&self.sources[self.index].module, |f| &f.symbol);
         // Metadata buffer, fact ownership, serialization/ID and dedup copies.
@@ -1173,7 +1184,7 @@ impl Collector<'_, '_> {
             line: import.line,
             end_line: self.terminal_line,
             symbol: self
-                .functions
+                .definitions
                 .last()
                 .map_or(&self.sources[self.index].module, |f| &f.symbol),
             value: &value,
@@ -1192,7 +1203,7 @@ impl Collector<'_, '_> {
             return;
         }
         let owner = self
-            .functions
+            .definitions
             .last()
             .map_or(&self.sources[self.index].module, |f| &f.symbol)
             .clone();
@@ -1202,11 +1213,41 @@ impl Collector<'_, '_> {
 
     fn finish_expression<F: FnMut(Checkpoint) -> bool>(&mut self, cancel: &Cancellation<F>) {
         let expression = self.expression.take().unwrap();
+        if matches!(expression.mode, Mode::Base | Mode::AssignmentAnnotation) {
+            let owner_len = self.definitions.last().map_or(0, |f| f.symbol.len());
+            let temporary = Expression::RENDER_WORK + owner_len;
+            if !self.reserve_work(temporary, cancel) {
+                return;
+            }
+            let bytes = self.sources[self.index]
+                .bytes
+                .strip_prefix(b"\xef\xbb\xbf")
+                .unwrap_or(&self.sources[self.index].bytes);
+            let value = expression
+                .render(bytes, cancel)
+                .into_boxed_str()
+                .into_string();
+            if expression.mode == Mode::Base {
+                let (line, end) = expression.span();
+                let symbol = self.definitions.last().unwrap().symbol.clone();
+                self.add("base", line, end, symbol, value, cancel);
+            } else if self.body.as_ref().unwrap().field_name.is_some() {
+                // Keep only a bounded redacted shape until the statement closes.
+                if !self.reserve_work(512, cancel) {
+                    return;
+                }
+                let body = self.body.as_mut().unwrap();
+                body.annotation = Some(value);
+                body.working += 512;
+            }
+            self.pending -= expression.working + temporary;
+            return;
+        }
         if matches!(expression.mode, Mode::BodyValue | Mode::AssignmentTarget) {
             self.finish_body_expression(expression, cancel);
             return;
         }
-        let function = self.functions.last().unwrap();
+        let function = self.definitions.last().unwrap();
         let temporary = Expression::RENDER_WORK
             + 2 * (function.symbol.len() + self.parameter.as_ref().map_or(0, |p| p.name.len() + 1));
         if !self.reserve_work(temporary, cancel) {
@@ -1230,7 +1271,7 @@ impl Collector<'_, '_> {
                 p.working += temporary;
             }
             Mode::Return => {
-                let f = self.functions.last_mut().unwrap();
+                let f = self.definitions.last_mut().unwrap();
                 f.header_end = expression.terminal_end_line - 1;
                 let symbol = f.symbol.clone();
                 self.add("return_annotation", line, end, symbol, value, cancel);
@@ -1238,7 +1279,7 @@ impl Collector<'_, '_> {
             }
             Mode::Default => {
                 let symbol = join_symbol(
-                    &self.functions.last().unwrap().symbol,
+                    &self.definitions.last().unwrap().symbol,
                     &self.parameter.as_ref().unwrap().name,
                     self.limits.bytes.saturating_sub(self.used),
                     cancel,
@@ -1250,7 +1291,9 @@ impl Collector<'_, '_> {
                 }
                 self.pending -= temporary;
             }
-            Mode::BodyValue | Mode::AssignmentTarget => unreachable!(),
+            Mode::Base | Mode::AssignmentAnnotation | Mode::BodyValue | Mode::AssignmentTarget => {
+                unreachable!()
+            }
         }
         self.pending -= expression.working;
     }
@@ -1261,7 +1304,7 @@ impl Collector<'_, '_> {
         cancel: &Cancellation<F>,
     ) {
         let owner_len = self
-            .functions
+            .definitions
             .last()
             .map_or(self.sources[self.index].module.len(), |f| f.symbol.len());
         let retained = 512;
@@ -1295,7 +1338,7 @@ impl Collector<'_, '_> {
                 let (line, end) = expression.call_span(index);
                 self.warn_call(&callee, line, cancel);
                 let owner = self
-                    .functions
+                    .definitions
                     .last()
                     .map_or(&self.sources[self.index].module, |f| &f.symbol)
                     .clone();
@@ -1325,7 +1368,36 @@ impl Collector<'_, '_> {
 
     fn finish_body_statement<F: FnMut(Checkpoint) -> bool>(&mut self, cancel: &Cancellation<F>) {
         let body = self.body.take().unwrap();
-        if let Some(target) = body.target.as_deref() {
+        if let (Some(name), Some(annotation)) = (body.field_name.as_ref(), body.annotation.as_ref())
+        {
+            let size = self.definitions.last().unwrap().symbol.len() + name.len() + 1;
+            if !self.reserve_work(size + 512, cancel) {
+                return;
+            }
+            let bytes = self.sources[self.index]
+                .bytes
+                .strip_prefix(b"\xef\xbb\xbf")
+                .unwrap_or(&self.sources[self.index].bytes);
+            let Some(symbol) = join_symbol(
+                &self.definitions.last().unwrap().symbol,
+                std::str::from_utf8(&bytes[name.clone()]).unwrap(),
+                self.limits.bytes.saturating_sub(self.used),
+                cancel,
+            ) else {
+                self.limited = Some(CandidateDiagnostic::OutputLimit);
+                return;
+            };
+            self.add(
+                "attribute_annotation",
+                body.line,
+                self.terminal_line,
+                symbol,
+                annotation.clone(),
+                cancel,
+            );
+            self.pending -= size + 512;
+        }
+        if let Some(target) = body.target.as_deref().filter(|_| body.has_value) {
             #[derive(Serialize)]
             struct Binding<'a> {
                 #[serde(skip_serializing_if = "Option::is_none")]
@@ -1345,7 +1417,7 @@ impl Collector<'_, '_> {
                 return;
             };
             let owner = self
-                .functions
+                .definitions
                 .last()
                 .map_or(&self.sources[self.index].module, |f| &f.symbol);
             let temporary = 2 * size + owner.len();
@@ -1358,7 +1430,7 @@ impl Collector<'_, '_> {
             }
             let value = String::from_utf8(value).unwrap();
             let owner = self
-                .functions
+                .definitions
                 .last()
                 .map_or(&self.sources[self.index].module, |f| &f.symbol)
                 .clone();
@@ -1490,8 +1562,8 @@ impl Observer for Collector<'_, '_> {
         self.limited = None;
         self.terminal_end = 0;
         self.frames.clear();
-        self.functions = Vec::new();
-        self.function_frames = 0;
+        self.definitions = Vec::new();
+        self.definition_frames = 0;
         self.pending =
             self.warning_text + self.warning_slots * 4 * std::mem::size_of::<CandidateWarning>();
         self.scopes = Vec::new();
@@ -1537,11 +1609,21 @@ impl Observer for Collector<'_, '_> {
         }
         let parent = self.frames.last().map(|f| f.kind).unwrap_or("");
         let mode = match (parent, field) {
+            ("argument_list", _)
+                if self.expression.is_none()
+                    && self.body.is_none()
+                    && self.definitions.last().is_some_and(|f| f.class)
+                    && node.is_named()
+                    && kind != "comment" =>
+            {
+                Some(Mode::Base)
+            }
             ("typed_parameter" | "typed_default_parameter", Some("type")) => Some(Mode::Annotation),
             ("default_parameter" | "typed_default_parameter", Some("value")) => Some(Mode::Default),
             ("function_definition", Some("return_type")) => Some(Mode::Return),
             ("assignment", Some("left")) => Some(Mode::AssignmentTarget),
             ("assignment", Some("right")) => Some(Mode::BodyValue),
+            ("assignment", Some("type")) => Some(Mode::AssignmentAnnotation),
             ("expression_statement", _) if kind != "assignment" && kind != "comment" => {
                 Some(Mode::BodyValue)
             }
@@ -1556,13 +1638,13 @@ impl Observer for Collector<'_, '_> {
                 return;
             }
             if mode == Mode::Return
-                && node.start_position().row != self.functions.last().unwrap().header_end
+                && node.start_position().row != self.definitions.last().unwrap().header_end
             {
                 self.unsupported = true;
                 return;
             }
-            if mode == Mode::BodyValue
-                && matches!(parent, "assignment" | "return_statement")
+            if ((mode == Mode::BodyValue && matches!(parent, "assignment" | "return_statement"))
+                || mode == Mode::AssignmentAnnotation)
                 && node.start_position().row + 1 != self.terminal_line
             {
                 self.unsupported = true;
@@ -1571,6 +1653,7 @@ impl Observer for Collector<'_, '_> {
             self.expression = Some(Expression::new(mode, node.start_byte()));
         }
         let previous_terminal_end = self.terminal_end;
+        let previous_terminal_line = self.terminal_line;
         if node.child_count() == 0 && kind != "module" {
             let gap = &bytes[self.terminal_end..node.start_byte()];
             if !trivia(gap, cancel)
@@ -1712,23 +1795,65 @@ impl Observer for Collector<'_, '_> {
                         self.unsupported = true;
                     }
                 }
-                "function_definition" => {
+                "function_definition" | "class_definition" => {
+                    // Known header exclusions precede owned declaration state.
+                    if kind == "class_definition"
+                        && (node.child_by_field_name("type_parameters").is_some()
+                            || node
+                                .child_by_field_name("superclasses")
+                                .is_some_and(|bases| {
+                                    bases.start_position().row != node.start_position().row
+                                        || bases.end_position().row != node.start_position().row
+                                        || bases.named_child(0).is_some_and(|base| {
+                                            !matches!(
+                                                base.kind(),
+                                                "identifier"
+                                                    | "attribute"
+                                                    | "parenthesized_expression"
+                                            )
+                                        })
+                                }))
+                    {
+                        self.unsupported = true;
+                        return;
+                    }
                     self.statement(node, bytes);
                     // Keep the vector's high-water capacity charged even after
-                    // nested functions unwind. Drop that capacity between files.
-                    if self.functions.len() == self.function_frames {
-                        if !self.reserve_work(4 * std::mem::size_of::<Function>(), cancel) {
+                    // nested definitions unwind. Drop that capacity between files.
+                    if self.definitions.len() == self.definition_frames {
+                        if !self.reserve_work(4 * std::mem::size_of::<Definition>(), cancel) {
                             return;
                         }
-                        self.function_frames += 1;
+                        self.definition_frames += 1;
                     }
                     cancel.at(Checkpoint::FunctionFrame);
-                    self.functions.push(Function {
+                    self.definitions.push(Definition {
                         line: node.start_position().row + 1,
-                        ..Function::default()
+                        class: kind == "class_definition",
+                        ..Definition::default()
                     });
                 }
-                "block" if parent == "function_definition" && field == Some("body") => {}
+                "block"
+                    if matches!(parent, "function_definition" | "class_definition")
+                        && field == Some("body") => {}
+                "argument_list" if parent == "class_definition" => {
+                    let line = self.definitions.last().unwrap().line;
+                    // The pinned grammar admits `(,)` as an argument list.
+                    // A class list with no named base must be exactly `()`;
+                    // named-child and child counts are cached CST metadata.
+                    if (node.named_child_count() == 0 && node.child_count() != 2)
+                        || node.start_position().row + 1 != line
+                        || node.end_position().row + 1 != line
+                    {
+                        self.unsupported = true;
+                    }
+                }
+                "class" | ":" if parent == "class_definition" && !node.is_named() => {
+                    if node.start_position().row + 1 != self.definitions.last().unwrap().line {
+                        self.unsupported = true;
+                    }
+                }
+                "(" | ")" | "," if parent == "argument_list" && !node.is_named() => {}
                 "pass_statement" => self.statement(node, bytes),
                 "import_statement" | "import_from_statement" => {
                     self.statement(node, bytes);
@@ -1749,7 +1874,8 @@ impl Observer for Collector<'_, '_> {
                 "expression_statement" | "return_statement" => {
                     self.statement(node, bytes);
                     if self.body.is_some()
-                        || (kind == "return_statement" && self.functions.is_empty())
+                        || (kind == "return_statement"
+                            && self.definitions.last().is_none_or(|f| f.class))
                     {
                         self.unsupported = true;
                         return;
@@ -1763,14 +1889,32 @@ impl Observer for Collector<'_, '_> {
                         target: None,
                         source: None,
                         binding: false,
+                        has_value: false,
+                        annotation: None,
+                        field_name: None,
                         working,
                     });
                 }
-                "assignment" if parent == "expression_statement" => {}
-                "=" if parent == "assignment" && !node.is_named() => {}
+                "assignment" if parent == "expression_statement" => {
+                    let body = self.body.as_mut().unwrap();
+                    body.has_value = node.child_by_field_name("right").is_some();
+                    if node.child_by_field_name("type").is_some()
+                        && self.definitions.last().is_some_and(|f| f.class)
+                    {
+                        body.field_name = node
+                            .child_by_field_name("left")
+                            .filter(|left| left.kind() == "identifier")
+                            .map(|left| left.start_byte()..left.end_byte());
+                    }
+                }
+                ":" | "=" if parent == "assignment" && !node.is_named() => {
+                    if node.start_position().row + 1 != previous_terminal_line {
+                        self.unsupported = true;
+                    }
+                }
                 "return" if parent == "return_statement" && !node.is_named() => {}
                 "parameters" if parent == "function_definition" && field == Some("parameters") => {
-                    if node.start_position().row + 1 != self.functions.last().unwrap().line {
+                    if node.start_position().row + 1 != self.definitions.last().unwrap().line {
                         self.unsupported = true;
                     }
                 }
@@ -1796,16 +1940,18 @@ impl Observer for Collector<'_, '_> {
                         self.unsupported = true;
                         return;
                     }
-                    if parent == "function_definition" && field == Some("name") {
-                        if node.start_position().row + 1 != self.functions.last().unwrap().line {
+                    if matches!(parent, "function_definition" | "class_definition")
+                        && field == Some("name")
+                    {
+                        if node.start_position().row + 1 != self.definitions.last().unwrap().line {
                             self.unsupported = true;
                         }
                         self.enter_scope(name, cancel);
                         if self.unsupported || self.limited.is_some() || cancel.expired.get() {
                             return;
                         }
-                        let prefix = if self.functions.len() > 1 {
-                            &self.functions[self.functions.len() - 2].symbol
+                        let prefix = if self.definitions.len() > 1 {
+                            &self.definitions[self.definitions.len() - 2].symbol
                         } else {
                             &self.sources[self.index].module
                         };
@@ -1815,9 +1961,9 @@ impl Observer for Collector<'_, '_> {
                         if !self.reserve_work(working, cancel) {
                             return;
                         }
-                        self.functions.last_mut().unwrap().working += working;
-                        let prefix = if self.functions.len() > 1 {
-                            &self.functions[self.functions.len() - 2].symbol
+                        self.definitions.last_mut().unwrap().working += working;
+                        let prefix = if self.definitions.len() > 1 {
+                            &self.definitions[self.definitions.len() - 2].symbol
                         } else {
                             &self.sources[self.index].module
                         };
@@ -1827,7 +1973,7 @@ impl Observer for Collector<'_, '_> {
                             self.limits.bytes.saturating_sub(self.used),
                             cancel,
                         ) {
-                            let f = self.functions.last_mut().unwrap();
+                            let f = self.definitions.last_mut().unwrap();
                             f.name = name.into();
                             f.symbol = symbol;
                         } else {
@@ -1848,7 +1994,7 @@ impl Observer for Collector<'_, '_> {
                         if !self.reserve_work(working, cancel) {
                             return;
                         }
-                        let Some(f) = self.functions.last_mut() else {
+                        let Some(f) = self.definitions.last_mut() else {
                             self.unsupported = true;
                             return;
                         };
@@ -1886,7 +2032,7 @@ impl Observer for Collector<'_, '_> {
                                 return;
                             }
                             let Some(symbol) = join_symbol(
-                                &self.functions.last().unwrap().symbol,
+                                &self.definitions.last().unwrap().symbol,
                                 name,
                                 self.limits.bytes.saturating_sub(self.used),
                                 cancel,
@@ -1909,7 +2055,7 @@ impl Observer for Collector<'_, '_> {
                     }
                 }
                 "positional_separator" if parent == "parameters" => {
-                    let f = self.functions.last_mut().unwrap();
+                    let f = self.definitions.last_mut().unwrap();
                     if f.slash || f.star || f.kwarg.is_some() || f.positional.is_empty() {
                         self.unsupported = true;
                     }
@@ -1919,7 +2065,7 @@ impl Observer for Collector<'_, '_> {
                 "keyword_separator" | "list_splat_pattern"
                     if matches!(parent, "parameters" | "typed_parameter") =>
                 {
-                    let f = self.functions.last_mut().unwrap();
+                    let f = self.definitions.last_mut().unwrap();
                     if f.star || f.kwarg.is_some() {
                         self.unsupported = true;
                     }
@@ -1929,12 +2075,12 @@ impl Observer for Collector<'_, '_> {
                 "dictionary_splat_pattern"
                     if matches!(parent, "parameters" | "typed_parameter") =>
                 {
-                    if self.functions.last().unwrap().kwarg.is_some() {
+                    if self.definitions.last().unwrap().kwarg.is_some() {
                         self.unsupported = true;
                     }
                 }
                 "async" | "def" if parent == "function_definition" && !node.is_named() => {
-                    let f = self.functions.last_mut().unwrap();
+                    let f = self.definitions.last_mut().unwrap();
                     if node.start_position().row + 1 != f.line {
                         self.unsupported = true;
                     }
@@ -1943,7 +2089,7 @@ impl Observer for Collector<'_, '_> {
                     }
                 }
                 ":" if parent == "function_definition" && !node.is_named() => {
-                    if node.start_position().row != self.functions.last().unwrap().header_end {
+                    if node.start_position().row != self.definitions.last().unwrap().header_end {
                         self.unsupported = true;
                     }
                 }
@@ -1954,7 +2100,7 @@ impl Observer for Collector<'_, '_> {
                         "typed_parameter" | "typed_default_parameter" | "default_parameter"
                     ) && !node.is_named() => {}
                 "->" if parent == "function_definition" && !node.is_named() => {
-                    if node.start_position().row != self.functions.last().unwrap().header_end {
+                    if node.start_position().row != self.definitions.last().unwrap().header_end {
                         self.unsupported = true;
                     }
                 }
@@ -1992,7 +2138,7 @@ impl Observer for Collector<'_, '_> {
             if matches!(node.kind(), "import_statement" | "import_from_statement") {
                 let end = self.terminal_line;
                 self.finish_import(cancel);
-                if let Some(f) = self.functions.last_mut() {
+                if let Some(f) = self.definitions.last_mut() {
                     f.end = end;
                 }
                 if let Some(suite) = self.frames.last_mut() {
@@ -2044,7 +2190,7 @@ impl Observer for Collector<'_, '_> {
                 if !self.reserve_work(SIGNATURE_WORK, cancel) {
                     return;
                 }
-                let f = self.functions.last_mut().unwrap();
+                let f = self.definitions.last_mut().unwrap();
                 f.working += SIGNATURE_WORK;
                 if f.bare_star && f.keyword.is_empty() {
                     self.unsupported = true;
@@ -2055,12 +2201,12 @@ impl Observer for Collector<'_, '_> {
             "typed_parameter" | "typed_default_parameter" | "default_parameter" => {
                 let parameter = self.parameter.take().unwrap();
                 let temporary =
-                    self.functions.last().unwrap().symbol.len() + parameter.name.len() + 1;
+                    self.definitions.last().unwrap().symbol.len() + parameter.name.len() + 1;
                 if !self.reserve_work(temporary, cancel) {
                     return;
                 }
                 let symbol = join_symbol(
-                    &self.functions.last().unwrap().symbol,
+                    &self.definitions.last().unwrap().symbol,
                     &parameter.name,
                     self.limits.bytes.saturating_sub(self.used),
                     cancel,
@@ -2096,21 +2242,23 @@ impl Observer for Collector<'_, '_> {
                 if node.kind() != "pass_statement" {
                     self.finish_body_statement(cancel);
                 }
-                if let Some(f) = self.functions.last_mut() {
+                if let Some(f) = self.definitions.last_mut() {
                     f.end = end;
                 }
                 if let Some(suite) = self.frames.last_mut() {
                     suite.last_end = Some(end - 1);
                 }
             }
-            "function_definition" => {
-                let f = self.functions.pop().unwrap();
+            "function_definition" | "class_definition" => {
+                let f = self.definitions.pop().unwrap();
                 if f.end == 0 || f.name.is_empty() {
                     self.unsupported = true;
                     return;
                 }
                 self.add(
-                    if f.asynchronous {
+                    if f.class {
+                        "class"
+                    } else if f.asynchronous {
                         "async_function"
                     } else {
                         "function"
@@ -2121,8 +2269,10 @@ impl Observer for Collector<'_, '_> {
                     f.name,
                     cancel,
                 );
-                self.add("signature", f.line, f.end, f.symbol, f.signature, cancel);
-                if let Some(parent) = self.functions.last_mut() {
+                if !f.class {
+                    self.add("signature", f.line, f.end, f.symbol, f.signature, cancel);
+                }
+                if let Some(parent) = self.definitions.last_mut() {
                     parent.end = f.end;
                 }
                 if let Some(suite) = self.frames.last_mut() {
@@ -2252,7 +2402,7 @@ fn fact_id<F: FnMut(Checkpoint) -> bool>(fact: &CandidateFact, cancel: &Cancella
     format!("fact_{:x}", hash.finalize())
 }
 
-fn signature<F: FnMut(Checkpoint) -> bool>(f: &Function, cancel: &Cancellation<F>) -> String {
+fn signature<F: FnMut(Checkpoint) -> bool>(f: &Definition, cancel: &Cancellation<F>) -> String {
     #[derive(Serialize)]
     struct Signature<'a> {
         #[serde(rename = "keywordOnly")]
@@ -2377,6 +2527,1191 @@ mod tests {
     }
 
     #[test]
+    fn base_lists_reject_comma_without_a_base_and_roll_back_warnings() {
+        for header in [
+            "class C(,): pass",
+            "class C( , ): pass",
+            "class C(, ): pass",
+        ] {
+            for newline in ["\n", "\r\n"] {
+                let text = format!("eval(){newline}class Before: pass{newline}{header}{newline}");
+                let sources = [
+                    source("a.py", "a", text),
+                    source("b.py", "b", "class Good((pkg.Base),): pass\n"),
+                ];
+                let parsed = parse_batch(&sources).unwrap();
+                // The grammar admits this shape, so the collector must reject
+                // it rather than relying on tree.has_error().
+                assert_eq!(parsed.files[0].status, ParseStatus::SyntaxAccepted);
+                let result = extract_fact_candidates(&sources).unwrap();
+                assert_eq!(result.files[0].status, CandidateStatus::UnsupportedSyntax);
+                assert_eq!(result.files[1].status, CandidateStatus::AcceptedFacts);
+                assert_eq!(result.facts.iter().filter(|f| f.path == "a.py").count(), 1);
+                assert!(result.diagnostics.is_empty());
+            }
+        }
+        accepted("class Empty(): pass\nclass One(Base,): pass\n");
+    }
+
+    #[test]
+    fn bounded_bases_are_exact_deduplicated_ordered_lexical_syntax() {
+        let text = "class Plain(Zed, ((pkg.Base)), Zed, object,): pass\ndef outer():\n    class Inner((Other),): pass\n";
+        let result = accepted(text);
+        let bases: Vec<_> = result.facts.iter().filter(|f| f.kind == "base").collect();
+        assert_eq!(bases.len(), 4);
+        for (fact, (line, symbol, value)) in bases.iter().zip([
+            (1, "sample.Plain", "Zed"),
+            (1, "sample.Plain", "object"),
+            (1, "sample.Plain", "pkg.Base"),
+            (3, "sample.outer.Inner", "Other"),
+        ]) {
+            assert_eq!((fact.line, fact.end_line), (line, line));
+            assert_eq!((&*fact.symbol, &*fact.value), (symbol, value));
+            let preimage =
+                format!("[\"sample.py\", \"base\", {line}, {line}, \"{symbol}\", \"{value}\"]");
+            assert_eq!(
+                fact.id,
+                format!("fact_{}", super::super::super::hash(preimage.as_bytes()))
+            );
+        }
+        assert!(!result
+            .facts
+            .iter()
+            .any(|f| f.kind == "signature" && f.symbol != "sample.outer"));
+        assert_eq!(result.facts, accepted(text.replace('\n', "\r\n")).facts);
+        let mut sorted = result.facts.clone();
+        sorted.sort_by(|a, b| {
+            (
+                &a.path, a.line, a.end_line, &a.kind, &a.symbol, &a.value, &a.id,
+            )
+                .cmp(&(
+                    &b.path, b.line, b.end_line, &b.kind, &b.symbol, &b.value, &b.id,
+                ))
+        });
+        assert_eq!(result.facts, sorted);
+        // Neither duplicate bases nor unresolved names imply inheritance resolution.
+        accepted("class Plain(Missing, Missing): pass\n");
+        let sources = [source("sample.py", "sample", "class Plain(A, A): pass\n")];
+        let limited = extract(
+            &sources,
+            Limits::default(),
+            FactLimits {
+                count: 3,
+                ..FactLimits::default()
+            },
+            |_| false,
+        )
+        .unwrap();
+        // Both base attempts count before global fact-ID deduplication.
+        assert_eq!(
+            limited.files[0].diagnostic,
+            Some(CandidateDiagnostic::FactLimit)
+        );
+    }
+
+    #[test]
+    fn annotated_assignments_keep_context_and_annotation_only_has_no_write() {
+        let result = accepted(concat!(
+            "module: Kind\n",
+            "module: Kind = helper()\n",
+            "class Plain(Base):\n",
+            "    field: pkg.Kind\n",
+            "    scalar: None = -1\n",
+            "    self.member: Kind\n",
+            "    cls.member: Kind = value\n",
+            "    def method(self):\n",
+            "        local: Kind\n",
+            "        local: Kind = value\n",
+            "        self.member: Kind = helper()\n",
+            "        class Nested:\n",
+            "            field: 'sensitive annotation'\n",
+            "def f():\n",
+            "    local: Kind\n",
+        ));
+        let annotations: Vec<_> = result
+            .facts
+            .iter()
+            .filter(|f| f.kind == "attribute_annotation")
+            .map(|f| (f.symbol.as_str(), f.value.as_str(), f.line, f.end_line))
+            .collect();
+        assert_eq!(
+            annotations,
+            [
+                ("sample.Plain.field", "pkg.Kind", 4, 4),
+                ("sample.Plain.scalar", "<literal>", 5, 5),
+                ("sample.Plain.method.Nested.field", "<literal>", 13, 13),
+            ]
+        );
+        let writes: Vec<_> = result
+            .facts
+            .iter()
+            .filter(|f| matches!(f.kind.as_str(), "binding" | "binding_invalidation"))
+            .map(|f| (f.line, f.symbol.as_str(), f.kind.as_str()))
+            .collect();
+        assert_eq!(
+            writes,
+            [
+                (2, "sample", "binding"),
+                (5, "sample.Plain", "binding_invalidation"),
+                (7, "sample.Plain", "binding"),
+                (10, "sample.Plain.method", "binding"),
+                (11, "sample.Plain.method", "binding"),
+            ]
+        );
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "function" && f.symbol == "sample.f" && f.end_line == 15));
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "class" && f.symbol.ends_with("Nested") && f.end_line == 13));
+        assert!(!serde_json::to_string(&result)
+            .unwrap()
+            .contains("sensitive annotation"));
+        for annotation in [
+            "Kind",
+            "pkg.Kind",
+            "'private'",
+            "None",
+            "...",
+            "T[A,]",
+            "T[()]",
+            "T[(A,B)]",
+            "T[U[V], None, ...]",
+        ] {
+            accepted(format!(
+                "x: {annotation}\nself.member: {annotation} = helper()\n"
+            ));
+        }
+        for value in [
+            "item",
+            "pkg.item",
+            "helper()",
+            "'private'",
+            "True",
+            "None",
+            "...",
+            "12",
+            "-2",
+            "1.5",
+        ] {
+            accepted(format!("x: Kind = {value}\n"));
+        }
+    }
+
+    #[test]
+    fn class_annotation_symbols_keep_raw_names_while_binding_targets_clip() {
+        for length in [511, 512, 513, 4096] {
+            let name = "x".repeat(length);
+            let result = accepted(format!("class Plain:\n    {name}: 'private' = value\n"));
+            let annotation = result
+                .facts
+                .iter()
+                .find(|f| f.kind == "attribute_annotation")
+                .unwrap();
+            assert_eq!(annotation.symbol, format!("sample.Plain.{name}"));
+            assert_eq!(annotation.value, "<literal>");
+            assert_eq!((annotation.line, annotation.end_line), (2, 2));
+            let binding = result.facts.iter().find(|f| f.kind == "binding").unwrap();
+            assert_eq!(
+                binding.value,
+                format!(
+                    "{{\"source\":\"value\",\"target\":\"{}\"}}",
+                    "x".repeat(length.min(512))
+                )
+            );
+            let only = accepted(format!("class Plain:\n    {name}: Kind\n"));
+            assert!(only
+                .facts
+                .iter()
+                .any(|f| f.symbol == format!("sample.Plain.{name}")));
+            assert!(!only.facts.iter().any(|f| f.kind.starts_with("binding")));
+        }
+    }
+
+    #[test]
+    fn annotated_statement_spans_include_groups_but_calls_are_normalized() {
+        let text = concat!(
+            "class Plain((pkg.Base),):\n", // 1
+            "    field: (\n",              // 2
+            "        T[\n",                // 3
+            "            A, U[B],\n",      // 4
+            "        ]\n",                 // 5
+            "    ) = (\n",                 // 6
+            "        helper(\n",           // 7
+            "            item\n",          // 8
+            "        )\n",                 // 9
+            "    ) # trailing\n",          // 10
+            "    only: (\n",               // 11
+            "        'private'\n",         // 12
+            "    )\n",                     // 13
+            "    # not part of class\n",
+        );
+        let result = accepted(text);
+        for (kind, value, line, end) in [
+            ("base", "pkg.Base", 1, 1),
+            ("attribute_annotation", "T[[A, U[B]]]", 2, 10),
+            (
+                "binding",
+                r#"{"source":"helper(item)","target":"field"}"#,
+                2,
+                10,
+            ),
+            ("call", "helper(item)", 7, 9),
+            ("attribute_annotation", "<literal>", 11, 13),
+            ("class", "Plain", 1, 13),
+        ] {
+            assert!(
+                result.facts.iter().any(|f| f.kind == kind
+                    && f.value == value
+                    && (f.line, f.end_line) == (line, end)),
+                "{kind}: {result:?}"
+            );
+        }
+        assert_eq!(result.facts, accepted(text.replace('\n', "\r\n")).facts);
+        accepted("x: T[\n A, # inner\n U[B]\n] = (\n value\n)\n");
+        accepted("x: T[(A, (B, None))]\n");
+    }
+
+    #[test]
+    fn annotated_writes_preserve_alias_warnings_and_persistent_mixed_owners() {
+        let result = accepted(concat!(
+            "from pkg import eval as go\n",        // 1
+            "go: Kind\n",                          // 2
+            "go: Kind = None\n",                   // 3
+            "go()\n",                              // 4
+            "class Plain(Base):\n",                // 5
+            "    from tools import exec as run\n", // 6
+            "    run: Kind = ordinary\n",          // 7
+            "    def method(run):\n",              // 8
+            "        run: Kind\n",                 // 9
+            "        run: Kind = helper()\n",      // 10
+            "        run()\n",                     // 11
+            "def Plain():\n",                      // 12
+            "    run: Kind = None\n",              // 13
+            "    run()\n",                         // 14
+            "go: Kind = outer(eval(), eval())\n",  // 15
+        ));
+        assert_eq!(
+            warning_messages(&result),
+            [
+                warning(11, "tools.exec"),
+                warning(14, "tools.exec"),
+                warning(15, "eval"),
+                warning(15, "eval"),
+                warning(4, "pkg.eval"),
+            ]
+        );
+        assert_eq!(
+            result
+                .facts
+                .iter()
+                .filter(|f| f.kind == "call" && f.line == 15)
+                .count(),
+            2
+        );
+        assert!(!result
+            .facts
+            .iter()
+            .any(|f| f.kind == "attribute_annotation" && f.line >= 8));
+    }
+
+    #[test]
+    fn base_and_assignment_annotations_reject_unreviewed_and_hidden_forms() {
+        for base in [
+            "factory()",
+            "T[A]",
+            "'literal'",
+            "None",
+            "...",
+            "1",
+            "(A,B)",
+            "A+B",
+            "*bases",
+            "**options",
+            "metaclass=Meta",
+            "A, metaclass=Meta",
+            "A, *bases",
+            "A, factory()",
+        ] {
+            let result = candidates(format!("eval()\nclass Plain({base}): pass\n"));
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{base}"
+            );
+            assert_eq!(result.facts.len(), 1, "{base}");
+            assert!(result.diagnostics.is_empty(), "{base}");
+        }
+        for annotation in [
+            "factory()",
+            "A | B",
+            "1",
+            "True",
+            "b'text'",
+            "-1",
+            "A+B",
+            "(A,B)",
+            "T[A][B]",
+            "T[factory()]",
+            "T[A, factory()]",
+            "T[A | B]",
+            "lambda: A",
+        ] {
+            let result = candidates(format!(
+                "eval()\nclass Plain:\n    field: {annotation} = helper()\n"
+            ));
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{annotation}"
+            );
+            assert_eq!(result.facts.len(), 1, "{annotation}");
+            assert!(result.diagnostics.is_empty(), "{annotation}");
+        }
+        for target in [
+            "(x)",
+            "(self.member)",
+            "other.member",
+            "x[0]",
+            "x,y",
+            "self.router",
+            "self.prefix",
+            "cls.router.child",
+            "self.field.router.child",
+        ] {
+            for suffix in [": T", ": T = helper()"] {
+                let result = candidates(format!("eval()\n{target}{suffix}\n"));
+                assert_ne!(
+                    result.files[0].status,
+                    CandidateStatus::AcceptedFacts,
+                    "{target}{suffix}"
+                );
+                assert_eq!(result.facts.len(), 1);
+                assert!(result.diagnostics.is_empty());
+            }
+        }
+        for statement in [
+            "x: T = y = z",
+            "x = y: T",
+            "x\n: T",
+            "x:\n T",
+            "x: T\n = value",
+            "x: T =\n value",
+            "class Plain(A,\n B): pass",
+            "class Plain((\n A)): pass",
+            "class Plain(A, # comment\n B): pass",
+        ] {
+            assert_ne!(
+                candidates(statement).files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{statement}"
+            );
+        }
+        for depth in [13, 30] {
+            let grouped = format!("{}factory(){}", "(".repeat(depth), ")".repeat(depth));
+            let annotation = format!(
+                "T[{},factory()]",
+                std::iter::repeat_n("A", 81).collect::<Vec<_>>().join(",")
+            );
+            for text in [
+                format!("class Plain({grouped}): pass"),
+                format!("x: {annotation}"),
+                format!("x: {}factory(){}", "T[".repeat(depth), "]".repeat(depth)),
+            ] {
+                assert_eq!(candidates(text).facts.len(), 1);
+            }
+        }
+        for value in [
+            "FastAPI()",
+            "pkg.APIRouter()",
+            "obj.include_router(x)",
+            "outer(FastAPI())",
+        ] {
+            assert_eq!(
+                candidates(format!("x: T = {value}")).files[0].status,
+                CandidateStatus::UnsupportedSyntax
+            );
+        }
+        let long_target = format!("self.{}.router.child", "a".repeat(600));
+        assert_eq!(
+            candidates(format!("{long_target}: T\n")).files[0].status,
+            CandidateStatus::UnsupportedSyntax
+        );
+        for value in ["pkg.APIRouter()", "obj.include_router(x)"] {
+            let values = std::iter::repeat_n("item", 81)
+                .collect::<Vec<_>>()
+                .join(",");
+            assert_eq!(
+                candidates(format!("x: T = outer({values}, {value})\n")).files[0].status,
+                CandidateStatus::UnsupportedSyntax
+            );
+        }
+        for import in [
+            "from fastapi import APIRouter as Router",
+            "from pkg import FastAPI as Host",
+        ] {
+            assert_eq!(
+                candidates(format!("{import}\nx: T = helper()\n")).files[0].status,
+                CandidateStatus::UnsupportedSyntax
+            );
+        }
+        let callee = format!("{}.APIRouter{}", "a".repeat(502), "z".repeat(100));
+        assert_eq!(
+            candidates(format!("x: T = {callee}()\n")).files[0].status,
+            CandidateStatus::UnsupportedSyntax
+        );
+    }
+
+    #[test]
+    fn policy8_resources_cancellation_and_walk_counters_remain_shared() {
+        let sources = [source("a.py", "a", "class Plain(Base, (pkg.Other),):\n    field: T[A] = outer(eval(), inner())\n    only: None\n")];
+        let mut parses = 0;
+        let mut collections = 0;
+        let full = extract(
+            &sources,
+            Limits::default(),
+            FactLimits::default(),
+            |phase| {
+                parses += usize::from(phase == Checkpoint::PostParse);
+                collections += usize::from(phase == Checkpoint::Collector);
+                false
+            },
+        )
+        .unwrap();
+        assert_eq!(parses, 1);
+        assert_eq!(full.files[0].status, CandidateStatus::AcceptedFacts);
+        let parsed = parse_batch(&sources).unwrap();
+        assert_eq!(full.files[0].nodes_visited, parsed.files[0].nodes_visited);
+        assert_eq!(full.files[0].max_depth, parsed.files[0].max_depth);
+        assert!(full.files[0].traversal_finished);
+        for stop in [1, collections / 2, collections] {
+            let mut visits = 0;
+            let result = extract(
+                &sources,
+                Limits::default(),
+                FactLimits::default(),
+                |phase| {
+                    visits += usize::from(phase == Checkpoint::Collector);
+                    visits == stop
+                },
+            )
+            .unwrap();
+            assert_eq!(result.files[0].status, CandidateStatus::ResourceLimit);
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+        for (limits, diagnostic) in [
+            (
+                FactLimits {
+                    count: full.facts.len() - 1,
+                    ..FactLimits::default()
+                },
+                CandidateDiagnostic::FactLimit,
+            ),
+            (
+                FactLimits {
+                    warnings: 0,
+                    ..FactLimits::default()
+                },
+                CandidateDiagnostic::WarningLimit,
+            ),
+            (
+                FactLimits {
+                    working: 1024,
+                    ..FactLimits::default()
+                },
+                CandidateDiagnostic::WorkingLimit,
+            ),
+            (
+                FactLimits {
+                    bytes: serde_json::to_vec(&full).unwrap().len() - 1,
+                    ..FactLimits::default()
+                },
+                CandidateDiagnostic::OutputLimit,
+            ),
+        ] {
+            let result = extract(&sources, Limits::default(), limits, |_| false).unwrap();
+            assert_eq!(result.files[0].diagnostic, Some(diagnostic));
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+        for limits in [
+            Limits {
+                nodes: parsed.files[0].nodes_visited - 1,
+                ..Limits::default()
+            },
+            Limits {
+                depth: parsed.files[0].max_depth - 1,
+                ..Limits::default()
+            },
+        ] {
+            let result = extract(&sources, limits, FactLimits::default(), |_| false).unwrap();
+            assert_eq!(result.files[0].status, CandidateStatus::ResourceLimit);
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn policy8_long_names_limits_replay_and_failed_files_stay_independent() {
+        let name = "a".repeat(6000);
+        let text = format!("class {name}(({name}),):\n    {name}: T['private'] = value\n");
+        let result = accepted(&text);
+        assert_eq!(
+            result.files[0].sha256,
+            super::super::super::hash(text.as_bytes())
+        );
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "base" && f.value == "a".repeat(512)));
+        assert!(result.facts.iter().any(
+            |f| f.kind == "attribute_annotation" && f.symbol == format!("sample.{name}.{name}")
+        ));
+        assert_eq!(result.facts, accepted(text.as_bytes()).facts);
+        let sources = [
+            source("a.py", "a", &text),
+            source("b.py", "b", "class Plain(Base):\n    field: T\n"),
+        ];
+        let limited = extract(
+            &sources,
+            Limits::default(),
+            FactLimits {
+                working: 32_000,
+                ..FactLimits::default()
+            },
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(
+            limited.files[0].diagnostic,
+            Some(CandidateDiagnostic::WorkingLimit)
+        );
+        assert_eq!(limited.files[1].status, CandidateStatus::AcceptedFacts);
+        for bad in [
+            "eval()\nclass Bad(factory()): pass\n",
+            "eval()\nx: T[factory()]\n",
+            "eval()\nx: T\ndef broken(:\n",
+        ] {
+            let sources = [
+                source("a.py", "a", bad),
+                source("b.py", "b", "class Plain(Base):\n    field: T\n"),
+            ];
+            let result = extract_fact_candidates(&sources).unwrap();
+            assert_ne!(result.files[0].status, CandidateStatus::AcceptedFacts);
+            assert_eq!(result.files[1].status, CandidateStatus::AcceptedFacts);
+            assert_eq!(result.facts.iter().filter(|f| f.path == "a.py").count(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+        let sources = [source("a.py", "a", "x: T[factory()]\ndef broken(:\n")];
+        let result = extract_fact_candidates(&sources).unwrap();
+        assert_eq!(result.files[0].status, CandidateStatus::SyntaxError);
+        let result = extract(
+            &sources,
+            Limits {
+                nodes: 3,
+                ..Limits::default()
+            },
+            FactLimits::default(),
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(result.files[0].status, CandidateStatus::ResourceLimit);
+    }
+
+    #[test]
+    fn plain_classes_have_raw_names_exact_ids_and_narrow_inline_suites() {
+        for header in ["class Plain:", "class Plain():", "class Plain (  ) :"] {
+            for suite in [
+                "pass",
+                "'documentation'",
+                "ordinary()",
+                "value = item",
+                "value = 1",
+            ] {
+                let text = format!("{header} {suite}\n# trailing\n");
+                let result = accepted(&text);
+                let class = result.facts.iter().find(|f| f.kind == "class").unwrap();
+                assert_eq!((class.line, class.end_line), (1, 1));
+                assert_eq!(class.symbol, "sample.Plain");
+                assert_eq!(class.value, "Plain");
+                assert_eq!(
+                    class.id,
+                    format!(
+                        "fact_{}",
+                        super::super::super::hash(
+                            br#"["sample.py", "class", 1, 1, "sample.Plain", "Plain"]"#
+                        )
+                    )
+                );
+                assert!(result.facts.iter().all(|f| matches!(
+                    f.kind.as_str(),
+                    "module" | "class" | "call" | "binding" | "binding_invalidation"
+                )));
+                assert_eq!(
+                    result.facts,
+                    accepted(format!("\u{feff}{}", text.replace('\n', "\r\n"))).facts
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn class_methods_reuse_function_signatures_and_plain_assignment_facts() {
+        let result = accepted(concat!(
+            "class Plain:\n",
+            "    value = item\n",
+            "    def __init__(self, x: Kind = None):\n",
+            "        self.value = x\n",
+            "    async def run(self, /, *args, flag=True, **kwargs) -> Kind:\n",
+            "        return send(self.value)\n",
+            "    def no_receiver(): return ordinary()\n",
+        ));
+        for (symbol, kind, line, end) in [
+            ("sample.Plain", "class", 1, 7),
+            ("sample.Plain.__init__", "function", 3, 4),
+            ("sample.Plain.run", "async_function", 5, 6),
+            ("sample.Plain.no_receiver", "function", 7, 7),
+        ] {
+            let fact = result
+                .facts
+                .iter()
+                .find(|f| f.kind == kind && f.symbol == symbol)
+                .unwrap();
+            assert_eq!((fact.line, fact.end_line), (line, end));
+        }
+        let signatures: Vec<_> = result
+            .facts
+            .iter()
+            .filter(|f| f.kind == "signature")
+            .collect();
+        assert_eq!(signatures.len(), 3);
+        for (name, expected) in [
+            (
+                "__init__",
+                serde_json::json!({"keywordOnly": [], "positional": ["self", "x"], "positionalOnly": 0}),
+            ),
+            (
+                "run",
+                serde_json::json!({"keywordOnly": ["flag"], "kwarg": "kwargs", "positional": ["self"], "positionalOnly": 1, "vararg": "args"}),
+            ),
+            (
+                "no_receiver",
+                serde_json::json!({"keywordOnly": [], "positional": [], "positionalOnly": 0}),
+            ),
+        ] {
+            let signature = signatures
+                .iter()
+                .find(|f| f.symbol == format!("sample.Plain.{name}"))
+                .unwrap();
+            let metadata: serde_json::Value = serde_json::from_str(&signature.value).unwrap();
+            assert_eq!(metadata, expected);
+            let declaration = result
+                .facts
+                .iter()
+                .find(|f| {
+                    f.symbol == signature.symbol
+                        && matches!(f.kind.as_str(), "function" | "async_function")
+                })
+                .unwrap();
+            assert_eq!(
+                (signature.line, signature.end_line),
+                (declaration.line, declaration.end_line)
+            );
+        }
+        assert!(result.facts.iter().any(|f| f.kind == "binding"
+            && f.symbol == "sample.Plain"
+            && f.value == r#"{"source":"item","target":"value"}"#));
+        assert!(result.facts.iter().any(|f| f.kind == "binding"
+            && f.symbol == "sample.Plain.__init__"
+            && f.value == r#"{"source":"x","target":"self.value"}"#));
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "parameter_annotation" && f.symbol == "sample.Plain.__init__.x"));
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "return_annotation" && f.symbol == "sample.Plain.run"));
+        assert!(result.facts.iter().all(|f| !matches!(
+            f.kind.as_str(),
+            "method" | "attribute" | "constructor" | "class_signature"
+        )));
+    }
+
+    #[test]
+    fn mixed_definitions_own_calls_bindings_imports_headers_and_spans() {
+        let result = accepted(concat!(
+            "def outer():\n",                                           // 1
+            "    class Plain:\n",                                       // 2
+            "        value = make()\n",                                 // 3
+            "        def method(self, x=1):\n",                         // 4
+            "            class Inner:\n",                               // 5
+            "                ordinary()\n",                             // 6
+            "                class Leaf:\n",                            // 7
+            "                    async def work(arg: Kind) -> Kind:\n", // 8
+            "                        def nested():\n",                  // 9
+            "                            from pkg import (\n",          // 10
+            "                                item,\n",                  // 11
+            "                            )\n",                          // 12
+            "                            # trailing nested\n",
+            "# trailing module\n",
+        ));
+        let names = [
+            ("outer", "function", 1),
+            ("outer.Plain", "class", 2),
+            ("outer.Plain.method", "function", 4),
+            ("outer.Plain.method.Inner", "class", 5),
+            ("outer.Plain.method.Inner.Leaf", "class", 7),
+            ("outer.Plain.method.Inner.Leaf.work", "async_function", 8),
+            ("outer.Plain.method.Inner.Leaf.work.nested", "function", 9),
+        ];
+        for (name, kind, line) in names {
+            let fact = result
+                .facts
+                .iter()
+                .find(|f| f.kind == kind && f.symbol == format!("sample.{name}"))
+                .unwrap();
+            assert_eq!((fact.line, fact.end_line), (line, 12), "{name}");
+            assert_eq!(fact.value, name.rsplit('.').next().unwrap());
+        }
+        for (kind, line, end, symbol) in [
+            ("call", 3, 3, "sample.outer.Plain"),
+            ("binding", 3, 3, "sample.outer.Plain"),
+            ("call", 6, 6, "sample.outer.Plain.method.Inner"),
+            ("parameter_default", 4, 4, "sample.outer.Plain.method.x"),
+            (
+                "parameter_annotation",
+                8,
+                8,
+                "sample.outer.Plain.method.Inner.Leaf.work.arg",
+            ),
+            (
+                "from_import",
+                10,
+                12,
+                "sample.outer.Plain.method.Inner.Leaf.work.nested",
+            ),
+        ] {
+            assert!(
+                result.facts.iter().any(|f| f.kind == kind
+                    && f.symbol == symbol
+                    && f.line == line
+                    && f.end_line == end),
+                "{kind}: {result:?}"
+            );
+        }
+        assert_eq!(
+            result
+                .facts
+                .iter()
+                .filter(|f| f.kind == "signature")
+                .count(),
+            4
+        );
+    }
+
+    #[test]
+    fn class_spans_end_at_evidence_neutral_statements_and_nested_declarations() {
+        for (tail, end) in [
+            ("    pass\n", 4),
+            ("    '''first\nlast'''\n", 5),
+            ("    import pkg\n", 4),
+            ("    from pkg import (\n        item,\n    )\n", 6),
+            ("    class Nested: pass\n", 4),
+            ("    def method(): pass\n", 4),
+        ] {
+            let result = accepted(format!(
+                "def outer():\n    class Plain:\n        pass\n{}    # trailing\n# final\n",
+                tail.lines()
+                    .map(|line| format!("    {line}\n"))
+                    .collect::<String>()
+            ));
+            for symbol in ["sample.outer", "sample.outer.Plain"] {
+                let fact = result
+                    .facts
+                    .iter()
+                    .find(|f| f.symbol == symbol && matches!(f.kind.as_str(), "function" | "class"))
+                    .unwrap();
+                assert_eq!(fact.end_line, end, "{tail}: {result:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn class_alias_scopes_are_persistent_kind_agnostic_lexical_names() {
+        let text = concat!(
+            "from root import eval as go\n",          // 1
+            "class Same:\n",                          // 2
+            "    from local import exec as go\n",     // 3
+            "    class Child:\n",                     // 4
+            "        from deep import eval as go\n",  // 5
+            "def Same(go):\n",                        // 6
+            "    go = None\n",                        // 7
+            "    go()\n",                             // 8
+            "    def Child():\n",                     // 9
+            "        go()\n",                         // 10
+            "class Same:\n",                          // 11
+            "    from .safe import ordinary as go\n", // 12
+            "    def method(go):\n",                  // 13
+            "        go()\n",                         // 14
+            "go()\n",                                 // 15
+        );
+        for module in ["sample", "", "odd.Same.Child", "odd..Same."] {
+            let sources = [
+                source("a.py", module, text),
+                source("b.py", module, "class Same:\n    def Child(): go()\n"),
+            ];
+            let result = extract_fact_candidates(&sources).unwrap();
+            assert!(
+                result
+                    .files
+                    .iter()
+                    .all(|f| f.status == CandidateStatus::AcceptedFacts),
+                "{result:?}"
+            );
+            assert_eq!(
+                warning_messages(&result),
+                [
+                    warning(10, "deep.eval"),
+                    warning(14, "local.exec"),
+                    warning(15, "root.eval"),
+                    warning(8, "local.exec"),
+                ]
+            );
+            assert!(result.diagnostics.iter().all(|d| d.path == "a.py"));
+        }
+    }
+
+    #[test]
+    fn class_policy_rejects_header_extensions_returns_and_special_metadata() {
+        for text in [
+            "class Hidden(Base()): pass",
+            "class Hidden(object[T]): pass",
+            "class Hidden(metaclass=Meta): pass",
+            "class Hidden(*bases): pass",
+            "class Hidden(**options): pass",
+            "class Hidden(factory()): pass",
+            "class Hidden[T]: pass",
+            "@decorate\nclass Hidden: pass",
+            "class Hidden(\n): pass",
+            "class Hidden( # comment\n): pass",
+            "class Hidden(\r\n): pass",
+            "class Hidden \\\n(): pass",
+            "class Hidden:\n    @decorate\n    def method(): pass",
+            "class Hidden:\n    value: Kind | Other = item",
+            "class Hidden:\n    value: Kind()",
+            "class Hidden: import pkg",
+            "class Hidden: pass; ordinary()",
+            "class Hidden: def method(): pass",
+            "class Hidden:\n\tpass",
+            "class Hidden:\n    from pkg import FastAPI as unused",
+            "class Hidden:\n    import APIRouter as unused",
+            "class Hidden:\n    FastAPI()",
+            "class Hidden:\n    pkg.APIRouter()",
+            "class Hidden:\n    obj.include_router()",
+            "class Hidden:\n    obj.include_router(router)",
+            "class Hidden:\n    router.prefix = '/path'",
+            "class Hidden:\n    def method(self):\n        self.router = item",
+        ] {
+            let result = candidates(format!("eval()\n{text}\n"));
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{text}"
+            );
+            assert_eq!(result.facts.len(), 1, "{text}");
+            assert!(result.diagnostics.is_empty(), "{text}");
+        }
+        for text in [
+            "class Hidden: return",
+            "class Hidden: return ordinary()",
+            "def outer():\n    class Hidden:\n        return ordinary()",
+            "async def outer():\n    class Hidden:\n        return",
+            "class Hidden:\n    def method(): pass\n    return",
+        ] {
+            let result = candidates(format!("eval()\n{text}\n"));
+            assert_eq!(
+                result.files[0].status,
+                CandidateStatus::UnsupportedSyntax,
+                "{text}"
+            );
+            assert_eq!(result.facts.len(), 1, "{text}");
+            assert!(result.diagnostics.is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn class_only_depth_boundary_has_no_signatures_and_is_file_local() {
+        let mut text = String::new();
+        for depth in 0..16 {
+            text.push_str(&format!("{}class C{depth}:\n", " ".repeat(depth)));
+        }
+        text.push_str(&format!("{}pass\n", " ".repeat(16)));
+        let sources = [
+            source("a.py", "a", &text),
+            source("b.py", "b", "class Plain: pass\n"),
+        ];
+        let parsed = parse_batch(&sources).unwrap();
+        let depth = parsed.files[0].max_depth;
+        assert!(depth > parsed.files[1].max_depth);
+        for (limit, accepted) in [(depth - 1, false), (depth, true)] {
+            let mut signatures = 0;
+            let result = extract(
+                &sources,
+                Limits {
+                    depth: limit,
+                    ..Limits::default()
+                },
+                FactLimits::default(),
+                |phase| {
+                    signatures += usize::from(phase == Checkpoint::Signature);
+                    false
+                },
+            )
+            .unwrap();
+            assert_eq!(signatures, 0);
+            assert_eq!(
+                result.files[0].status == CandidateStatus::AcceptedFacts,
+                accepted
+            );
+            assert_eq!(result.files[1].status, CandidateStatus::AcceptedFacts);
+            assert_eq!(
+                result
+                    .facts
+                    .iter()
+                    .filter(|f| f.path == "a.py" && f.kind == "class")
+                    .count(),
+                if accepted { 16 } else { 0 }
+            );
+            assert!(result.diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn class_resources_charge_frames_symbols_and_persistent_scopes_without_signatures() {
+        let sources = [source("a.py", "a", "class Plain: pass\n")];
+        let mut signatures = 0;
+        let result = extract(
+            &sources,
+            Limits::default(),
+            FactLimits {
+                working: 16_000,
+                ..FactLimits::default()
+            },
+            |phase| {
+                signatures += usize::from(phase == Checkpoint::Signature);
+                false
+            },
+        )
+        .unwrap();
+        assert_eq!(result.files[0].status, CandidateStatus::AcceptedFacts);
+        assert_eq!(signatures, 0);
+
+        let target = format!("{}.ordinary", "p".repeat(2000));
+        for distinct in [false, true] {
+            let text = (0..100)
+                .map(|i| {
+                    format!(
+                        "class C{}:\n    import {target} as go\n",
+                        if distinct { i } else { 0 }
+                    )
+                })
+                .collect::<String>();
+            let sources = [
+                source("a.py", "a", text),
+                source("b.py", "b", "class C0: go()\n"),
+            ];
+            let result = extract(
+                &sources,
+                Limits::default(),
+                FactLimits {
+                    working: 80_000,
+                    ..FactLimits::default()
+                },
+                |_| false,
+            )
+            .unwrap();
+            assert_eq!(
+                result.files[0].status,
+                if distinct {
+                    CandidateStatus::ResourceLimit
+                } else {
+                    CandidateStatus::AcceptedFacts
+                },
+                "{result:?}"
+            );
+            if distinct {
+                assert_eq!(
+                    result.files[0].diagnostic,
+                    Some(CandidateDiagnostic::WorkingLimit)
+                );
+            }
+            assert_eq!(result.files[1].status, CandidateStatus::AcceptedFacts);
+            assert!(result.diagnostics.is_empty());
+        }
+
+        let depth = 30;
+        let mut text = format!("class {}:\n", "x".repeat(9000));
+        for level in 1..depth {
+            text.push_str(&format!(
+                "{}{}\n",
+                " ".repeat(level),
+                if level % 2 == 0 {
+                    "class Nested:"
+                } else {
+                    "def nested():"
+                }
+            ));
+        }
+        text.push_str(&format!("{}pass\n", " ".repeat(depth)));
+        let sources = [
+            source("a.py", "a", text),
+            source("b.py", "b", "class Plain: pass\n"),
+        ];
+        let mut frames = 0;
+        let result = extract(
+            &sources,
+            Limits::default(),
+            FactLimits {
+                working: 90_000,
+                ..FactLimits::default()
+            },
+            |phase| {
+                frames += usize::from(phase == Checkpoint::FunctionFrame);
+                false
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            result.files[0].diagnostic,
+            Some(CandidateDiagnostic::WorkingLimit)
+        );
+        assert!(frames > 2 && frames < depth);
+        assert_eq!(result.files[1].status, CandidateStatus::AcceptedFacts);
+
+        let sources = [source(
+            "a.py",
+            "a",
+            "class Plain:\n    eval()\n    exec()\n",
+        )];
+        let full = extract_fact_candidates(&sources).unwrap();
+        for (limits, diagnostic) in [
+            (
+                FactLimits {
+                    count: 2,
+                    ..FactLimits::default()
+                },
+                CandidateDiagnostic::FactLimit,
+            ),
+            (
+                FactLimits {
+                    warnings: 1,
+                    ..FactLimits::default()
+                },
+                CandidateDiagnostic::WarningLimit,
+            ),
+            (
+                FactLimits {
+                    working: 1,
+                    ..FactLimits::default()
+                },
+                CandidateDiagnostic::WorkingLimit,
+            ),
+            (
+                FactLimits {
+                    bytes: serde_json::to_vec(&full).unwrap().len() - 1,
+                    ..FactLimits::default()
+                },
+                CandidateDiagnostic::OutputLimit,
+            ),
+        ] {
+            let result = extract(&sources, Limits::default(), limits, |_| false).unwrap();
+            assert_eq!(result.files[0].diagnostic, Some(diagnostic));
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn class_candidates_share_single_parse_walk_cancellation_and_file_isolation() {
+        let sources = [
+            source("a.py", "a", "class Plain:\n    from pkg import eval as go\n    def method(self):\n        class Nested:\n            go()\n"),
+            source("b.py", "b", "class Plain:\n    def method(): go()\n"),
+        ];
+        let checkpoints = [
+            Checkpoint::Collector,
+            Checkpoint::Working,
+            Checkpoint::FunctionFrame,
+        ];
+        let mut totals = [0; 3];
+        let mut parses = 0;
+        let full = extract(
+            &sources,
+            Limits::default(),
+            FactLimits::default(),
+            |phase| {
+                parses += usize::from(phase == Checkpoint::PostParse);
+                for (i, point) in checkpoints.iter().enumerate() {
+                    totals[i] += usize::from(phase == *point);
+                }
+                false
+            },
+        )
+        .unwrap();
+        assert_eq!(parses, sources.len());
+        assert!(full
+            .files
+            .iter()
+            .all(|f| f.status == CandidateStatus::AcceptedFacts));
+        assert_eq!(warning_messages(&full), [warning(5, "pkg.eval")]);
+        let parsed = parse_batch(&sources).unwrap();
+        for (file, parsed) in full.files.iter().zip(&parsed.files) {
+            assert!(file.traversal_finished);
+            assert_eq!(file.nodes_visited, parsed.nodes_visited);
+            assert_eq!(file.max_depth, parsed.max_depth);
+        }
+        for (i, point) in checkpoints.iter().enumerate() {
+            for stop in 1..=totals[i] {
+                let mut visits = 0;
+                let result = extract(
+                    &sources,
+                    Limits::default(),
+                    FactLimits::default(),
+                    |phase| {
+                        visits += usize::from(phase == *point);
+                        visits == stop
+                    },
+                )
+                .unwrap();
+                assert!(result.diagnostics.is_empty(), "{point:?} {stop}");
+                assert_eq!(result.facts.len(), sources.len(), "{point:?} {stop}");
+                assert!(result.facts.iter().all(|f| f.kind == "module"));
+                assert!(result
+                    .files
+                    .iter()
+                    .all(|f| f.diagnostic
+                        == Some(CandidateDiagnostic::Parse(DiagnosticCode::Deadline))));
+            }
+        }
+        let result = extract(
+            &sources,
+            Limits {
+                nodes: parsed.files[0].nodes_visited - 1,
+                ..Limits::default()
+            },
+            FactLimits::default(),
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(result.files[0].status, CandidateStatus::ResourceLimit);
+        assert_eq!(result.files[1].status, CandidateStatus::AcceptedFacts);
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
     fn dynamic_warnings_keep_duplicates_and_sort_globally_as_text() {
         let sources = [
             source("z.py", "z", "eval()\n"),
@@ -2408,7 +3743,7 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(result.identity.policy, "python-native-private-facts-6");
+        assert_eq!(result.identity.policy, "python-native-private-facts-8");
     }
 
     #[test]
@@ -2774,7 +4109,11 @@ mod tests {
         // constants. The same warnings fit again only if discarded text is freed
         // and existing vector slots are reused without being charged twice.
         let sources = [
-            source("a.py", "a", format!("{calls}class Unsupported: pass\n")),
+            source(
+                "a.py",
+                "a",
+                format!("{calls}class Unsupported(metaclass=Meta): pass\n"),
+            ),
             source("b.py", "b", &calls),
         ];
         let result = extract(
@@ -2797,7 +4136,11 @@ mod tests {
         // retained warning-vector capacity. Capacity must stay charged even
         // though no warning text or records remain after rollback.
         let sources = [
-            source("a.py", "a", format!("{calls}class Unsupported: pass\n")),
+            source(
+                "a.py",
+                "a",
+                format!("{calls}class Unsupported(metaclass=Meta): pass\n"),
+            ),
             source("b.py", "b", "def f(): pass\n"),
         ];
         let result = extract(
@@ -3097,7 +4440,7 @@ mod tests {
             assert!(result.facts.iter().all(|f| f.kind == "module"));
         }
         for suffix in [
-            "class Unsupported: pass",
+            "class Unsupported(Base()): pass",
             "def broken(: pass",
             "from pkg import FastAPI",
         ] {
@@ -4256,7 +5599,7 @@ mod tests {
             "def f(x: call()): pass",
             "def f() -> call(): pass",
             "@wrap\ndef f(): pass",
-            "class C: pass",
+            "class C(Base()): pass",
             "import sys,",
             "from x import *",
             "def \u{212a}(): pass",
@@ -4561,7 +5904,7 @@ mod tests {
         for text in [
             "return",
             "return x",
-            "x: T = helper()",
+            "x: T | U = helper()",
             "x += helper()",
             "del x",
             "x=y=z",
@@ -5072,7 +6415,7 @@ mod tests {
     #[test]
     fn isolation_global_dedup_order_and_determinism() {
         let sources = [
-            source("z.py", "z", "def f(): pass\nclass C: pass"),
+            source("z.py", "z", "def f(): pass\nclass C(Base()): pass"),
             source("a.py", "a", "def f(z, y): pass\n"),
         ];
         let result = extract_fact_candidates(&sources).unwrap();
@@ -5318,7 +6661,7 @@ mod tests {
 
     #[test]
     fn later_syntax_and_resource_errors_override_unsupported() {
-        let sources = [source("a.py", "a", "class C: pass\ndef broken(:\n")];
+        let sources = [source("a.py", "a", "class C(Base()): pass\ndef broken(:\n")];
         let result = extract_fact_candidates(&sources).unwrap();
         assert_eq!(result.files[0].status, CandidateStatus::SyntaxError);
         let result = extract(

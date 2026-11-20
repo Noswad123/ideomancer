@@ -3,6 +3,8 @@ use super::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Mode {
+    Base,
+    AssignmentAnnotation,
     Annotation,
     Default,
     Return,
@@ -77,7 +79,10 @@ impl Expression {
     pub(super) const RENDER_WORK: usize = 16 * 512;
 
     pub(super) fn new(mode: Mode, start: usize) -> Self {
-        let base_depth = usize::from(matches!(mode, Mode::Annotation | Mode::Default));
+        let base_depth = usize::from(matches!(
+            mode,
+            Mode::Base | Mode::Annotation | Mode::Default
+        ));
         Self {
             mode,
             working: 0,
@@ -322,6 +327,7 @@ impl Expression {
                     let e = &self.entries[i];
                     if e.class != Class::Ignore
                         && !annotation(e.class)
+                        && !(self.mode == Mode::AssignmentAnnotation && e.class == Class::Tuple)
                         && !(kind == "type_parameter"
                             && count == 1
                             && !comma
@@ -423,7 +429,9 @@ impl Expression {
                 return Err(());
             }
             let class = self.entries[index].class;
-            let valid = if self.mode == Mode::BodyValue {
+            let valid = if self.mode == Mode::Base {
+                class == Class::Reference
+            } else if self.mode == Mode::BodyValue {
                 self.body_value(index)
             } else if self.mode == Mode::AssignmentTarget {
                 self.valid_target(index, bytes, cancel)

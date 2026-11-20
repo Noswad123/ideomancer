@@ -877,6 +877,604 @@ fn assert_warning_candidates_match_ast(python: &Path, scan: &Scan) -> Value {
 
 #[test]
 #[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn base_annotation_candidate_bases_are_ordered_normalized_syntax_not_resolution() {
+    let python = oracle();
+    for text in [
+        "class Box(Base): pass\n",
+        "class Box(object): pass\n",
+        "class Box(pkg.Base, Other,): pass\n",
+        "class Box((pkg.Base), ((Other))): pass\n",
+        "def outer():\n    class Box(pkg.Base):\n        class Inner(Base): pass\n",
+        "from package import Base as B\nclass Box(B): pass\n",
+        "class Box: pass\nclass Box(Box): pass\n",
+    ] {
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        assert_declaration_candidates_match_ast(&python, &scan);
+    }
+    let (_, scan) = capture(&[("unit.py", b"class Box(z.Last, A, A): pass\n")]);
+    let native = assert_declaration_candidates_match_ast(&python, &scan);
+    assert_eq!(
+        native["facts"],
+        json!(expected(
+            "unit.py",
+            &[
+                (1, 1, "base", "unit.Box", "A"),
+                (1, 1, "base", "unit.Box", "z.Last"),
+                (1, 1, "class", "unit.Box", "Box"),
+                (1, 1, "module", "unit", "unit"),
+            ]
+        ))
+    );
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn base_annotation_candidate_annotation_only_is_not_a_write_or_type_proof() {
+    let python = oracle();
+    for text in [
+        "value: T\nself.value: T\ncls.value: T\n",
+        "def f():\n    value: T\n    self.value: T\n    cls.value: T\n",
+        "class Box:\n    field: T\n    self.member: T\n    cls.member: T\n    def run(self):\n        local: T\n        self.field: T\n",
+        "def outer():\n    class Box:\n        field: T\n        class Inner:\n            field: pkg.T\n    return\n",
+    ] {
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        let native = assert_declaration_candidates_match_ast(&python, &scan);
+        assert!(!native["facts"].as_array().unwrap().iter().any(|f| matches!(f["kind"].as_str(), Some("binding" | "binding_invalidation"))));
+    }
+    let (_, scan) = capture(&[("unit.py", b"class Box:\n    field: T = source\n")]);
+    let native = assert_declaration_candidates_match_ast(&python, &scan);
+    assert_eq!(
+        native["facts"],
+        json!(expected(
+            "unit.py",
+            &[
+                (1, 1, "module", "unit", "unit"),
+                (1, 2, "class", "unit.Box", "Box"),
+                (2, 2, "attribute_annotation", "unit.Box.field", "T"),
+                (
+                    2,
+                    2,
+                    "binding",
+                    "unit.Box",
+                    r#"{"source":"source","target":"field"}"#
+                ),
+            ]
+        ))
+    );
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn base_annotation_candidate_rhs_contexts_and_redaction_match_complete_ast() {
+    let python = oracle();
+    for annotation in [
+        "T",
+        "pkg.T",
+        "list[T]",
+        "dict[str, list[T]]",
+        "tuple[T, ...]",
+        "'PRIVATE_ANNOTATION_LITERAL'",
+        "None",
+        "...",
+    ] {
+        for rhs in [
+            "item",
+            "pkg.item",
+            "build(value)",
+            "None",
+            "-1",
+            "'PRIVATE_ANNOTATION_LITERAL'",
+        ] {
+            let text = format!("module: {annotation} = {rhs}\nclass Box(Base):\n    field: {annotation} = {rhs}\n    self.value: {annotation} = {rhs}\n    def run(self):\n        local: {annotation} = {rhs}\n        self.member: {annotation} = {rhs}\n        cls.member: {annotation} = {rhs}\n");
+            let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+            let native = assert_declaration_candidates_match_ast(&python, &scan);
+            assert!(!native.to_string().contains("PRIVATE_ANNOTATION_LITERAL"));
+            let annotations = native["facts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|f| f["kind"] == "attribute_annotation")
+                .collect::<Vec<_>>();
+            assert_eq!(annotations.len(), 1);
+            assert_eq!(annotations[0]["symbol"], "unit.Box.field");
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn base_annotation_candidate_whole_statement_and_normalized_call_spans_match_ast() {
+    let python = oracle();
+    for text in [
+        "class Box((pkg.Base), Other,):\n    field: (T)\n    # trailing\n",
+        "class Box(Base):\n    field: list[\n        tuple[T, ...]\n    ] = (\n        build(\n            value,\n        )\n    )\n    # trailing\n",
+        "class Box(Base):\n    field: (\n        pkg.T # annotation comment\n    ) = (\n        value\n    )\n",
+        "class Box(Base):\n    field: T[\n        (A, B)\n    ]\n",
+        "class Box(Base):\n    field: T[(A, (B, None))]\n",
+        "class Box(Base):\n    field: T[(A, (B, None))] = (\n        build()\n    )\n",
+        "class Box(Base):\n    def run(self):\n        self.field: (\n            T\n        ) = (\n            build()\n        )\n",
+        "class Box(Base): field: T = value\n",
+    ] {
+        for newline in ["\n", "\r\n"] {
+            let source = format!("\u{feff}{}", text.replace('\n', newline));
+            let (_, scan) = capture(&[("unit.py", source.as_bytes())]);
+            assert_declaration_candidates_match_ast(&python, &scan);
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn base_annotation_candidate_raw_field_names_and_shape_budgets_match_ast() {
+    let python = oracle();
+    for size in [511, 512, 513, 4096] {
+        let name = "f".repeat(size);
+        let text =
+            format!("class Box({name}):\n    {name}: pkg.T = value\n    self.{name}: T = None\n");
+        let (_, scan) = capture(&[("caf\u{e9}\u{1f642}.py", text.as_bytes())]);
+        let native = assert_declaration_candidates_match_ast(&python, &scan);
+        let facts = native["facts"].as_array().unwrap();
+        assert!(facts.iter().any(|f| f["kind"] == "attribute_annotation"
+            && f["symbol"].as_str().unwrap().ends_with(&name)));
+        let binding = facts.iter().find(|f| f["kind"] == "binding").unwrap();
+        let value: Value = serde_json::from_str(binding["value"].as_str().unwrap()).unwrap();
+        assert_eq!(value["target"].as_str().unwrap().len(), size.min(512));
+    }
+    for depth in [12, 13, 24] {
+        let annotation = format!("{}Item{}", "T[".repeat(depth), "]".repeat(depth));
+        let base = format!("{}Root", "pkg.".repeat(depth));
+        let text = format!("class Box({base}):\n    field: {annotation}\n");
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        assert_declaration_candidates_match_ast(&python, &scan);
+    }
+    for count in [16, 17, 79, 80, 81] {
+        let annotation = format!("T[{}]", ["Item"].repeat(count).join(","));
+        let bases = (0..count)
+            .map(|n| format!("Base{n}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let text = format!("class Box({bases}):\n    field: {annotation}\n");
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        assert_declaration_candidates_match_ast(&python, &scan);
+    }
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn base_annotation_candidate_writes_do_not_erase_dynamic_alias_warnings() {
+    let python = oracle();
+    for text in [
+        "from arbitrary import eval as load\nload: T\nload()\nload: T = None\nload()\n",
+        "class Box(Base):\n    from arbitrary import eval as load\n    load: T = value\n    load()\n    def run(load):\n        load: T\n        load()\n",
+        "from arbitrary import eval as load\nclass Box(Base):\n    field: T = outer(load(), load())\n    def run(self):\n        self.member: T = load()\n",
+        "from ordinary import safe as eval\nclass Box(Base):\n    field: T = eval()\n",
+        "class Same(Base):\n    from arbitrary import eval as load\ndef Same():\n    load: T = None\n    load()\n",
+    ] {
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        assert_warning_candidates_match_ast(&python, &scan);
+    }
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn base_annotation_candidate_unreviewed_and_metadata_trigger_forms_roll_back() {
+    use super::python_native::{extract_fact_candidates, CandidateStatus};
+    let python = oracle();
+    let mut forms = vec![
+        "class Box(factory()): pass".to_string(),
+        "class Box(T[U]): pass".into(),
+        "class Box(1): pass".into(),
+        "class Box((A, B)): pass".into(),
+        "class Box(A | B): pass".into(),
+        "class Box(*bases): pass".into(),
+        "class Box(metaclass=Meta): pass".into(),
+        "class Box[T](Base): pass".into(),
+        "class Box(\n Base,\n): pass".into(),
+        "@decorate\nclass Box(Base): pass".into(),
+        "class Box(Base):\n    field: mark()".into(),
+        "class Box(Base):\n    field: T[mark()]".into(),
+        "class Box(Base):\n    field: T | U".into(),
+        "class Box(Base):\n    field: 1".into(),
+        "class Box(Base):\n    field: (T, U)".into(),
+        "class Box(Base):\n    field: T[A][B]".into(),
+        "class Box(Base):\n    (field): T".into(),
+        "(self.field): T = value".into(),
+        "other.field: T = value".into(),
+        "values[0]: T = value".into(),
+        "class Box(Base):\n    field\n    : T".into(),
+        "class Box(Base):\n    field:\n        T".into(),
+        "class Box(Base):\n    field: T\n    = value".into(),
+        "class Box(Base):\n    field: T = FastAPI()".into(),
+        "class Box(Base):\n    field: T = host.include_router(child)".into(),
+        "self.router: T".into(),
+        "self.prefix: T".into(),
+        "cls.router.child: T".into(),
+        "class Box(Base):\n    self.router: T".into(),
+        "class Box(Base):\n    def run(self):\n        self.prefix: T".into(),
+    ];
+    forms.push(format!(
+        "class Box(Base):\n    field: T[{}, hidden()]\n",
+        ["Item"; 17].join(",")
+    ));
+    forms.push(format!(
+        "class Box(Base, {}hidden(){}): pass",
+        "(".repeat(15),
+        ")".repeat(15)
+    ));
+    for form in forms {
+        let text = format!("eval()\nclass Before: pass\n{form}\nclass After: pass\n");
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        let _ast = extract_captured(&python, &scan.sources).unwrap();
+        let native = extract_fact_candidates(&scan.sources).unwrap();
+        assert_ne!(
+            native.files[0].status,
+            CandidateStatus::AcceptedFacts,
+            "{form}"
+        );
+        assert_eq!(native.facts.len(), 1);
+        assert!(native.diagnostics.is_empty());
+    }
+    for newline in ["\n", "\r\n"] {
+        let text =
+            format!("eval(){newline}class Before: pass{newline}class Box( , ): pass{newline}");
+        let (_, scan) = capture(&[
+            ("a.py", text.as_bytes()),
+            ("b.py", b"class Good((pkg.Base),): pass\n"),
+        ]);
+        let ast = extract_captured(&python, &scan.sources).unwrap();
+        assert!(!ast.complete);
+        assert!(ast.diagnostics.iter().any(|d| d.path == "a.py"
+            && d.code == "parse_failure"
+            && d.message.starts_with("SyntaxError at line ")));
+        let native = extract_fact_candidates(&scan.sources).unwrap();
+        assert_eq!(native.files[0].status, CandidateStatus::UnsupportedSyntax);
+        assert_eq!(native.files[1].status, CandidateStatus::AcceptedFacts);
+        assert_eq!(native.facts.iter().filter(|f| f.path == "a.py").count(), 1);
+        assert!(native.diagnostics.is_empty());
+    }
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn base_annotation_candidate_replay_isolation_and_order_use_only_captured_bytes() {
+    use super::python_native::{extract_fact_candidates, CandidateStatus};
+    let python = oracle();
+    let (root, mut scan) = capture(&[
+        ("a.py", b"class Before(Base):\n    field: T = eval()\nclass Hidden(metaclass=Meta): pass\n"),
+        ("b.py", b"class Box(Base, pkg.Other):\n    field: list[T] = build()\n    def run(self):\n        self.member: T = None\n"),
+        ("c.py", b"from arbitrary import eval as load\nclass Box(Base):\n    field: T = load()\n"),
+    ]);
+    let native = extract_fact_candidates(&scan.sources).unwrap();
+    assert_eq!(native.files[0].status, CandidateStatus::UnsupportedSyntax);
+    let ast_good = extract_captured(&python, &scan.sources[1..]).unwrap();
+    assert!(ast_good.complete);
+    let mut wanted = expected("a.py", &[(1, 1, "module", "a", "a")]);
+    wanted.extend(
+        serde_json::to_value(&ast_good.facts)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .cloned(),
+    );
+    assert_eq!(serde_json::to_value(&native.facts).unwrap(), json!(wanted));
+    assert_eq!(
+        serde_json::to_value(&native.diagnostics).unwrap(),
+        serde_json::to_value(&ast_good.diagnostics).unwrap()
+    );
+    let first = serde_json::to_value(native).unwrap();
+    for path in ["a.py", "b.py", "c.py"] {
+        fs::remove_file(root.path().join(path)).unwrap();
+    }
+    assert_eq!(
+        first,
+        serde_json::to_value(extract_fact_candidates(&scan.sources).unwrap()).unwrap()
+    );
+    scan.sources.reverse();
+    let reversed = serde_json::to_value(extract_fact_candidates(&scan.sources).unwrap()).unwrap();
+    assert_eq!(first["facts"], reversed["facts"]);
+    assert_eq!(first["diagnostics"], reversed["diagnostics"]);
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn class_candidate_plain_declarations_and_methods_match_every_ast_fact() {
+    let python = oracle();
+    for text in [
+        "class Box: pass\n", "class Box(): pass\n", "class Box( ): pass\n",
+        "class Box:\n    'PRIVATE_CLASS_LITERAL'\n",
+        "class Box:\n    def run(self): pass\n",
+        "class Box:\n    async def run(cls): pass\n",
+        "class Worker:\n    def __init__(self, service):\n        self.service = service\n    def run(self):\n        return self.service.process()\n",
+        "class Box:\n    def run(): pass\n    def __init__(cls): pass\n",
+    ] {
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        let native = assert_declaration_candidates_match_ast(&python, &scan);
+        assert!(!native.to_string().contains("PRIVATE_CLASS_LITERAL"));
+        assert!(!native["facts"].as_array().unwrap().iter().any(|f| f["kind"] == "method"));
+    }
+    let (_, scan) = capture(&[("unit.py", b"class Box:\n    def run(self):\n        pass\n")]);
+    let native = assert_declaration_candidates_match_ast(&python, &scan);
+    assert_eq!(
+        native["facts"],
+        json!(expected(
+            "unit.py",
+            &[
+                (1, 1, "module", "unit", "unit"),
+                (1, 3, "class", "unit.Box", "Box"),
+                (2, 2, "parameter", "unit.Box.run.self", "self"),
+                (2, 3, "function", "unit.Box.run", "run"),
+                (
+                    2,
+                    3,
+                    "signature",
+                    "unit.Box.run",
+                    r#"{"keywordOnly":[],"positional":["self"],"positionalOnly":0}"#
+                ),
+            ]
+        ))
+    );
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn class_candidate_method_headers_and_long_metadata_preserve_ast_limits() {
+    let python = oracle();
+    for text in [
+        "class Box:\n    def run(self, value: package.Item=None, /, *rest: tuple[str, ...], required: T, optional: R=1, **opts: object) -> list[Result]:\n        return self.work(value)\n",
+        "class Box:\n    async def run(\n        self, value: T=1, /,\n        *, flag: bool=False,\n    ) -> Result:\n        pass\n",
+        "class Box:\n    def run(self, cls, /, *args, **kwargs):\n        cls.value = self.value\n",
+    ] {
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        assert_declaration_candidates_match_ast(&python, &scan);
+    }
+    for count in [128, 129] {
+        let parameters = (0..count)
+            .map(|n| format!("p{n}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let text = format!("class Box:\n    def run({parameters}): pass\n");
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        let native = assert_declaration_candidates_match_ast(&python, &scan);
+        let signature = native["facts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["kind"] == "signature")
+            .unwrap();
+        assert_eq!(signature["value"] == r#"{"truncated":true}"#, count > 128);
+    }
+    for size in [511, 512, 513, 4096] {
+        let name = "C".repeat(size);
+        let text = format!("class {name}:\n    def run(self):\n        self.work()\n");
+        let (_, mut scan) = capture(&[("caf\u{e9}\u{1f642}.py", text.as_bytes())]);
+        scan.sources[0].module = "odd.\u{7f}\n\"\\\u{1f642}".into();
+        let native = assert_declaration_candidates_match_ast(&python, &scan);
+        assert!(native["facts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["kind"] == "class" && f["value"] == name));
+    }
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn class_candidate_mixed_lexical_owners_and_class_writes_match_complete_ast() {
+    let python = oracle();
+    let text = concat!(
+        "def outer():\n",
+        "    class Box:\n",
+        "        import tools\n",
+        "        field = tools.build('PRIVATE_CLASS_LITERAL')\n",
+        "        peer = dependency\n",
+        "        enabled = None\n",
+        "        self.member = dependency\n",
+        "        tools.use(field)\n",
+        "        class Inner:\n",
+        "            local = work()\n",
+        "            def run(self):\n",
+        "                self.call()\n",
+        "                def nested():\n",
+        "                    class Local:\n",
+        "                        value = prepare()\n",
+        "                        def method(self):\n",
+        "                            return finish()\n",
+        "                    return create()\n",
+        "                return nested()\n",
+        "        final = complete()\n",
+        "    return after()\n",
+        "module_work()\n",
+    );
+    let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+    let native = assert_declaration_candidates_match_ast(&python, &scan);
+    assert!(!native.to_string().contains("PRIVATE_CLASS_LITERAL"));
+    let facts = native["facts"].as_array().unwrap();
+    for (line, owner) in [
+        (4, "unit.outer.Box"),
+        (8, "unit.outer.Box"),
+        (10, "unit.outer.Box.Inner"),
+        (12, "unit.outer.Box.Inner.run"),
+        (15, "unit.outer.Box.Inner.run.nested.Local"),
+        (17, "unit.outer.Box.Inner.run.nested.Local.method"),
+        (18, "unit.outer.Box.Inner.run.nested"),
+        (20, "unit.outer.Box"),
+        (21, "unit.outer"),
+        (22, "unit"),
+    ] {
+        assert!(
+            facts
+                .iter()
+                .any(|f| f["kind"] == "call" && f["line"] == line && f["symbol"] == owner),
+            "line {line}"
+        );
+    }
+    assert!(!facts.iter().any(|f| f["kind"] == "attribute_annotation"));
+    assert!(!facts
+        .iter()
+        .any(|f| f["kind"] == "signature" && f["symbol"] == "unit.outer.Box"));
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn class_candidate_statement_ends_comments_and_normalized_spans_match_ast() {
+    let python = oracle();
+    for text in [
+        "class Box(): # header comment\n\n    # before first statement\n    pass\n",
+        "class Box: '''PRIVATE_CLASS_LITERAL\nsecond line\nlast line''' # trailing\n# final\n",
+        "class Box:\n    pass\n    # trailing\n# outside\n",
+        "class Box:\n    'PRIVATE_CLASS_LITERAL'\n    # trailing\n",
+        "class Box:\n    value\n    # trailing\n",
+        "class Box:\n    class Inner:\n        def run(self):\n            return\n            # trailing method\n        # trailing inner\n    # trailing outer\n",
+        "class Box:\n    from .package import (\n        item,\n        # within pair\n    )\n    # trailing\n",
+        "class Box:\n    value = (\n        create(\n            'PRIVATE_CLASS_LITERAL',\n        )\n    )\n    # trailing\n",
+        "class Box:\n    def run(self): pass\n    final()\nclass Sibling:\n    pass\n",
+    ] {
+        for newline in ["\n", "\r\n"] {
+            let source = format!("\u{feff}{}", text.replace('\n', newline));
+            let (_, scan) = capture(&[("unit.py", source.as_bytes())]);
+            assert_declaration_candidates_match_ast(&python, &scan);
+        }
+    }
+    let (_, scan) = capture(&[("unit.py", b"def outer():\n    class Box:\n        from .pkg import (\n            item,\n        )\n        # trailing\n# final\n")]);
+    let native = assert_declaration_candidates_match_ast(&python, &scan);
+    for f in native["facts"].as_array().unwrap().iter().filter(|f| {
+        matches!(
+            f["kind"].as_str(),
+            Some("class" | "function" | "signature" | "from_import")
+        )
+    }) {
+        assert_eq!(f["endLine"], 5);
+    }
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn class_candidate_alias_prefixes_repeated_and_cross_kind_scopes_match_ast() {
+    let python = oracle();
+    for (text, count) in [
+        ("class Box:\n    from arbitrary import eval as load\n    def run(self):\n        load()\n", 1),
+        ("from arbitrary import eval as load\nclass Box:\n    from ordinary import safe as load\n    class Inner:\n        def run(self):\n            load()\ndef outside():\n    load()\n", 1),
+        ("def outer():\n    from arbitrary import eval as load\n    class Box:\n        def run(self):\n            load()\n", 1),
+        ("class Box:\n    def first(self):\n        from arbitrary import eval as load\n    def second(self):\n        load()\n", 0),
+        ("class Box:\n    from arbitrary import eval as load\nclass Box:\n    def run(load):\n        load = None\n        load()\n", 1),
+        ("class Box:\n    from arbitrary import eval as load\ndef Box():\n    load()\n", 1),
+        ("def Box():\n    from arbitrary import eval as load\nclass Box:\n    load()\n", 1),
+        ("class Box:\n    def run(self):\n        from arbitrary import eval as load\nclass Box:\n    async def run(self):\n        load()\n", 1),
+        ("class Box:\n    from arbitrary import eval as load\n    from .ordinary import safe as load\n    load()\nload()\n", 1),
+        ("from arbitrary import eval as load\nclass Parent:\n    from ordinary import safe as load\n    class First:\n        from arbitrary import exec as load\n        load()\n    load()\n    def second():\n        load()\n        from arbitrary import eval as load\n        load()\n    load()\n    class Third:\n        load()\nload()\n", 3),
+    ] {
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        let native = assert_warning_candidates_match_ast(&python, &scan);
+        assert_eq!(native["diagnostics"].as_array().unwrap().len(), count, "{text}");
+    }
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn class_candidate_excluded_headers_and_suite_returns_rollback_whole_files() {
+    use super::python_native::{extract_fact_candidates, CandidateStatus};
+    let python = oracle();
+    for unsupported in [
+        "class Box(Base[T]): pass",
+        "class Box(object()): pass",
+        "class Box(*bases): pass",
+        "class Box(metaclass=Meta): pass",
+        "class Box(**options): pass",
+        "class Box[T]: pass",
+        "class Box(factory()): pass",
+        "@decorate\nclass Box: pass",
+        "class Box:\n    @staticmethod\n    def run(): pass",
+        "class Box:\n    @classmethod\n    def run(cls): pass",
+        "class Box:\n    @property\n    def value(self): pass",
+        "class Box:\n    value: T | U",
+        "class Box:\n    value: T | U = build()",
+        "class Box:\n    def run(self):\n        self.value: T | U = value",
+        "class Box:\n    return work()",
+        "def outer():\n    class Box:\n        return work()",
+        "class Box:\n    def run(self):\n        class Local:\n            return work()",
+        "class Box:\n    app = FastAPI()",
+        "class Box:\n    from arbitrary import APIRouter as R",
+        "class Box:\n    self.router = value",
+        "class Box:\n    def run(self):\n        self.prefix = None",
+        "class Box:\n    host.include_router(child)",
+        "class Box:\n    if True: pass",
+        "class Box:\n    def run(self):\n        await work()",
+        "class Box(\n): pass",
+        "class\nBox: pass",
+        "class \\\nBox: pass",
+        "class Box: pass; work()",
+        "class Box:\n\tpass",
+        "class \u{212a}: pass",
+    ] {
+        let text = format!("eval()\nclass Before: pass\n{unsupported}\nclass After: pass\n");
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        let _ast = extract_captured(&python, &scan.sources).unwrap();
+        let native = extract_fact_candidates(&scan.sources).unwrap();
+        assert_ne!(
+            native.files[0].status,
+            CandidateStatus::AcceptedFacts,
+            "{unsupported}"
+        );
+        assert_eq!(
+            serde_json::to_value(&native.facts).unwrap(),
+            json!(expected("unit.py", &[(1, 1, "module", "unit", "unit")]))
+        );
+        assert!(native.diagnostics.is_empty());
+    }
+    // ast.parse is not compilation validation: class-suite return rejection is
+    // the candidate's deliberate function-only policy, not an AST syntax claim.
+    let (_, scan) = capture(&[(
+        "unit.py",
+        b"def outer():\n    class Box:\n        return work()\n",
+    )]);
+    assert!(extract_captured(&python, &scan.sources).unwrap().complete);
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn class_candidate_replay_transactions_and_source_order_preserve_complete_semantics() {
+    use super::python_native::{extract_fact_candidates, CandidateStatus};
+    let python = oracle();
+    let (root, mut scan) = capture(&[
+        ("a.py", b"class Before: pass\neval()\nclass Hidden(metaclass=Meta): pass\n"),
+        ("b.py", b"class Worker:\n    def __init__(self, service):\n        self.service = service\n    def run(self):\n        return self.service.process()\n"),
+        ("c.py", b"class Box:\n    from arbitrary import eval as load\n    def run(self):\n        load()\n"),
+    ]);
+    let native = extract_fact_candidates(&scan.sources).unwrap();
+    assert_eq!(native.files[0].status, CandidateStatus::UnsupportedSyntax);
+    let ast_good = extract_captured(&python, &scan.sources[1..]).unwrap();
+    assert!(ast_good.complete);
+    let mut wanted = expected("a.py", &[(1, 1, "module", "a", "a")]);
+    wanted.extend(
+        serde_json::to_value(&ast_good.facts)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .cloned(),
+    );
+    assert_eq!(serde_json::to_value(&native.facts).unwrap(), json!(wanted));
+    assert_eq!(
+        serde_json::to_value(&native.diagnostics).unwrap(),
+        serde_json::to_value(&ast_good.diagnostics).unwrap()
+    );
+    let first = serde_json::to_value(native).unwrap();
+    for path in ["a.py", "b.py", "c.py"] {
+        fs::remove_file(root.path().join(path)).unwrap();
+    }
+    assert_eq!(
+        first,
+        serde_json::to_value(extract_fact_candidates(&scan.sources).unwrap()).unwrap()
+    );
+    scan.sources.reverse();
+    let reversed = serde_json::to_value(extract_fact_candidates(&scan.sources).unwrap()).unwrap();
+    assert_eq!(first["facts"], reversed["facts"]);
+    assert_eq!(first["diagnostics"], reversed["diagnostics"]);
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
 fn alias_warning_candidate_direct_and_imported_terminals_match_complete_ast() {
     let python = oracle();
     for terminal in [
@@ -1065,7 +1663,7 @@ fn alias_warning_candidate_rejections_erase_pending_warnings_not_other_files() {
     use super::python_native::{extract_fact_candidates, CandidateStatus};
     let python = oracle();
     for suffix in [
-        "class Hidden: pass\n",
+        "class Hidden(metaclass=Meta): pass\n",
         "from arbitrary import FastAPI as factory\n",
         "FastAPI()\n",
         "other.include_router(child)\n",
@@ -1854,7 +2452,7 @@ fn declaration_candidate_unsupported_forms_never_leak_a_declaration_prefix() {
     let python = oracle();
     for unsupported in [
         "from tools import *\n",
-        "class Hidden:\n    pass\n",
+        "class Hidden(metaclass=Meta):\n    pass\n",
         "def f(a=build()): pass\n",
         "def f(a: marker()): pass\n",
         "def f() -> marker(): pass\n",
@@ -2390,7 +2988,7 @@ fn body_candidate_side_outputs_and_unmodeled_forms_reject_whole_files() {
         "self.prefix = None".into(),
         "cls.router.child = value".into(),
         "other.member = value".into(),
-        "x: T = value".into(),
+        "x: T | U = value".into(),
         "a = b = work()".into(),
         "a, b = work()".into(),
         "[a] = work()".into(),

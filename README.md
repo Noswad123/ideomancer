@@ -33,7 +33,8 @@ views and an external explicit-configuration consumer slice, in addition to the
 parser regressions and extracted-package checks. This is not blanket framework,
 runtime or release approval. See the [dated validation record](docs/javascript-typescript-analysis.md#validation-tooling).
 Python migration now has AST parity gates, a private captured-byte Tree-sitter
-front-end and native candidates for bounded headers, simple calls/writes and a
+front-end and native candidates for classes/methods, bounded named bases and attribute
+annotations, bounded headers, simple calls/writes and a
 conservative import subset, including parenthesized multiline `from` lists and
 alias-aware dynamic-discovery warnings. The trusted Python >=3.12
 AST helper remains the production default; a production native Python fact backend

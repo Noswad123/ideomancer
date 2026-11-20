@@ -55,7 +55,7 @@ of a manually curated responsibility-level diagram.
 ## Native migration parity foundation
 
 P1 has a **private captured-source AST parity harness**, a native parse-only
-front-end and bounded declaration/header/body/import-fact candidates, not a production native Python
+front-end and bounded class/function/header/body/import candidates, not a production native Python
 backend. The production helper, evidence v1 serialization,
 `python-static-8-generic-facts` identity, snapshot formula, scanner/module policy,
 redaction and resource limits remain unchanged. There is no new CLI flag, public
@@ -105,8 +105,15 @@ Eight alias-warning cases compare full ordered facts **and diagnostics**, includ
 direct/aliased dynamic calls, suppression/overwrite, persistent scope names,
 fresh-callee clipping, full targets, hidden calls, duplicate warnings, lexical sorting,
 transaction isolation, retained constructor exclusions and captured-byte replay.
+Seven class cases add plain declarations/methods, exact signatures, mixed lexical
+ownership, class-suite writes, closing spans, class-inclusive alias lookup, excluded
+header/return forms, transactions and replay. Comparisons retain every fact and warning.
+Eight base/assignment-annotation cases add ordered/deduplicated base syntax, direct
+class attribute annotations, annotation-only nonwrites, supported RHS contexts,
+whole-statement spans, unclipped field symbols, shape limits, alias warnings,
+metadata exclusions, malformed comma-only base lists, isolation and replay.
 
-All fifty oracle cases are **ignored in the ordinary suite**. Run the gate explicitly
+All sixty-five oracle cases are **ignored in the ordinary suite**. Run the gate explicitly
 with an absolute path to an installed, trusted Python >=3.12:
 
 ```sh
@@ -182,16 +189,22 @@ The accepted file subset is deliberately small:
 - Undecorated synchronous/asynchronous functions, including nested declarations,
   with bodies containing supported statements. Async declarations do not imply
   support for `await` or asynchronous execution analysis.
+- Plain undecorated classes with single-line `class Name:` or explicitly empty
+  `class Name():` headers, plus bounded named-reference bases, ordinary methods,
+  and mixed nested class/function declarations. Admitted statements use their
+  innermost lexical definition as owner. Supported annotated assignments use
+  the bounded annotation grammar without inferring types or new runtime bindings.
 - Positional, positional-only, keyword-only, `*args` and `**kwargs` parameters,
   with validated separators/order and no duplicate names. The bounded header
   annotations/defaults described below are optional; signatures still contain
   names/order/kinds only.
-- ASCII function/parameter names. Unicode paths and supplied module metadata are
+- ASCII class/function/parameter names. Unicode paths and supplied module metadata are
   preserved exactly; identifier normalization is not approximated.
 - Space-based indentation, LF/CRLF and an optional leading UTF-8 BOM. Parameters
   may span lines, but a multiline header with an inline body is not supported.
 
-Decorators, function type parameters/comments, classes, unreviewed imports, control flow and
+Decorators, type parameters/comments, unreviewed base expressions, metaclass
+keywords, unreviewed annotation/assignment/import forms, control flow and
 all other unmodeled forms reject the **whole file**. Calls/writes/returns are
 accepted only through the narrow body slice; calls in headers remain unsupported.
 So do non-ASCII identifiers,
@@ -227,7 +240,7 @@ native parser allocation. Tests inject small limits and deterministic cancellati
 checkpoints rather than relying on wall-clock timing.
 
 This foundation does **not** establish full Python parity or a production native
-backend. Broader expression/control-flow and encoding parity, full import/alias semantics, classes,
+backend. Broader expression/control-flow and encoding parity, full import/alias semantics, extended class forms,
 constructor forwarding, FastAPI semantics, capability/identity design and default
 replacement remain later gates. No existing AST expectations were relaxed.
 
@@ -243,7 +256,9 @@ The header expansion introduced the private candidate policy's second generation
 the body expansion introduced `python-native-private-facts-3`, and the import slice
 introduced `python-native-private-facts-4`. Its parenthesized/multiline expansion
 introduced `python-native-private-facts-5`; alias-aware warnings advance it to
-`python-native-private-facts-6`, with the expression
+`python-native-private-facts-6`. Plain classes/methods advance the policy to
+`python-native-private-facts-7`; named bases and annotated assignments advance it to
+`python-native-private-facts-8`, with the expression
 implementation included in its fingerprint. Production identity is unchanged.
 
 Supported annotations are ASCII names/dotted names, safe quoted text, `None`,
@@ -312,11 +327,13 @@ does not reset extraction's shared deadline, traversal, output or working limits
 Grouping preserves AST expression spans separately from complete statement spans:
 an assignment can end after its nested call's closing parenthesis.
 
-Chained/destructuring, starred/subscript/other-receiver targets, annotated/augmented
+Chained/destructuring, starred/subscript/other-receiver targets, augmented
 assignments, `del`, assignment expressions, `await`, yield/generators, lambdas,
 comprehensions, call splats, duplicate explicit keywords, containers/operators and
 call-result callees remain unsupported. Calls in annotations/defaults still reject
 the file. Whole-file rollback and later syntax/resource-error precedence remain.
+Annotated assignments are admitted only through the bounded policy below, not as
+an exception to target, expression or special-metadata guards.
 
 Accepted files must also preserve the helper's complete fact/diagnostic contract.
 Until dedicated support exists, the candidate rejects possible `FastAPI`/`APIRouter`
@@ -413,10 +430,11 @@ A safe import can suppress a raw `eval` warning; a long identifier can clip to a
 different imported alias. Ordinary call/binding facts remain unexpanded/redacted.
 Nested calls still warn even when their parent's shape omits or clips them.
 
-Aliases are keyed by explicit function-name scope components, independent of
+Aliases are keyed by explicit class/function-name scope components, independent of
 supplied module text or declaration identity. Lookup checks the nearest scope,
 enclosing prefixes, then module scope. Entries persist until file end, so repeated
-same-named functions reuse earlier aliases. Imports update entries in visitor
+same-named definitions reuse earlier aliases, including class/function names that
+coincide. Imports update entries in visitor
 order; parameters, assignments, literal invalidations and definitions do **not**
 invalidate them. Relative imports do not update or erase them. These are deliberate
 AST-helper compatibility rules—not Python runtime binding semantics or an upgrade
@@ -432,6 +450,82 @@ and fail closed on a digest collision; long copies/comparisons are cancellable.
 Per-file rejection rolls back facts and warnings together. Invocation cancellation
 or final output exhaustion clears all warnings and non-module facts. No production
 Evidence conversion, completeness authority or public backend switch is introduced.
+
+### Private plain classes and methods
+
+The seventh policy admits undecorated ASCII classes with single-physical-line
+`class Name:` or explicitly empty `class Name():` headers. Classes are lexical
+containers only. They emit the existing `class` fact, with the raw class name,
+full dotted lexical symbol and complete statement-derived source span. Methods,
+including `__init__` and async definitions, emit ordinary function/signature/header
+facts. There is no new `method` fact, implicit `self`, class signature, inferred
+constructor edge or receiver type. Empty class parentheses add no base fact.
+
+Class suites reuse the admitted docstring/pass/expression/import/simple-write and
+nested-declaration subset. Ordinary class assignments emit existing bindings or
+target-only invalidations owned by the class, not manufactured attribute declarations.
+Class, method, local-function and local-class nesting preserve every lexical name
+component, without inserting `<locals>`. The shared definition stack restores the
+parent owner after each child. Class-inclusive alias prefixes reproduce helper
+warnings even where Python runtime class-name lookup differs.
+
+The final body statement determines each declaration's end; nested declarations,
+evidence-neutral statements and multiline imports propagate their exact ends to
+the parent, while trailing comments do not extend them. Each class frame, retained
+symbol and persistent alias scope is charged before allocation. Classes never
+allocate the function-signature buffer or bypass the counted traversal/deadline.
+
+The initial class slice excluded bases and annotated assignments; the next slice
+below admits only named-reference bases and supported annotations. Metaclass
+keywords, decorators, type parameters and class-header calls still reject the entire
+file. Returns require an immediately enclosing function; a class nested in a
+function does not inherit return permission. This is the candidate's deliberately
+narrow policy, not a claim that `ast.parse` performs compilation validation.
+Existing constructor/router exclusions and all expression/control-flow boundaries
+remain. Full ordered fact-and-warning parity, resource rollback and captured-byte
+replay do not imply complete class semantics or production-native availability.
+
+### Private named bases and annotated assignments
+
+The eighth policy adds `base` facts for ASCII names/dotted references, optionally
+grouped, in the existing single-physical-line class headers. Comma-separated bases
+and a final comma are supported; an empty list must be exactly `()`, never `(,)`.
+Each base fact belongs to the newly declared class and uses the normalized base
+expression's span, excluding redundant outer grouping. Identical same-span facts
+deduplicate and final ordering follows the helper, not source-list order. Base
+names are not resolved through imports or treated as proof of runtime inheritance,
+method resolution, constructor forwarding or receiver types.
+
+Annotated assignments admit direct ASCII names and the existing `self`/`cls`
+attribute-chain targets, with the bounded call-free header-annotation grammar.
+Optional values use the existing body-expression grammar, not the narrower
+parameter-default grammar. A direct name under the immediately enclosing class
+emits `attribute_annotation`, with the **raw, unclipped** field name appended to the
+class symbol. Its span covers the entire annotated statement, including a grouped
+annotation and optional multiline RHS. Name annotations in a module/function and
+attribute targets such as `self.field` do not emit class-attribute facts.
+
+An annotation without an RHS emits **no binding or invalidation**. It still extends
+the enclosing declaration's span, and a direct class name still emits its attribute
+annotation. With an RHS, binding/invalidation shapes and complete-statement spans
+remain unchanged; binding targets follow their existing 512-byte clipping even
+when the attribute symbol retains the full identifier. Annotated RHS calls retain
+their own normalized spans and dynamic warnings. Annotations/writes do not erase
+the helper-compatible persistent import aliases. Literal values remain redacted.
+
+Before allocation, the collector charges bounded annotation storage, raw-symbol
+construction and rendering scratch to the shared working/output allowances. Bases
+and assignment annotations use separate implicit-continuation depths; assignment
+newlines require actual brackets, not the presence of a colon. Every descendant
+is validated even if rendering clips or exhausts its shape budget.
+
+Generic/subscripted, starred, keyword/metaclass, literal and call-valued bases;
+multiline class headers; grouped assignment targets; unions/unreviewed annotation
+expressions; and calls anywhere inside annotations remain excluded. Constructor,
+include-router and router-mutation guards apply to annotated statements too:
+annotation-only `self.router: T` or `self.prefix: T` cannot silently lose the helper's
+extra metadata. Unsupported syntax, later errors and resource exhaustion roll back
+the whole file's facts and warnings, with no production backend or schema change.
 
 ## Current extraction boundary
 

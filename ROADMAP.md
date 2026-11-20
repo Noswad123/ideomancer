@@ -23,7 +23,7 @@ or that a whole application is understood. There are no promised dates.
 | I2 | Read-only facts and validated class-model augmentation | Synthetic integration and a bounded real-source explicit-configuration slice accepted | Preserve immutability, identity checks and provenance; broader framework/runtime interpretation remains separate |
 | I3 | Harden and release the consumable engine | **Next: release and history review** | An approved immutable release works as an upstream or mirrored dependency |
 | P0 | Shared parser backend and native JS/TS Tree-sitter migration | Scoped source/facts, rendered-diagram usefulness and external explicit-configuration boundary accepted; release gates separate | Preserve fact/proof/output contracts; no Node discovery prerequisite; package/consumer checks and supported-platform release validation |
-| P1 | Python Tree-sitter backend | In progress: private candidates include bounded headers, calls, simple writes/invalidation, returns, conservative imports and alias-aware dynamic-discovery warnings; production native backend not enabled | Preserve Python facts, FastAPI boundaries and explicit incompleteness; retain current Python >=3.12 AST helper until replacement is validated |
+| P1 | Python Tree-sitter backend | In progress: private candidates include classes/methods, named bases, attribute annotations, bounded headers, calls, simple writes/invalidation, returns, conservative imports and alias-aware dynamic-discovery warnings; production native backend not enabled | Preserve Python facts, FastAPI boundaries and explicit incompleteness; retain current Python >=3.12 AST helper until replacement is validated |
 | P2 | Rust Tree-sitter backend and language facts | Next parser milestone; Rust analysis not implemented | Model Rust structs, enums, traits, impls, functions and modules honestly; no build scripts or macro execution |
 | I4 | Broader language/model capabilities | Later | Independent use cases justify each extension without weakening the boundary |
 
@@ -66,7 +66,7 @@ Node/Chromium tooling independently of JS/TS discovery.
   only when the entire file fit a declaration-only whitelist; every rejected file
   retains only its module baseline. No candidate becomes Evidence or a trusted
   snapshot. Grammar acceptance is not Python AST acceptance; encoding declarations,
-  classes and unreviewed import forms remain outside this fact slice. Supported annotations and
+  extended class forms and unreviewed imports remain outside this fact slice. Supported annotations and
   literal defaults use bounded redacted AST-shaped expressions. A body slice now
   retains every admitted call plus simple assignment bindings/target-only
   invalidations; special helper metadata/diagnostic triggers and unreviewed forms
@@ -77,7 +77,12 @@ Node/Chromium tooling independently of JS/TS discovery.
   constructor imports still reject the file, even when unused. Parenthesized multiline `from` lists preserve comments as
   nonsemantic trivia and extend spans through the closing delimiter; unsupported
   layout/grammar discrepancies remain explicit rejections. Header calls remain
-  unsupported. No public toolchain variant,
+  unsupported. Plain classes now act as lexical containers for methods and admitted
+  statements; nested class/function ownership, name-keyed aliases and declaration
+  spans remain exact. Named-reference bases and supported annotated assignments now
+  retain exact base/attribute facts; annotation-only statements do not invent writes.
+  These are syntax facts, not inheritance resolution, decorator/metaclass
+  interpretation or inferred class/receiver semantics. No public toolchain variant,
   production evidence identity or extraction default changes. See the
   [Python parity gates](docs/python-analysis.md#native-migration-parity-foundation).
 - Python migration must preserve language-specific semantics, not merely accept
