@@ -26,6 +26,9 @@ enum Class {
     Call,
     Arguments,
     Keyword,
+    Core,
+    Pair,
+    Slice,
 }
 
 #[derive(Clone, Copy)]
@@ -41,6 +44,8 @@ enum Shape {
     Call(usize, usize),
     Arguments(Option<usize>),
     Keyword(usize, usize),
+    Binary(usize, &'static str, usize),
+    Opaque(&'static str),
 }
 
 struct Entry {
@@ -112,9 +117,9 @@ impl Expression {
         // newlines inside literal payloads or comments are not syntax tokens.
         if !node.is_named() {
             match node.kind() {
-                "(" | "[" => self.bracket_depth += 1,
-                ")" | "]" if self.bracket_depth > self.base_depth => self.bracket_depth -= 1,
-                ")" | "]" => return false,
+                "(" | "[" | "{" => self.bracket_depth += 1,
+                ")" | "]" | "}" if self.bracket_depth > self.base_depth => self.bracket_depth -= 1,
+                ")" | "]" | "}" => return false,
                 _ => {}
             }
         }
@@ -169,6 +174,30 @@ impl Expression {
             | "concatenated_string"
             | "unary_operator" => (Class::Ignore, Shape::Ignore),
             "call" | "argument_list" | "keyword_argument" if self.mode == Mode::BodyValue => {
+                (Class::Ignore, Shape::Ignore)
+            }
+            "list"
+            | "set"
+            | "dictionary"
+            | "pair"
+            | "expression_list"
+            | "binary_operator"
+            | "boolean_operator"
+            | "comparison_operator"
+            | "not_operator"
+            | "conditional_expression"
+            | "slice"
+                if self.core_mode() =>
+            {
+                (Class::Ignore, Shape::Ignore)
+            }
+            // Composite comparison operators have counted terminal children.
+            "not in" | "is not" if self.core_mode() => (Class::Ignore, Shape::Ignore),
+            "{" | "}" | ":" | "*" | "@" | "/" | "//" | "%" | "**" | "<<" | ">>" | "|" | "^"
+            | "&" | "~" | "and" | "or" | "not" | "in" | "is" | "<" | "<=" | "==" | "!=" | ">="
+            | ">" | "if" | "else"
+                if self.core_mode() && !node.is_named() =>
+            {
                 (Class::Ignore, Shape::Ignore)
             }
             "=" if self.mode == Mode::BodyValue && !node.is_named() => {
@@ -241,6 +270,197 @@ impl Expression {
         let annotation =
             |class| matches!(class, Class::Reference | Class::Annotation | Class::Text);
         let normalized = match kind {
+            "not in" | "is not" => {
+                let expected = if kind == "not in" {
+                    ["not", "in"]
+                } else {
+                    ["is", "not"]
+                };
+                let mut at = 0;
+                let mut child = entry.first;
+                while let Some(i) = child {
+                    if cancel.at(Checkpoint::Collector) {
+                        return Err(());
+                    }
+                    let e = &self.entries[i];
+                    if e.kind != "comment" {
+                        if expected.get(at) != Some(&e.kind) {
+                            return Err(());
+                        }
+                        at += 1;
+                    }
+                    child = e.next;
+                }
+                if at != 2 {
+                    return Err(());
+                }
+                None
+            }
+            "binary_operator" | "boolean_operator" if count == 2 => {
+                let (a, b) = (first.unwrap(), second.unwrap());
+                let mut op = self.entries[a].next.ok_or(())?;
+                while self.entries[op].kind == "comment" {
+                    if cancel.at(Checkpoint::Collector) {
+                        return Err(());
+                    }
+                    op = self.entries[op].next.ok_or(())?;
+                }
+                if !self.body_value(a) || !self.body_value(b) {
+                    return Err(());
+                }
+                if kind == "boolean_operator" {
+                    if !matches!(self.entries[op].kind, "and" | "or") {
+                        return Err(());
+                    }
+                    Some((Class::Core, Shape::Opaque("<BoolOp>")))
+                } else {
+                    let op = match self.entries[op].kind {
+                        "+" => "Add",
+                        "-" => "Sub",
+                        "*" => "Mult",
+                        "@" => "MatMult",
+                        "/" => "Div",
+                        "//" => "FloorDiv",
+                        "%" => "Mod",
+                        "**" => "Pow",
+                        "<<" => "LShift",
+                        ">>" => "RShift",
+                        "|" => "BitOr",
+                        "^" => "BitXor",
+                        "&" => "BitAnd",
+                        _ => return Err(()),
+                    };
+                    Some((Class::Core, Shape::Binary(a, op, b)))
+                }
+            }
+            "comparison_operator" if count >= 2 => {
+                let mut child = entry.first;
+                let mut operand = true;
+                while let Some(i) = child {
+                    if cancel.at(Checkpoint::Collector) {
+                        return Err(());
+                    }
+                    let e = &self.entries[i];
+                    if e.kind != "comment" {
+                        if operand {
+                            if !self.body_value(i) {
+                                return Err(());
+                            }
+                        } else if !matches!(
+                            e.kind,
+                            "<" | "<="
+                                | "=="
+                                | "!="
+                                | ">="
+                                | ">"
+                                | "in"
+                                | "not in"
+                                | "is"
+                                | "is not"
+                        ) {
+                            return Err(());
+                        }
+                        operand = !operand;
+                    }
+                    child = e.next;
+                }
+                if operand {
+                    return Err(());
+                }
+                Some((Class::Core, Shape::Opaque("<Compare>")))
+            }
+            "not_operator" if count == 1 && self.body_value(first.unwrap()) => {
+                Some((Class::Core, Shape::Opaque("<UnaryOp>")))
+            }
+            "conditional_expression" if count == 3 => {
+                // The grammar accepts an unparenthesized conditional test;
+                // Python requires grouping there. Inspect the CST wrapper,
+                // not its resolved alias, to preserve parenthesized tests.
+                if self.entries[second.unwrap()].kind == "conditional_expression" {
+                    return Err(());
+                }
+                let mut child = first;
+                while let Some(i) = child {
+                    if cancel.at(Checkpoint::Collector) || !self.body_value(i) {
+                        return Err(());
+                    }
+                    child = self.entries[i].next_value;
+                }
+                Some((Class::Core, Shape::Opaque("<IfExp>")))
+            }
+            "pair"
+                if count == 2
+                    && self.body_value(first.unwrap())
+                    && self.body_value(second.unwrap()) =>
+            {
+                Some((Class::Pair, Shape::Ignore))
+            }
+            "slice" => {
+                let mut child = entry.first;
+                let mut colons = 0;
+                let mut bound = false;
+                while let Some(i) = child {
+                    if cancel.at(Checkpoint::Collector) {
+                        return Err(());
+                    }
+                    let e = &self.entries[i];
+                    if e.kind == ":" {
+                        colons += 1;
+                        bound = false;
+                    } else if e.kind != "comment" {
+                        if bound || !self.body_value(i) {
+                            return Err(());
+                        }
+                        bound = true;
+                    }
+                    child = e.next;
+                }
+                if !(1..=2).contains(&colons) {
+                    return Err(());
+                }
+                Some((Class::Slice, Shape::Opaque("<Slice>")))
+            }
+            "list" | "set" | "dictionary" | "expression_list" | "tuple" if self.core_mode() => {
+                // M2 owns starred displays/unpacks. No splat descriptor is
+                // admitted, including behind opaque or truncated containers.
+                let mut child = entry.first;
+                let mut want_value = true;
+                while let Some(i) = child {
+                    if cancel.at(Checkpoint::Collector) {
+                        return Err(());
+                    }
+                    let e = &self.entries[i];
+                    match e.kind {
+                        "(" | ")" | "[" | "]" | "{" | "}" | "comment" => {}
+                        "," if !want_value => want_value = true,
+                        _ => {
+                            let valid = if kind == "dictionary" {
+                                e.class == Class::Pair
+                            } else {
+                                self.body_value(i)
+                            };
+                            if !want_value || !valid {
+                                return Err(());
+                            }
+                            want_value = false;
+                        }
+                    }
+                    child = e.next;
+                }
+                if (count == 0 && (comma || matches!(kind, "set" | "expression_list")))
+                    || (kind == "expression_list" && !comma)
+                {
+                    return Err(());
+                }
+                Some((
+                    Class::Core,
+                    if kind == "dictionary" {
+                        Shape::Opaque("<Dict>")
+                    } else {
+                        Shape::Tuple(first)
+                    },
+                ))
+            }
             "keyword_argument" if count == 2 => {
                 let (key, value) = (first.unwrap(), second.unwrap());
                 if !matches!(self.entries[key].shape, Shape::Name) || !self.body_value(value) {
@@ -249,6 +469,9 @@ impl Expression {
                 Some((Class::Keyword, Shape::Keyword(key, value)))
             }
             "argument_list" => {
+                if count == 0 && comma {
+                    return Err(());
+                }
                 // Borrowed names and the set's temporary buckets are covered by
                 // ENTRY_WORK; no keyword text or subtrees are copied.
                 let mut keywords = HashSet::new();
@@ -349,7 +572,13 @@ impl Expression {
             }
             "generic_type" | "subscript" if count >= 2 => {
                 let (base, slice) = (first.unwrap(), second.unwrap());
-                if self.entries[base].class != Class::Reference {
+                let core = kind == "subscript" && self.core_mode();
+                let valid_base = if core {
+                    self.body_value(base)
+                } else {
+                    self.entries[base].class == Class::Reference
+                };
+                if !valid_base {
                     return Err(());
                 }
                 let mut child = Some(slice);
@@ -358,7 +587,14 @@ impl Expression {
                         return Err(());
                     }
                     let e = &self.entries[i];
-                    if e.class != Class::Ignore
+                    if core {
+                        if e.class != Class::Ignore
+                            && !self.body_value(i)
+                            && e.class != Class::Slice
+                        {
+                            return Err(());
+                        }
+                    } else if e.class != Class::Ignore
                         && !annotation(e.class)
                         && !(e.class == Class::Tuple && count == 2 && !comma)
                     {
@@ -370,7 +606,7 @@ impl Expression {
                     return Err(());
                 }
                 Some((
-                    Class::Annotation,
+                    if core { Class::Core } else { Class::Annotation },
                     Shape::Subscript(base, slice, kind == "subscript" && (count > 2 || comma)),
                 ))
             }
@@ -393,7 +629,12 @@ impl Expression {
                 Some((category, Shape::Literal))
             }
             "unary_operator" if count == 1 => {
-                if self.entries[first.unwrap()].class != Class::Number {
+                let valid = if self.core_mode() {
+                    self.body_value(first.unwrap())
+                } else {
+                    self.entries[first.unwrap()].class == Class::Number
+                };
+                if !valid {
                     return Err(());
                 }
                 Some((Class::Unary, Shape::Unary))
@@ -405,7 +646,13 @@ impl Expression {
             | "generic_type"
             | "subscript"
             | "concatenated_string"
-            | "unary_operator" => {
+            | "unary_operator"
+            | "binary_operator"
+            | "boolean_operator"
+            | "comparison_operator"
+            | "not_operator"
+            | "conditional_expression"
+            | "pair" => {
                 return Err(());
             }
             _ => None,
@@ -431,15 +678,10 @@ impl Expression {
             let class = self.entries[index].class;
             let valid = if self.mode == Mode::Base {
                 class == Class::Reference
-            } else if self.mode == Mode::BodyValue {
+            } else if self.core_mode() {
                 self.body_value(index)
             } else if self.mode == Mode::AssignmentTarget {
                 self.valid_target(index, bytes, cancel)
-            } else if self.mode == Mode::Default {
-                matches!(
-                    self.entries[self.resolve(index)].shape,
-                    Shape::Literal | Shape::Unary
-                )
             } else {
                 annotation(class)
             };
@@ -459,10 +701,25 @@ impl Expression {
     }
 
     fn body_value(&self, index: usize) -> bool {
-        matches!(
-            self.entries[self.resolve(index)].shape,
-            Shape::Name | Shape::Attribute(..) | Shape::Call(..) | Shape::Literal | Shape::Unary
-        )
+        // Defaults share core values, but reject every call at admission.
+        // Pair and Slice are context-only descriptors, not general values.
+        !matches!(self.entries[index].class, Class::Slice | Class::Pair)
+            && matches!(
+                self.entries[self.resolve(index)].shape,
+                Shape::Name
+                    | Shape::Attribute(..)
+                    | Shape::Call(..)
+                    | Shape::Literal
+                    | Shape::Unary
+                    | Shape::Tuple(..)
+                    | Shape::Subscript(..)
+                    | Shape::Binary(..)
+                    | Shape::Opaque(_)
+            )
+    }
+
+    fn core_mode(&self) -> bool {
+        matches!(self.mode, Mode::BodyValue | Mode::Default)
     }
 
     fn valid_target<F: FnMut(Checkpoint) -> bool>(
@@ -579,6 +836,20 @@ impl Expression {
             ),
             Shape::Literal => append(&mut result, "<literal>"),
             Shape::Unary => append(&mut result, "<UnaryOp>"),
+            Shape::Opaque(label) => append(&mut result, label),
+            Shape::Binary(a, op, b) => {
+                append(
+                    &mut result,
+                    &self.render_node(a, depth + 1, budget, bytes, cancel),
+                );
+                append(&mut result, " ");
+                append(&mut result, op);
+                append(&mut result, " ");
+                append(
+                    &mut result,
+                    &self.render_node(b, depth + 1, budget, bytes, cancel),
+                );
+            }
             Shape::Attribute(a, b) => {
                 append(
                     &mut result,

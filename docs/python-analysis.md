@@ -54,6 +54,87 @@ of a manually curated responsibility-level diagram.
 
 ## Native migration parity foundation
 
+### Completion contract and remaining gates
+
+P1 finishes when a native backend can replace the existing extractor through the
+supported product seams, not when another synthetic fixture parses. The contract
+is the observable behavior of `python_extract.py`: complete ordered facts and
+diagnostics, redaction, identities/spans, supported input bytes, failures and
+resource behavior. It is **not** Python execution, type inference or a control-flow
+graph. Syntax without a dedicated fact still needs exact descendant traversal.
+
+The development comparison baseline is **Python 3.12**, with the actual trusted
+interpreter patch reported by the oracle gate. This is not a change to production's
+existing Python >=3.12 prerequisite, nor approval of a narrower production language
+or encoding contract. Additional minor-version claims need separate acceptance.
+
+The finite completion ledger is:
+
+| Gate | Outcome and required acceptance | State |
+| --- | --- | --- |
+| P1-G1 | Generic expression and ordinary-body coverage: containers/operators/indexing, call-free defaults, conditions, loops and context managers; hidden calls/warnings, owner restoration, spans and one counted walk remain exact. | Implemented and locally validated for the bounded G1 subset below |
+| P1-G2 | Close the generic visitor inventory: remaining statements, targets/writes/imports, arbitrary callees/splats, comprehensions/lambdas/generators, await/yield/walrus, all headers and literal/identifier forms. Every target-version node has a normalization/traversal rule and cross-family oracle cases. | Pending |
+| P1-G3 | Preserve every existing discovery/framework side output: decorators, CLI/job/API entry facts, route diagnostics and FastAPI host/prefix/include/mutation metadata, including aliases and literal-retention limits. | Pending |
+| P1-G4 | Close grammar/version/encoding/failure differences: original-byte digests, decoding/cookies, physical layout and exact observable parse diagnostics. No unexplained valid-file rejection or invalid-file acceptance in the approved compatibility suite. | Open compatibility blockers |
+| P1-G5 | Integrate distinct native identity, evidence/snapshots, CLI/library dispatch, workflow revalidation and capabilities. Preserve old-save reading/rendering; rediscovery invalidates stale claims. Native operation must not probe Python. | Pending; public migration design required |
+| P1-G6 | Existing-engine usefulness and operational/cutover acceptance: class/callable/API/network/services views, adapter proofs, saved-source reuse, supported platforms/toolchain/package/resource checks, then explicit replacement approval. | Pending |
+
+G1's named-base/annotation predecessors and its next expression/body work do not
+close G2–G6. Partial milestones remain partial; passing oracle counts are not a
+coverage percentage. A production incomplete backend is a separate, explicitly
+approved product boundary—not a substitute for replacement parity.
+
+#### Generic inventory and implementation strategy
+
+- **Declarations/headers:** all function/class forms, signatures, parameter/default/
+  annotation facts, bases, decorators and child visitation order.
+- **Expressions:** every special `expression()` branch plus exact opaque AST-node
+  names; descendant calls/warnings remain independent from shape rendering.
+- **Statements/writes/imports:** exact helper traversal, bindings/invalidation,
+  annotation-only nonwrites, router mutation behavior, aliases and neutral syntax.
+- **Existing metadata:** all custom helper visitors and diagnostics, without adding
+  private conventions or strengthening runtime claims during migration.
+- **Input/failure/integration:** bytes and grammar, complete versus incomplete,
+  hard extraction limits, identity/capability policy and old-save compatibility.
+
+Keep capture/admission, the pinned front end, transactional emitters, IDs and budgets.
+Grow the bounded AST-shaped descriptor layer rather than add fact-specific parsers
+for each context. Known fact-neutral wrappers require explicit validation rules;
+unknown grammar nodes must not be silently ignored. The one counted CST walk may
+build bounded semantic events for later processing, but must not be replaced by
+an uncounted traversal or source rescan.
+
+Source order is sufficient only where proven equivalent to helper visitation.
+Header/decorator calls require explicit AST-order scheduling before admission:
+body imports can affect later-visited return/decorator calls in the helper. Do not
+enable these calls merely because their shapes can be rendered.
+
+#### Compatibility and rollout decisions that cannot be skipped
+
+- Resolve the known Python-2 grammar acceptance and valid-Python nested import-layout
+  rejection. Collector checks can reject specific invalid forms; they cannot recover
+  a tree for every grammar rejection. Maintain a finite correction/exclusion list.
+  Reassess the pinned parser before G2/G3 investment if no credible correction path
+  exists; no parser dependency replacement is approved by this plan.
+- Decide encoding coverage explicitly. The private candidate currently rejects all
+  effective cookies, even UTF-8, while the production byte parser supports more.
+  A narrower production contract needs an explicit decision, not a silent migration.
+- Scope a production semantic fingerprint to a reviewed closed set of implementation,
+  normalization/decoding and dependency inputs. Current private fingerprints include
+  test-bearing files and are conservative development identities, not the final policy.
+- Design native metadata without inventing `pythonVersion`; review public request
+  compatibility and retirement of interpreter settings. Never silently reinterpret
+  an AST request or upgrade an old saved snapshot's capabilities.
+- Reconcile private module-only `ResourceLimit` reports with production hard-limit
+  failures before promotion. Cooperative in-process parsing is not an RSS sandbox.
+- Keep representative real-source acceptance consumer-owned and outside project
+  source. Never run the analyzed application's commands or import its modules.
+
+Implementation proceeds through G1, G2 and G3; grammar feasibility
+is tracked from the start, not postponed until cutover. G4 must close before G5 can
+be accepted as a replacement, and G6 is the final stopping gate. New analysis
+features or later Python-version lanes are separate work after these gates.
+
 P1 has a **private captured-source AST parity harness**, a native parse-only
 front-end and bounded class/function/header/body/import candidates, not a production native Python
 backend. The production helper, evidence v1 serialization,
@@ -112,8 +193,13 @@ Eight base/assignment-annotation cases add ordered/deduplicated base syntax, dir
 class attribute annotations, annotation-only nonwrites, supported RHS contexts,
 whole-statement spans, unclipped field symbols, shape limits, alias warnings,
 metadata exclusions, malformed comma-only base lists, isolation and replay.
+Eight core-expression cases add container/operator/index/slice shapes, broad
+call-free defaults, opaque-node rendering budgets, hidden descendants, malformed
+grammar corrections, cross-family writes and replay. Seven ordinary-suite cases
+add conditionals, loops/context managers including async forms, neutral binders,
+owner/end restoration, alias visitation order, jumps, rollback and replay.
 
-All sixty-five oracle cases are **ignored in the ordinary suite**. Run the gate explicitly
+All eighty oracle cases are **ignored in the ordinary suite**. Run the gate explicitly
 with an absolute path to an installed, trusted Python >=3.12:
 
 ```sh
@@ -186,6 +272,9 @@ The accepted file subset is deliberately small:
 
 - Modules containing supported declarations, `pass`, comments and the limited
   expression/assignment and import statements described in the slices below.
+- Ordinary `if/elif/else`, `while/else`, `for`/`async for`/`else`, and
+  `with`/`async with` suites, with direct-name loop/context binders. These do not
+  create lexical scopes, binder-write facts or control-flow proof.
 - Undecorated synchronous/asynchronous functions, including nested declarations,
   with bodies containing supported statements. Async declarations do not imply
   support for `await` or asynchronous execution analysis.
@@ -204,9 +293,10 @@ The accepted file subset is deliberately small:
   may span lines, but a multiline header with an inline body is not supported.
 
 Decorators, type parameters/comments, unreviewed base expressions, metaclass
-keywords, unreviewed annotation/assignment/import forms, control flow and
+keywords, unreviewed annotation/assignment/import and compound-statement forms, and
 all other unmodeled forms reject the **whole file**. Calls/writes/returns are
-accepted only through the narrow body slice; calls in headers remain unsupported.
+accepted only through the documented body slice; calls in declaration headers
+remain unsupported. Calls in admitted statement conditions/iterables/contexts are supported.
 So do non-ASCII identifiers,
 semicolons, explicit line continuations, NUL, bare CR formatting and unsupported
 whitespace outside comments. Some rejected forms are valid Python; rejection means
@@ -258,7 +348,8 @@ introduced `python-native-private-facts-4`. Its parenthesized/multiline expansio
 introduced `python-native-private-facts-5`; alias-aware warnings advance it to
 `python-native-private-facts-6`. Plain classes/methods advance the policy to
 `python-native-private-facts-7`; named bases and annotated assignments advance it to
-`python-native-private-facts-8`, with the expression
+`python-native-private-facts-8`. G1 core expressions and ordinary suites advance it
+to `python-native-private-facts-9`, with the expression
 implementation included in its fingerprint. Production identity is unchanged.
 
 Supported annotations are ASCII names/dotted names, safe quoted text, `None`,
@@ -269,12 +360,11 @@ syntax only, not resolved types or runtime identities. Grouping is normalized:
 unions, slices, starred arguments, list/set/dict expressions, subscripted callees
 such as `T[A][B]`, and arbitrary expression nodes remain unsupported.
 
-Defaults admit reviewed constant spellings: `None`, booleans, ellipsis, numeric
-literals, text and bytes, optionally grouped. Exactly one numeric unary `+` or `-`
-is supported. Constants render `<literal>`; signed numeric defaults render the
-helper's `<UnaryOp>`, not their value. Names such as `DEFAULT`, attribute-valued
-defaults, containers, repeated signs, unary booleans and binary expressions are
-not admitted. Numeric tokens are limited to 1,024 bytes; decimal spellings are
+The original literal-default slice admitted only reviewed constants and one numeric
+sign. G1 now admits call-free versions of the core expressions below, including
+names such as `DEFAULT`, references, containers, operators and indexing. Constants
+still render `<literal>`; unary expressions render `<UnaryOp>`, not their values.
+Numeric tokens remain limited to 1,024 bytes; decimal spellings are
 limited to 512 digits and checked lexically for Python-compatible bases, underscores
 and exponents, without converting values.
 
@@ -288,8 +378,9 @@ the whole file. No new literal-retention exception is introduced.
 Each shape invocation uses the helper's shared 80-node expression allowance,
 depth 12, first 16 tuple elements and 512-byte UTF-8 clipping at every rendered
 node. These are rendering limits, not validation limits: every descriptor/CST
-descendant is still validated. Calls hidden after a tuple's 16th item, beyond a
-truncated shape or beneath an exhausted expression budget still reject the file.
+descendant is still validated. In declaration headers, calls hidden after a tuple's
+16th item, beyond a truncated shape or beneath an exhausted expression budget still
+reject the file. Admitted body expressions instead retain those calls independently.
 
 Parameter and `parameter_annotation` facts share the AST argument extent, from
 the name through its annotation, including annotation grouping but excluding any
@@ -305,7 +396,8 @@ Variadic defaults and duplicate typed/untyped names remain rejected.
 The third private candidate policy adds a deliberately small body/module subset:
 
 - Expression statements containing names/dotted references, reviewed scalar
-  literals, supported calls, or grouping. Plain docstrings are evidence-neutral.
+  literals, supported calls, grouping or the G1 core expressions below. Plain
+  docstrings are evidence-neutral.
 - One assignment target: an ASCII name or a `self`/`cls` attribute chain. These
   roots are syntax, not proof of a method, class instance or dependency injection.
 - Function-only bare/value returns. No `return` fact or return-dataflow edge is
@@ -314,10 +406,10 @@ The third private candidate policy adds a deliberately small body/module subset:
   by explicit named keywords. Argument values can contain supported nested calls.
 
 Assignments with normalized name/attribute/call RHS produce `binding` with compact
-sorted-key `source`/`target` shapes. Reviewed literal/unary RHS produce a
+sorted-key `source`/`target` shapes. Other admitted RHS roots produce a
 `binding_invalidation` containing **only** the target. Target shapes, including
 plain names, follow the helper's 512-byte clipping. Binding ownership is the
-enclosing module/function symbol, never a manufactured target declaration.
+enclosing module/class/function symbol, never a manufactured target declaration.
 
 Calls render the callee first, then at most 16 positional and 16 keyword arguments,
 with separate overflow ellipses. Every nested admitted call still gets its own
@@ -329,7 +421,7 @@ an assignment can end after its nested call's closing parenthesis.
 
 Chained/destructuring, starred/subscript/other-receiver targets, augmented
 assignments, `del`, assignment expressions, `await`, yield/generators, lambdas,
-comprehensions, call splats, duplicate explicit keywords, containers/operators and
+comprehensions, container unpacking, call splats, duplicate explicit keywords and
 call-result callees remain unsupported. Calls in annotations/defaults still reject
 the file. Whole-file rollback and later syntax/resource-error precedence remain.
 Annotated assignments are admitted only through the bounded policy below, not as
@@ -526,6 +618,47 @@ include-router and router-mutation guards apply to annotated statements too:
 annotation-only `self.router: T` or `self.prefix: T` cannot silently lose the helper's
 extra metadata. Unsupported syntax, later errors and resource exhaustion roll back
 the whole file's facts and warnings, with no production backend or schema change.
+
+### G1 bounded generic expressions and ordinary bodies
+
+Policy 9 separates expression validation/descendant collection from bounded shape
+rendering. Body values admit tuple/list/set/dict displays, bare comma tuples, all
+ordinary binary operators, boolean/comparison/unary/not expressions, conditionals,
+and subscripts/slices/multidimensional indices. Defaults admit their call-free forms;
+bases and annotations retain their narrower reviewed policies. No expression is
+evaluated, and broader acceptance does not infer types or execution.
+
+Tuple/list/set shapes render the first 16 elements with no overflow ellipsis.
+Dictionaries, boolean/comparison/unary/conditional expressions and slices use the
+helper's opaque AST-node placeholders without spending their descendants' rendering
+budget. Binary operators retain AST operator names and recursive budget accounting.
+Every admitted descendant is nevertheless validated, and every body call/warning
+is retained independently—even after clipping, depth/budget exhaustion or item 16.
+Bindings still depend on the RHS AST root: containers/operators/subscripts invalidate
+eligible targets instead of being promoted to bindings by their rendered appearance.
+
+Ordinary `if/elif/else`, `while/else`, `for`/`async for`/`else`, and
+`with`/`async with` suites traverse headers and bodies in helper-equivalent order.
+Multiple context items are supported. Loop targets and `with as` binders are
+currently direct ASCII names only; parenthesized context-item lists remain excluded.
+These constructs create neither definition scopes nor binding/invalidation facts
+for their binders. Branches and loop-else bodies all contribute observed syntax;
+none is claimed to execute. Imports keep the helper's persistent alias behavior.
+
+`break`/`continue` are evidence-neutral and require an enclosing loop body within
+the current definition boundary; a loop's own else suite is not that loop's body.
+Compound ends propagate through clauses and nested declarations, excluding trailing
+comments. New frame high-water storage is charged before allocation and reset per
+file. Physical keyword/colon placement and clause attachment remain checked rather
+than assumed from grammar acceptance; implicit continuation requires actual brackets.
+
+G1 does not close G2: starred displays/dictionary unpacking, broader call targets
+and splats, complex assignment/loop/context targets, comprehensions/lambdas,
+await/yield/walrus, remaining statements/import forms, full strings/identifiers and
+declaration-header calls remain. G3 metadata and G4 compatibility blockers are also
+unchanged. Grammar-only invalid forms such as comma-only dictionaries and ungrouped
+conditionals in a conditional's test reject transactionally. Bare tuple statements
+are validated as complete value/comma sequences, not by silently ignoring punctuation.
 
 ## Current extraction boundary
 

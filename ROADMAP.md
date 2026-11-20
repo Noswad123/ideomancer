@@ -23,7 +23,7 @@ or that a whole application is understood. There are no promised dates.
 | I2 | Read-only facts and validated class-model augmentation | Synthetic integration and a bounded real-source explicit-configuration slice accepted | Preserve immutability, identity checks and provenance; broader framework/runtime interpretation remains separate |
 | I3 | Harden and release the consumable engine | **Next: release and history review** | An approved immutable release works as an upstream or mirrored dependency |
 | P0 | Shared parser backend and native JS/TS Tree-sitter migration | Scoped source/facts, rendered-diagram usefulness and external explicit-configuration boundary accepted; release gates separate | Preserve fact/proof/output contracts; no Node discovery prerequisite; package/consumer checks and supported-platform release validation |
-| P1 | Python Tree-sitter backend | In progress: private candidates include classes/methods, named bases, attribute annotations, bounded headers, calls, simple writes/invalidation, returns, conservative imports and alias-aware dynamic-discovery warnings; production native backend not enabled | Preserve Python facts, FastAPI boundaries and explicit incompleteness; retain current Python >=3.12 AST helper until replacement is validated |
+| P1 | Python Tree-sitter backend | In progress: bounded G1 generic expressions/bodies locally validated; G2–G6 remain; production native backend not enabled | Complete the [Python completion gates](docs/python-analysis.md#completion-contract-and-remaining-gates); retain the AST helper until parity, compatibility, integration and cutover acceptance pass |
 | P2 | Rust Tree-sitter backend and language facts | Next parser milestone; Rust analysis not implemented | Model Rust structs, enums, traits, impls, functions and modules honestly; no build scripts or macro execution |
 | I4 | Broader language/model capabilities | Later | Independent use cases justify each extension without weakening the boundary |
 
@@ -37,6 +37,15 @@ undelivered, not a claim that all languages are native today. Optional Mermaid S
 Node/Chromium tooling independently of JS/TS discovery.
 
 ### Parser Acceptance
+
+Python completion now follows a finite six-gate program, rather than an open-ended
+queue of syntax slices: **G1** generic expressions/ordinary bodies; **G2** remaining
+generic traversal; **G3** existing discovery/FastAPI metadata; **G4** grammar,
+encoding and failure compatibility; **G5** native identity/product integration;
+**G6** existing-engine usefulness, operations and approved cutover. See the
+[contract, inventory and blockers](docs/python-analysis.md#completion-contract-and-remaining-gates).
+Development uses an explicitly selected Python 3.12 comparison lane; production's
+Python >=3.12 contract is unchanged. Test counts do not establish completion.
 
 - Pin Tree-sitter 0.25.10, JavaScript grammar 0.25.0 and TypeScript/TSX grammar
   0.23.2 exactly, plus language ABI bridge 0.1.5 directly for downstream Rust 1.89

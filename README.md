@@ -39,6 +39,10 @@ conservative import subset, including parenthesized multiline `from` lists and
 alias-aware dynamic-discovery warnings. The trusted Python >=3.12
 AST helper remains the production default; a production native Python fact backend
 and Rust analysis are not delivered.
+The [Python completion ledger](docs/python-analysis.md#completion-contract-and-remaining-gates)
+defines six completion gates. Its first broad milestone adds core containers,
+operators/indexing, call-free defaults and ordinary conditional/loop/context-manager
+suites; that bounded coverage is not full Python compatibility or cutover approval.
 See the [Python parity gates](docs/python-analysis.md#native-migration-parity-foundation).
 Release/history review remains separate—not a reason to add codebase-specific
 rules to the engine or claim complete application understanding.
