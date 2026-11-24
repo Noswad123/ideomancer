@@ -73,7 +73,7 @@ The finite completion ledger is:
 | Gate | Outcome and required acceptance | State |
 | --- | --- | --- |
 | P1-G1 | Generic expression and ordinary-body coverage: containers/operators/indexing, call-free defaults, conditions, loops and context managers; hidden calls/warnings, owner restoration, spans and one counted walk remain exact. | Implemented and locally validated for the bounded G1 subset below |
-| P1-G2 | Close the generic visitor inventory: remaining statements, targets/writes/imports, arbitrary callees/splats, comprehensions/lambdas/generators, await/yield/walrus, all headers and literal/identifier forms. Every target-version node has a normalization/traversal rule and cross-family oracle cases. | Pending |
+| P1-G2 | Close the generic visitor inventory: remaining statements, targets/writes/imports, arbitrary callees/splats, comprehensions/lambdas/generators, await/yield/walrus, all headers and literal/identifier forms. Every target-version node has a normalization/traversal rule and cross-family oracle cases. | In progress: exception/neutral-statement slice locally validated; remaining inventory open |
 | P1-G3 | Preserve every existing discovery/framework side output: decorators, CLI/job/API entry facts, route diagnostics and FastAPI host/prefix/include/mutation metadata, including aliases and literal-retention limits. | Pending |
 | P1-G4 | Close grammar/version/encoding/failure differences: original-byte digests, decoding/cookies, physical layout and exact observable parse diagnostics. No unexplained valid-file rejection or invalid-file acceptance in the approved compatibility suite. | Open compatibility blockers |
 | P1-G5 | Integrate distinct native identity, evidence/snapshots, CLI/library dispatch, workflow revalidation and capabilities. Preserve old-save reading/rendering; rediscovery invalidates stale claims. Native operation must not probe Python. | Pending; public migration design required |
@@ -198,8 +198,11 @@ call-free defaults, opaque-node rendering budgets, hidden descendants, malformed
 grammar corrections, cross-family writes and replay. Seven ordinary-suite cases
 add conditionals, loops/context managers including async forms, neutral binders,
 owner/end restoration, alias visitation order, jumps, rollback and replay.
+Eight exception/neutral-statement cases add ordinary/starred handlers, assertions,
+raise/cause traversal, global/nonlocal, narrow delete and all augmented operators,
+alias order, malformed grammar, hidden calls, metadata guards, isolation and replay.
 
-All eighty oracle cases are **ignored in the ordinary suite**. Run the gate explicitly
+All eighty-eight oracle cases are **ignored in the ordinary suite**. Run the gate explicitly
 with an absolute path to an installed, trusted Python >=3.12:
 
 ```sh
@@ -275,6 +278,8 @@ The accepted file subset is deliberately small:
 - Ordinary `if/elif/else`, `while/else`, `for`/`async for`/`else`, and
   `with`/`async with` suites, with direct-name loop/context binders. These do not
   create lexical scopes, binder-write facts or control-flow proof.
+- Exception suites, assert/raise/global/nonlocal, and narrowly admitted del/augmented
+  statements as described below. These preserve traversal without invented writes.
 - Undecorated synchronous/asynchronous functions, including nested declarations,
   with bodies containing supported statements. Async declarations do not imply
   support for `await` or asynchronous execution analysis.
@@ -349,7 +354,8 @@ introduced `python-native-private-facts-5`; alias-aware warnings advance it to
 `python-native-private-facts-6`. Plain classes/methods advance the policy to
 `python-native-private-facts-7`; named bases and annotated assignments advance it to
 `python-native-private-facts-8`. G1 core expressions and ordinary suites advance it
-to `python-native-private-facts-9`, with the expression
+to `python-native-private-facts-9`; the G2 exception/neutral-statement slice advances
+it to `python-native-private-facts-10`, with the expression
 implementation included in its fingerprint. Production identity is unchanged.
 
 Supported annotations are ASCII names/dotted names, safe quoted text, `None`,
@@ -419,8 +425,8 @@ does not reset extraction's shared deadline, traversal, output or working limits
 Grouping preserves AST expression spans separately from complete statement spans:
 an assignment can end after its nested call's closing parenthesis.
 
-Chained/destructuring, starred/subscript/other-receiver targets, augmented
-assignments, `del`, assignment expressions, `await`, yield/generators, lambdas,
+Chained/destructuring, starred/subscript/other-receiver targets, unreviewed augmented
+assignment/delete forms, assignment expressions, `await`, yield/generators, lambdas,
 comprehensions, container unpacking, call splats, duplicate explicit keywords and
 call-result callees remain unsupported. Calls in annotations/defaults still reject
 the file. Whole-file rollback and later syntax/resource-error precedence remain.
@@ -659,6 +665,49 @@ declaration-header calls remain. G3 metadata and G4 compatibility blockers are a
 unchanged. Grammar-only invalid forms such as comma-only dictionaries and ungrouped
 conditionals in a conditional's test reject transactionally. Bare tuple statements
 are validated as complete value/comma sequences, not by silently ignoring punctuation.
+
+### G2 exception paths and evidence-neutral statements
+
+Policy 10 adds `try` with ordinary or starred handlers, optional `else`/`finally`,
+and `try/finally`. Handler families cannot mix; starred handlers require a type,
+and `else` requires a handler. Explicit per-frame progress validates clause order,
+attachment, indentation and header shape independently of grammar acceptance.
+Python 3.14's unparenthesized multi-type handler form is outside the development
+3.12 lane; parenthesized exception tuples use the shared core-expression policy.
+
+The helper visits try body, handlers, else and finally in that order. Each handler's
+type is visited before its body. The candidate preserves that order, including
+imports that affect later alias warnings. Handler names are binding strings in
+the AST, not expression descendants or new lexical scopes. They do not invalidate
+or redirect the helper's persistent import aliases. A handler's conditional type
+may place its alias on the CST's final-else chain; bounded descriptors normalize
+that wrapper without visiting the alias as an expression or losing nested calls.
+
+`assert` admits one test and an optional message; `raise` admits a bare statement,
+one exception, and an optional `from` cause. Every admitted operand contributes its
+descendant calls/warnings, even in opaque shapes or paths that may not execute.
+`global`/`nonlocal` admit nonempty direct ASCII identifier lists, including duplicates.
+They neither emit facts nor change alias lookup. Bare raise and unresolved/conflicting
+scope declarations are not rejected merely for failing compile-time/runtime checks:
+the oracle is `ast.parse`, not compilation or execution.
+
+`del` admits one existing direct-name or `self`/`cls` attribute-chain target.
+Augmented assignments admit that same subset with any ordinary augmented operator
+and a supported body-value RHS. A validation-only `NeutralTarget` path emits **no
+binding or invalidation**, and neither statement erases imported aliases. The
+helper only adds router-mutation metadata for these statements; affected targets
+remain whole-file exclusions until G3 rather than silently losing those facts.
+Chained/destructuring/multiple deletion, subscript/arbitrary-receiver targets,
+target-side calls and recursive assignment RHS forms remain excluded.
+
+All new statements extend enclosing declaration/suite spans through their actual
+last syntax statement, not trailing comments. Exception paths retain existing
+function-only return and loop-body jump boundaries. New progress/normalization
+state is charged through the counted frame/descriptor arenas; cancellation, fact/
+warning/output limits, per-file rollback and later-error precedence remain shared.
+This closes one cohesive part of G2, not its full visitor inventory: `match`, broader
+targets/callees/splats, comprehensions/lambdas/generators, await/yield/walrus, remaining
+imports, declaration headers and literal/identifier compatibility are still open.
 
 ## Current extraction boundary
 

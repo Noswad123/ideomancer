@@ -9,7 +9,9 @@ pub(super) enum Mode {
     Default,
     Return,
     BodyValue,
+    ExceptionType,
     AssignmentTarget,
+    NeutralTarget,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -69,6 +71,7 @@ pub(super) struct Expression {
     pub(super) working: usize,
     pub(super) terminal_end_line: usize,
     pub(super) start: usize,
+    pub(super) handler_alias: bool,
     base_depth: usize,
     bracket_depth: usize,
     entries: Vec<Entry>,
@@ -93,6 +96,7 @@ impl Expression {
             working: 0,
             terminal_end_line: 0,
             start,
+            handler_alias: false,
             base_depth,
             bracket_depth: base_depth,
             entries: Vec::new(),
@@ -173,7 +177,61 @@ impl Expression {
             | "tuple"
             | "concatenated_string"
             | "unary_operator" => (Class::Ignore, Shape::Ignore),
-            "call" | "argument_list" | "keyword_argument" if self.mode == Mode::BodyValue => {
+            "call" | "argument_list" | "keyword_argument"
+                if matches!(self.mode, Mode::BodyValue | Mode::ExceptionType) =>
+            {
+                (Class::Ignore, Shape::Ignore)
+            }
+            "as_pattern" if self.mode == Mode::ExceptionType && !self.handler_alias => {
+                // The grammar can attach a handler's `as name` to the final
+                // else operand. Only an ungrouped conditional else spine may
+                // carry it; brackets or any other expression parent forbid it.
+                let mut ancestor = self.current;
+                if ancestor.is_none() {
+                    return false;
+                }
+                while let Some(i) = ancestor {
+                    if self.entries[i].kind != "conditional_expression" {
+                        return false;
+                    }
+                    let mut child = self.entries[i].first;
+                    let mut values = 0;
+                    while let Some(j) = child {
+                        if cancel.at(Checkpoint::Collector) {
+                            return false;
+                        }
+                        values += usize::from(self.entries[j].class != Class::Ignore);
+                        child = self.entries[j].next;
+                    }
+                    if values != 2 {
+                        return false;
+                    }
+                    ancestor = self.entries[i].parent;
+                }
+                self.handler_alias = true;
+                (Class::Ignore, Shape::Ignore)
+            }
+            "as_pattern_target"
+                if self.mode == Mode::ExceptionType
+                    && self
+                        .current
+                        .is_some_and(|i| self.entries[i].kind == "as_pattern") =>
+            {
+                if node.child_count() != 1
+                    || node
+                        .child(0)
+                        .is_none_or(|child| child.kind() != "identifier")
+                {
+                    return false;
+                }
+                (Class::Ignore, Shape::Ignore)
+            }
+            "as" if !node.is_named()
+                && self.mode == Mode::ExceptionType
+                && self
+                    .current
+                    .is_some_and(|i| self.entries[i].kind == "as_pattern") =>
+            {
                 (Class::Ignore, Shape::Ignore)
             }
             "list"
@@ -200,7 +258,9 @@ impl Expression {
             {
                 (Class::Ignore, Shape::Ignore)
             }
-            "=" if self.mode == Mode::BodyValue && !node.is_named() => {
+            "=" if matches!(self.mode, Mode::BodyValue | Mode::ExceptionType)
+                && !node.is_named() =>
+            {
                 (Class::Ignore, Shape::Ignore)
             }
             "comment" if !type_comment(text, cancel) => (Class::Ignore, Shape::Ignore),
@@ -270,6 +330,15 @@ impl Expression {
         let annotation =
             |class| matches!(class, Class::Reference | Class::Annotation | Class::Text);
         let normalized = match kind {
+            "as_pattern_target"
+                if count == 1 && self.entries[first.unwrap()].kind == "identifier" =>
+            {
+                Some((Class::Ignore, Shape::Ignore))
+            }
+            "as_pattern" if count == 1 && self.body_value(first.unwrap()) => {
+                let i = first.unwrap();
+                Some((self.entries[i].class, Shape::Alias(self.resolve(i))))
+            }
             "not in" | "is not" => {
                 let expected = if kind == "not in" {
                     ["not", "in"]
@@ -680,8 +749,10 @@ impl Expression {
                 class == Class::Reference
             } else if self.core_mode() {
                 self.body_value(index)
-            } else if self.mode == Mode::AssignmentTarget {
+            } else if matches!(self.mode, Mode::AssignmentTarget | Mode::NeutralTarget) {
                 self.valid_target(index, bytes, cancel)
+                    && (self.mode != Mode::NeutralTarget
+                        || matches!(self.entries[index].kind, "identifier" | "attribute"))
             } else {
                 annotation(class)
             };
@@ -719,7 +790,10 @@ impl Expression {
     }
 
     fn core_mode(&self) -> bool {
-        matches!(self.mode, Mode::BodyValue | Mode::Default)
+        matches!(
+            self.mode,
+            Mode::BodyValue | Mode::ExceptionType | Mode::Default
+        )
     }
 
     fn valid_target<F: FnMut(Checkpoint) -> bool>(

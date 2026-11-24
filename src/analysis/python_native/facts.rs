@@ -7,7 +7,8 @@ use tree_sitter::Node;
 mod expressions;
 use expressions::{Expression, Mode};
 
-const FACT_POLICY: &str = "python-native-private-facts-9";
+// Private Python 3.12 target, not the grammar's broader Python-2/3 acceptance.
+const FACT_POLICY: &str = "python-native-private-facts-10";
 const MAX_FACTS: usize = 100_000;
 const SIGNATURE_WORK: usize = 2 * 16384 + 17;
 
@@ -426,17 +427,32 @@ struct Frame {
     indent: Option<usize>,
     last_end: Option<usize>,
     last_child: &'static str,
+    // Context-specific direct-child sequence, never an execution/scope state.
+    progress: u8,
+    try_state: FrameTryState,
+}
+
+// Updated only by direct-child events in the shared counted walk. Family is
+// 1 for ordinary handlers, 2 for except*; phase is handlers/else/finally.
+#[derive(Default)]
+struct FrameTryState {
+    handlers: usize,
+    family: u8,
+    phase: u8,
 }
 
 fn ordinary_compound(kind: &str) -> bool {
     matches!(
         kind,
-        "if_statement" | "while_statement" | "for_statement" | "with_statement"
+        "if_statement" | "while_statement" | "for_statement" | "with_statement" | "try_statement"
     )
 }
 
 fn ordinary_clause(kind: &str) -> bool {
-    matches!(kind, "elif_clause" | "else_clause")
+    matches!(
+        kind,
+        "elif_clause" | "else_clause" | "except_clause" | "finally_clause"
+    )
 }
 
 fn suite_parent(parent: &str, field: Option<&str>) -> bool {
@@ -448,26 +464,30 @@ fn suite_parent(parent: &str, field: Option<&str>) -> bool {
                 | "for_statement"
                 | "while_statement"
                 | "with_statement"
+                | "try_statement"
                 | "else_clause",
             Some("body")
         ) | ("if_statement" | "elif_clause", Some("consequence"))
+            | ("except_clause" | "finally_clause", None)
     )
 }
 
 fn body_header_value(parent: &str, field: Option<&str>, kind: &str) -> bool {
-    matches!(
+    (matches!(
         (parent, field),
         (
             "if_statement" | "elif_clause" | "while_statement",
             Some("condition")
         ) | ("for_statement", Some("right"))
-    ) || (parent == "with_item" && field == Some("value") && kind != "as_pattern")
+            | ("except_clause", Some("value"))
+    ) && kind != "as_pattern")
+        || (parent == "with_item" && field == Some("value") && kind != "as_pattern")
         || (parent == "as_pattern" && field != Some("alias") && kind != "comment" && kind != "as")
 }
 
 fn ordinary_header_token(anchor: &Frame, node: Node<'_>, previous_line: usize) -> bool {
     let kind = node.kind();
-    let placed = if kind == ":" {
+    let placed = if kind == ":" || (anchor.kind == "except_clause" && matches!(kind, "as" | "*")) {
         node.start_position().row + 1 == previous_line
     } else {
         node.start_position().row == anchor.row
@@ -481,6 +501,9 @@ fn ordinary_header_token(anchor: &Frame, node: Node<'_>, previous_line: usize) -
                 | ("while_statement", "while" | ":")
                 | ("for_statement", "async" | "for" | "in" | ":")
                 | ("with_statement", "async" | "with" | ":")
+                | ("try_statement", "try" | ":")
+                | ("finally_clause", "finally" | ":")
+                | ("except_clause", "except" | "*" | "as" | ":")
         )
 }
 
@@ -1281,6 +1304,13 @@ impl Collector<'_, '_> {
 
     fn finish_expression<F: FnMut(Checkpoint) -> bool>(&mut self, cancel: &Cancellation<F>) {
         let expression = self.expression.take().unwrap();
+        if expression.mode == Mode::NeutralTarget {
+            self.pending -= expression.working;
+            return;
+        }
+        if expression.mode == Mode::ExceptionType && expression.handler_alias {
+            self.frames.last_mut().unwrap().progress = 5;
+        }
         if matches!(expression.mode, Mode::Base | Mode::AssignmentAnnotation) {
             let owner_len = self.definitions.last().map_or(0, |f| f.symbol.len());
             let temporary = Expression::RENDER_WORK + owner_len;
@@ -1311,7 +1341,10 @@ impl Collector<'_, '_> {
             self.pending -= expression.working + temporary;
             return;
         }
-        if matches!(expression.mode, Mode::BodyValue | Mode::AssignmentTarget) {
+        if matches!(
+            expression.mode,
+            Mode::BodyValue | Mode::ExceptionType | Mode::AssignmentTarget
+        ) {
             self.finish_body_expression(expression, cancel);
             return;
         }
@@ -1359,9 +1392,12 @@ impl Collector<'_, '_> {
                 }
                 self.pending -= temporary;
             }
-            Mode::Base | Mode::AssignmentAnnotation | Mode::BodyValue | Mode::AssignmentTarget => {
-                unreachable!()
-            }
+            Mode::Base
+            | Mode::AssignmentAnnotation
+            | Mode::BodyValue
+            | Mode::ExceptionType
+            | Mode::AssignmentTarget
+            | Mode::NeutralTarget => unreachable!(),
         }
         self.pending -= expression.working;
     }
@@ -1595,6 +1631,11 @@ impl Collector<'_, '_> {
                     | "return_statement"
                     | "break_statement"
                     | "continue_statement"
+                    | "assert_statement"
+                    | "raise_statement"
+                    | "global_statement"
+                    | "nonlocal_statement"
+                    | "delete_statement"
             ) || suite.last_end.is_some()
             {
                 self.unsupported = true;
@@ -1681,6 +1722,213 @@ impl Observer for Collector<'_, '_> {
             }
         }
         let parent = self.frames.last().map(|f| f.kind).unwrap_or("");
+        if self.expression.is_none() && kind != "comment" {
+            let same_line = node.start_position().row + 1 == self.terminal_line;
+            let named = node.is_named();
+            let anchor = self.frames.last_mut();
+            let valid = if let Some(anchor) = anchor {
+                let p = &mut anchor.progress;
+                match parent {
+                    "try_statement" => match (kind, *p) {
+                        ("try", 0) if !named => {
+                            *p = 1;
+                            true
+                        }
+                        (":", 1) if !named && same_line => {
+                            *p = 2;
+                            true
+                        }
+                        ("block", 2) if field == Some("body") => {
+                            *p = 3;
+                            true
+                        }
+                        ("except_clause", 3) if field.is_none() && anchor.try_state.phase <= 1 => {
+                            anchor.try_state.handlers += 1;
+                            anchor.try_state.phase = 1;
+                            true
+                        }
+                        ("else_clause", 3)
+                            if field.is_none()
+                                && anchor.try_state.handlers != 0
+                                && anchor.try_state.phase == 1 =>
+                        {
+                            anchor.try_state.phase = 2;
+                            true
+                        }
+                        ("finally_clause", 3) if field.is_none() && anchor.try_state.phase < 3 => {
+                            anchor.try_state.phase = 3;
+                            true
+                        }
+                        _ => false,
+                    },
+                    "except_clause" => match (kind, *p) {
+                        ("except", 0) if !named => {
+                            *p = 1;
+                            true
+                        }
+                        ("*", 1) if !named && same_line => {
+                            anchor.try_state.family = 2;
+                            *p = 2;
+                            true
+                        }
+                        (_, 1 | 2) if named && field == Some("value") && same_line => {
+                            // The competing as_pattern parse already contains
+                            // the alias; it must not admit a second outer `as`.
+                            // One value only: 3.14's ungrouped multi-type headers
+                            // are not part of the Python 3.12 target.
+                            *p = if kind == "as_pattern" { 5 } else { 3 };
+                            true
+                        }
+                        ("as", 3) if !named && same_line => {
+                            *p = 4;
+                            true
+                        }
+                        ("identifier", 4) if field == Some("alias") && same_line => {
+                            *p = 5;
+                            true
+                        }
+                        (":", 1 | 3 | 5) if !named && same_line => {
+                            *p = 6;
+                            true
+                        }
+                        ("block", 6) if field.is_none() => {
+                            *p = 7;
+                            true
+                        }
+                        _ => false,
+                    },
+                    "assert_statement" => match (kind, *p) {
+                        ("assert", 0) if !named => {
+                            *p = 1;
+                            true
+                        }
+                        (_, 1 | 3) if named && same_line => {
+                            *p += 1;
+                            true
+                        }
+                        (",", 2) if !named && same_line => {
+                            *p = 3;
+                            true
+                        }
+                        _ => false,
+                    },
+                    "as_pattern" => match (kind, *p) {
+                        (_, 0) if named && field != Some("alias") && same_line => {
+                            *p = 1;
+                            true
+                        }
+                        ("as", 1) if !named && same_line => {
+                            *p = 2;
+                            true
+                        }
+                        ("as_pattern_target", 2) if field == Some("alias") && same_line => {
+                            *p = 3;
+                            true
+                        }
+                        _ => false,
+                    },
+                    "raise_statement" => match (kind, *p) {
+                        ("raise", 0) if !named => {
+                            *p = 1;
+                            true
+                        }
+                        (_, 1)
+                            if named
+                                && field.is_none()
+                                && same_line
+                                && kind != "expression_list" =>
+                        {
+                            *p = 2;
+                            true
+                        }
+                        ("from", 2) if !named && same_line => {
+                            *p = 3;
+                            true
+                        }
+                        (_, 3) if named && field == Some("cause") && same_line => {
+                            *p = 4;
+                            true
+                        }
+                        _ => false,
+                    },
+                    "global_statement" | "nonlocal_statement" => match (kind, *p) {
+                        ("global" | "nonlocal", 0) if !named => {
+                            *p = 1;
+                            true
+                        }
+                        ("identifier", 1) if named && same_line => {
+                            *p = 2;
+                            true
+                        }
+                        (",", 2) if !named && same_line => {
+                            *p = 1;
+                            true
+                        }
+                        _ => false,
+                    },
+                    "delete_statement" => match (kind, *p) {
+                        ("del", 0) if !named => {
+                            *p = 1;
+                            true
+                        }
+                        ("identifier" | "attribute", 1) if named && same_line => {
+                            *p = 2;
+                            true
+                        }
+                        _ => false,
+                    },
+                    "augmented_assignment" => match (*p, field) {
+                        (0, Some("left"))
+                            if named && matches!(kind, "identifier" | "attribute") =>
+                        {
+                            *p = 1;
+                            true
+                        }
+                        (1, Some("operator"))
+                            if !named
+                                && same_line
+                                && matches!(
+                                    kind,
+                                    "+=" | "-="
+                                        | "*="
+                                        | "/="
+                                        | "@="
+                                        | "//="
+                                        | "%="
+                                        | "**="
+                                        | ">>="
+                                        | "<<="
+                                        | "&="
+                                        | "^="
+                                        | "|="
+                                ) =>
+                        {
+                            *p = 2;
+                            true
+                        }
+                        (2, Some("right"))
+                            if named
+                                && same_line
+                                && !matches!(
+                                    kind,
+                                    "expression_list" | "assignment" | "augmented_assignment"
+                                ) =>
+                        {
+                            *p = 3;
+                            true
+                        }
+                        _ => false,
+                    },
+                    _ => true,
+                }
+            } else {
+                true
+            };
+            if !valid {
+                self.unsupported = true;
+                return;
+            }
+        }
         if parent == "expression_statement" && kind != "comment" {
             // Bare tuple expression statements have separate direct CST roots,
             // unlike expression_list RHS/return values. Validate the sequence
@@ -1688,12 +1936,16 @@ impl Observer for Collector<'_, '_> {
             let body = self.body.as_mut().unwrap();
             let same_line = node.start_position().row + 1 == self.terminal_line;
             body.sequence = match (body.sequence, kind, node.is_named()) {
-                (BodySequence::Empty, "assignment", true) => BodySequence::Assignment,
+                (BodySequence::Empty, "assignment" | "augmented_assignment", true) => {
+                    BodySequence::Assignment
+                }
                 (BodySequence::Value, ",", false) if same_line => BodySequence::Comma,
                 (BodySequence::Empty, _, true) if node.start_position().row + 1 == body.line => {
                     BodySequence::Value
                 }
-                (BodySequence::Comma, _, true) if same_line && kind != "assignment" => {
+                (BodySequence::Comma, _, true)
+                    if same_line && !matches!(kind, "assignment" | "augmented_assignment") =>
+                {
                     BodySequence::Value
                 }
                 _ => {
@@ -1702,8 +1954,11 @@ impl Observer for Collector<'_, '_> {
                 }
             };
         }
-        let header_value = body_header_value(parent, field, kind);
+        let header_value = self.expression.is_none() && body_header_value(parent, field, kind);
         let mode = match (parent, field) {
+            _ if header_value && parent == "except_clause" && node.is_named() => {
+                Some(Mode::ExceptionType)
+            }
             _ if header_value && node.is_named() => Some(Mode::BodyValue),
             ("argument_list", _)
                 if self.expression.is_none()
@@ -1720,8 +1975,18 @@ impl Observer for Collector<'_, '_> {
             ("assignment", Some("left")) => Some(Mode::AssignmentTarget),
             ("assignment", Some("right")) => Some(Mode::BodyValue),
             ("assignment", Some("type")) => Some(Mode::AssignmentAnnotation),
+            ("augmented_assignment", Some("left")) | ("delete_statement", _)
+                if node.is_named() && kind != "comment" =>
+            {
+                Some(Mode::NeutralTarget)
+            }
+            ("augmented_assignment", Some("right")) => Some(Mode::BodyValue),
+            ("assert_statement" | "raise_statement", _) if node.is_named() && kind != "comment" => {
+                Some(Mode::BodyValue)
+            }
             ("expression_statement", _)
-                if node.is_named() && kind != "assignment" && kind != "comment" =>
+                if node.is_named()
+                    && !matches!(kind, "assignment" | "augmented_assignment" | "comment") =>
             {
                 Some(Mode::BodyValue)
             }
@@ -1945,14 +2210,18 @@ impl Observer for Collector<'_, '_> {
                     let anchor = self.frames.last().unwrap();
                     let point = node.start_position();
                     let line_start = node.start_byte().saturating_sub(point.column);
-                    if field != Some("alternative")
-                        || !matches!(
-                            (parent, kind),
-                            ("if_statement", "elif_clause" | "else_clause")
-                                | ("for_statement" | "while_statement", "else_clause")
-                        )
+                    let try_clause = parent == "try_statement"
+                        && field.is_none()
+                        && matches!(kind, "except_clause" | "else_clause" | "finally_clause");
+                    if (!try_clause
+                        && (field != Some("alternative")
+                            || !matches!(
+                                (parent, kind),
+                                ("if_statement", "elif_clause" | "else_clause")
+                                    | ("for_statement" | "while_statement", "else_clause")
+                            )))
                         || anchor.last_end.is_none_or(|end| point.row <= end)
-                        || anchor.last_child == "else_clause"
+                        || (!try_clause && anchor.last_child == "else_clause")
                         || point.column != anchor.column
                         || !bytes[line_start..node.start_byte()]
                             .iter()
@@ -1972,7 +2241,9 @@ impl Observer for Collector<'_, '_> {
                         self.unsupported = true;
                     }
                 }
-                "as_pattern" if parent == "with_item" && field == Some("value") => {}
+                "as_pattern"
+                    if matches!(parent, "with_item" | "except_clause")
+                        && field == Some("value") => {}
                 "as_pattern_target" if parent == "as_pattern" && field == Some("alias") => {
                     // The grammar wraps even a direct name in this alias node.
                     // Admit that exact wrapper, not grouped, starred, attribute
@@ -2024,6 +2295,17 @@ impl Observer for Collector<'_, '_> {
                 }
                 "(" | ")" | "," if parent == "argument_list" && !node.is_named() => {}
                 "pass_statement" => self.statement(node, bytes),
+                "assert_statement" | "raise_statement" | "global_statement"
+                | "nonlocal_statement" | "delete_statement" => self.statement(node, bytes),
+                "assert" | "raise" | "global" | "nonlocal" | "del" | "from" | ","
+                    if matches!(
+                        parent,
+                        "assert_statement"
+                            | "raise_statement"
+                            | "global_statement"
+                            | "nonlocal_statement"
+                            | "delete_statement"
+                    ) && !node.is_named() => {}
                 "break_statement" | "continue_statement" => {
                     self.statement(node, bytes);
                     // A loop's else suite is outside that loop's jump context;
@@ -2097,6 +2379,17 @@ impl Observer for Collector<'_, '_> {
                             .map(|left| left.start_byte()..left.end_byte());
                     }
                 }
+                "augmented_assignment" if parent == "expression_statement" => {
+                    if node.child_by_field_name("left").is_none()
+                        || node.child_by_field_name("right").is_none()
+                        || node.child_by_field_name("operator").is_none()
+                    {
+                        self.unsupported = true;
+                    }
+                }
+                _ if parent == "augmented_assignment"
+                    && field == Some("operator")
+                    && !node.is_named() => {}
                 "," if parent == "expression_statement" && !node.is_named() => {}
                 ":" | "=" if parent == "assignment" && !node.is_named() => {
                     if node.start_position().row + 1 != previous_terminal_line {
@@ -2137,6 +2430,10 @@ impl Observer for Collector<'_, '_> {
                         if node.start_position().row != self.frames.last().unwrap().row {
                             self.unsupported = true;
                         }
+                    } else if matches!(parent, "global_statement" | "nonlocal_statement")
+                        || (parent == "except_clause" && field == Some("alias"))
+                    {
+                        // These names are AST strings, not bindings or expressions.
                     } else if matches!(parent, "function_definition" | "class_definition")
                         && field == Some("name")
                     {
@@ -2340,6 +2637,8 @@ impl Observer for Collector<'_, '_> {
             indent: None,
             last_end: None,
             last_child: "",
+            progress: 0,
+            try_state: FrameTryState::default(),
         });
     }
 
@@ -2348,6 +2647,28 @@ impl Observer for Collector<'_, '_> {
             return;
         }
         let frame = self.frames.pop().unwrap();
+        let valid = match node.kind() {
+            "try_statement" => {
+                frame.progress == 3 && (frame.try_state.handlers != 0 || frame.try_state.phase == 3)
+            }
+            "except_clause" => {
+                let family = frame.try_state.family.max(1);
+                let parent = self.frames.last_mut().unwrap();
+                let matches = parent.try_state.family == 0 || parent.try_state.family == family;
+                parent.try_state.family = family;
+                frame.progress == 7 && matches
+            }
+            "assert_statement" => matches!(frame.progress, 2 | 4),
+            "as_pattern" if self.expression.is_none() => frame.progress == 3,
+            "raise_statement" => matches!(frame.progress, 1 | 2 | 4),
+            "global_statement" | "nonlocal_statement" | "delete_statement" => frame.progress == 2,
+            "augmented_assignment" => frame.progress == 3,
+            _ => true,
+        };
+        if !valid {
+            self.unsupported = true;
+            return;
+        }
         if node.kind() != "comment" {
             if let Some(parent) = self.frames.last_mut() {
                 parent.last_child = node.kind();
@@ -2477,6 +2798,11 @@ impl Observer for Collector<'_, '_> {
                 self.pending -= parameter.working + temporary;
             }
             "pass_statement"
+            | "assert_statement"
+            | "raise_statement"
+            | "global_statement"
+            | "nonlocal_statement"
+            | "delete_statement"
             | "expression_statement"
             | "return_statement"
             | "break_statement"
@@ -2745,6 +3071,578 @@ mod tests {
             "{result:?}"
         );
         result
+    }
+
+    #[test]
+    fn policy10_exception_paths_exact_calls_warnings_and_neutral_facts() {
+        let result = accepted(concat!(
+            "try:\n    assert check(inner()), message(eval())\n",
+            "except error_type(exec()) as error:\n    raise failure(eval()) from cause(exec())\n",
+            "else:\n    assert okay()\nfinally:\n    finish(eval())\n",
+        ));
+        let calls: Vec<_> = result
+            .facts
+            .iter()
+            .filter(|f| f.kind == "call")
+            .map(|f| (f.line, f.end_line, f.symbol.as_str(), f.value.as_str()))
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                (2, 2, "sample", "check(inner())"),
+                (2, 2, "sample", "eval()"),
+                (2, 2, "sample", "inner()"),
+                (2, 2, "sample", "message(eval())"),
+                (3, 3, "sample", "error_type(exec())"),
+                (3, 3, "sample", "exec()"),
+                (4, 4, "sample", "cause(exec())"),
+                (4, 4, "sample", "eval()"),
+                (4, 4, "sample", "exec()"),
+                (4, 4, "sample", "failure(eval())"),
+                (6, 6, "sample", "okay()"),
+                (8, 8, "sample", "eval()"),
+                (8, 8, "sample", "finish(eval())"),
+            ]
+        );
+        assert_eq!(
+            warning_messages(&result),
+            [
+                warning(2, "eval"),
+                warning(3, "exec"),
+                warning(4, "eval"),
+                warning(4, "exec"),
+                warning(8, "eval"),
+            ]
+        );
+        assert!(result
+            .facts
+            .iter()
+            .all(|f| matches!(f.kind.as_str(), "module" | "call")));
+    }
+
+    #[test]
+    fn policy10_conditional_handler_alias_normalization() {
+        for marker in ["", "*"] {
+            let result = accepted(format!(
+                concat!(
+                    "from importlib import import_module as load\n",
+                    "try: pass\nexcept{} yes() if ready() else load() as load:\n    load()\n",
+                ),
+                marker
+            ));
+            let calls: Vec<_> = result
+                .facts
+                .iter()
+                .filter(|f| f.kind == "call")
+                .map(|f| (f.line, f.value.as_str()))
+                .collect();
+            assert_eq!(
+                calls,
+                [(3, "load()"), (3, "ready()"), (3, "yes()"), (4, "load()")]
+            );
+            assert_eq!(
+                warning_messages(&result),
+                [
+                    warning(3, "importlib.import_module"),
+                    warning(4, "importlib.import_module"),
+                ]
+            );
+            assert!(result
+                .facts
+                .iter()
+                .all(|f| matches!(f.kind.as_str(), "module" | "call" | "from_import")));
+            for value in [
+                "yes() if ready() else no()",
+                "yes() if ready() else maybe() if retry() else no()",
+                "(yes() if ready() else no())",
+                "(yes() if ready() else no()) if outer() else no()",
+                "yes() if (ready() if retry() else other()) else no()",
+                "yes() if ready() else (no())",
+            ] {
+                let text = format!("try:\n    assert {value}, {value}\nexcept{marker} {value} as error:\n    raise {value} from {value}\nfinally:\n    value += {value}\n");
+                let result = accepted(text);
+                assert!(result
+                    .facts
+                    .iter()
+                    .all(|f| matches!(f.kind.as_str(), "module" | "call")));
+            }
+        }
+        for header in [
+            "yes() if ready() else no() as first as second",
+            "yes() if ready() else no() as (error)",
+            "yes() if ready() else no() as obj.error",
+            "yes() if ready() else no() as \u{212a}",
+            "yes() if ready() else (no() as error)",
+            "(yes() if ready() else no() as error)",
+            "(yes() as error) if ready() else no()",
+            "yes() if (ready() as error) else no()",
+            "yes() if ready() else no() as error, Other",
+        ] {
+            let result = candidates(format!("eval()\ntry: pass\nexcept {header}: pass\n"));
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{header}"
+            );
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn policy10_handler_alias_arena_source_order_and_neutral_names() {
+        let result = accepted(concat!(
+            "from importlib import import_module as load\n",
+            "try:\n    from pkgutil import walk_packages as load\n",
+            "except load() as load:\n",
+            "    global load\n    nonlocal load\n    del load\n    load += load()\n",
+            "    from pkgutil import iter_modules as load\n",
+            "except (load(), Other) as load:\n    assert load(), load()\n",
+            "else:\n    raise load() from load()\n",
+            "finally:\n    load()\n",
+            "load()\n",
+            "def same():\n    from importlib import import_module as saved\n",
+            "def same():\n    try: pass\n    except saved() as saved: saved()\n",
+        ));
+        let mut expected: Vec<_> = [
+            (4, "pkgutil.walk_packages"),
+            (8, "pkgutil.walk_packages"),
+            (10, "pkgutil.iter_modules"),
+            (11, "pkgutil.iter_modules"),
+            (11, "pkgutil.iter_modules"),
+            (13, "pkgutil.iter_modules"),
+            (13, "pkgutil.iter_modules"),
+            (15, "pkgutil.iter_modules"),
+            (16, "pkgutil.iter_modules"),
+            (21, "importlib.import_module"),
+            (21, "importlib.import_module"),
+        ]
+        .into_iter()
+        .map(|(line, name)| warning(line, name))
+        .collect();
+        expected.sort();
+        assert_eq!(
+            warning_messages(&result),
+            expected.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert!(!result.facts.iter().any(|f| f.kind.starts_with("binding")));
+    }
+
+    #[test]
+    fn policy10_nested_owners_class_annotations_and_final_neutral_spans() {
+        let text = concat!(
+            "def outer():\n    try:\n        class C:\n            try:\n",
+            "                field: T = make()\n            except problem():\n",
+            "                def inner():\n                    try: raise fail()\n",
+            "                    finally: nonlocal unresolved\n",
+            "                assert restored()\n            finally: global final_name\n",
+            "    except* group():\n        assert outer_again()\n",
+            "    finally:\n        del final_name\n        # trailing\n",
+            "after()\n",
+        );
+        for newline in ["\n", "\r\n"] {
+            let result = accepted(text.replace('\n', newline));
+            for (kind, symbol, line, end) in [
+                ("function", "sample.outer", 1, 15),
+                ("class", "sample.outer.C", 3, 11),
+                ("function", "sample.outer.C.inner", 7, 9),
+                ("attribute_annotation", "sample.outer.C.field", 5, 5),
+            ] {
+                assert!(
+                    result.facts.iter().any(|f| f.kind == kind
+                        && f.symbol == symbol
+                        && f.line == line
+                        && f.end_line == end),
+                    "{kind}: {result:?}"
+                );
+            }
+            for (call, owner) in [
+                ("make()", "sample.outer.C"),
+                ("problem()", "sample.outer.C"),
+                ("fail()", "sample.outer.C.inner"),
+                ("restored()", "sample.outer.C"),
+                ("group()", "sample.outer"),
+                ("outer_again()", "sample.outer"),
+                ("after()", "sample"),
+            ] {
+                assert!(
+                    result
+                        .facts
+                        .iter()
+                        .any(|f| f.kind == "call" && f.value == call && f.symbol == owner),
+                    "{call}: {result:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn policy10_assert_raise_declarations_and_handler_ast_not_compiler_rules() {
+        for text in [
+            "assert test()", "assert test(), message()", "assert (test(), message())",
+            "assert (\n test()\n), (\n message()\n)",
+            "raise", "raise failure()", "raise failure() from cause()",
+            "raise (\n failure()\n) from (\n cause()\n)", "raise (E, F)",
+            "global x, x, y", "nonlocal missing, missing",
+            "class C:\n    assert check()\n    raise\n    global x\n    nonlocal y\n    del x\n    x += use()",
+            "def f():\n    x=1\n    global x\n    nonlocal x",
+            "try: pass\nexcept: pass\nexcept E: pass",
+            "try: pass\nexcept* (E, F): pass\nexcept* G as error: pass\nelse: pass\nfinally: pass",
+            "try: pass\nexcept (\n E,\n F\n) as error: assert test()",
+            "try: pass\nfinally: raise",
+        ] {
+            accepted(format!("{text}\n"));
+        }
+        // Every new simple form shares the existing single inline suite rule.
+        for simple in [
+            "assert check(), msg()",
+            "raise E from cause()",
+            "global x, y",
+            "nonlocal x",
+            "del self.value",
+            "self.value += change()",
+        ] {
+            accepted(format!("if ready(): {simple}\n"));
+        }
+    }
+
+    #[test]
+    fn policy10_try_python312_structure_alias_and_family_rejections() {
+        for text in [
+            "try: pass",
+            "try: pass\nelse: pass",
+            "try: pass\nelse: pass\nfinally: pass",
+            "try: pass\nexcept*: pass",
+            "try: pass\nexcept E, F: pass",
+            "try: pass\nexcept* E, F: pass",
+            "try: pass\nexcept E as x, F: pass",
+            "try: pass\nexcept E: pass\nexcept* F: pass",
+            "try: pass\nexcept* E: pass\nexcept F: pass",
+            "try: pass\nexcept E: pass\nelse: pass\nexcept F: pass",
+            "try: pass\nexcept E: pass\nelse: pass\nelse: pass",
+            "try: pass\nfinally: pass\nfinally: pass",
+            "try: pass\nfinally: pass\nexcept E: pass",
+            "try: pass\nexcept E as (x): pass",
+            "try: pass\nexcept E as (x,y): pass",
+            "try: pass\nexcept E as [x]: pass",
+            "try: pass\nexcept E as obj.x: pass",
+            "try: pass\nexcept E as x[0]: pass",
+            "try: pass\nexcept E as *x: pass",
+            "try: pass\nexcept E as \u{212a}: pass",
+            "try: pass\nexcept E as True: pass",
+            "try: pass\nexcept E as first as second: pass",
+            "try: pass\nexcept* E as first as second: pass",
+        ] {
+            let result = candidates(format!("eval()\n{text}\n"));
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{text}: {result:?}"
+            );
+            assert_eq!(result.facts.len(), 1, "{text}");
+            assert!(result.diagnostics.is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn policy10_simple_grammar_and_physical_gap_rejections() {
+        for newline in ["\n", "\r\n"] {
+            for text in [
+                "assert",
+                "assert a,b,c",
+                "assert a,",
+                "assert\na",
+                "assert a\n,b",
+                "assert a,\nb",
+                "raise from x",
+                "raise E,F",
+                "raise E,F,T",
+                "raise E from",
+                "raise E\nfrom F",
+                "raise E from\nF",
+                "raise E, F from G",
+                "raise\nfrom x",
+                "global",
+                "nonlocal",
+                "global (x)",
+                "nonlocal (x,y)",
+                "global x,",
+                "nonlocal x,",
+                "global\nx",
+                "global x,\ny",
+                "global x\n,y",
+                "nonlocal x.y",
+                "try\n: pass\nfinally: pass",
+                "try: pass\nexcept\nE: pass",
+                "try: pass\nexcept E\nas x: pass",
+                "try: pass\nexcept E as\nx: pass",
+                "try: pass\nexcept E\n: pass",
+                "try: pass\nexcept E,\nF: pass",
+                "try: pass\nfinally\n: pass",
+                "try: pass\n    except E: pass",
+                "assert\tx",
+                "global\tx",
+                "try: pass\nexcept\tE: pass",
+                "try: pass\nexcept E: # type: ignore\n    pass",
+            ] {
+                let result = candidates(format!("eval()\n{text}\n").replace('\n', newline));
+                assert_ne!(
+                    result.files[0].status,
+                    CandidateStatus::AcceptedFacts,
+                    "{text}: {result:?}"
+                );
+                assert_eq!(result.facts.len(), 1, "{text}");
+                assert!(result.diagnostics.is_empty(), "{text}");
+            }
+            accepted("try:\n    assert (\n        check() # neutral\n    ), message()\nexcept (\n    E, F\n) as error:\n    raise (\n        failure()\n    ) from cause()\nfinally: pass\n".replace('\n', newline));
+        }
+    }
+
+    #[test]
+    fn policy10_neutral_delete_augassign_operators_and_target_boundaries() {
+        for op in [
+            "+=", "-=", "*=", "/=", "@=", "//=", "%=", "**=", ">>=", "<<=", "&=", "^=", "|=",
+        ] {
+            for target in ["value", "self.value", "cls.inner.value"] {
+                let result = accepted(format!("del {target}\n{target} {op} outer(eval())\n"));
+                let calls: Vec<_> = result
+                    .facts
+                    .iter()
+                    .filter(|f| f.kind == "call")
+                    .map(|f| (f.line, f.value.as_str()))
+                    .collect();
+                assert_eq!(calls, [(2, "eval()"), (2, "outer(eval())")]);
+                assert_eq!(warning_messages(&result), [warning(2, "eval")]);
+                assert!(result
+                    .facts
+                    .iter()
+                    .all(|f| matches!(f.kind.as_str(), "module" | "call")));
+            }
+        }
+        for target in [
+            "(x)",
+            "x,y",
+            "[x]",
+            "*x",
+            "items[0]",
+            "obj.x",
+            "get().x",
+            "self.router",
+            "cls.prefix",
+            "self.router.child",
+            "self.inner.router.child",
+        ] {
+            for text in [format!("del {target}"), format!("{target} += eval()")] {
+                let result = candidates(format!("eval()\n{text}\n"));
+                assert_ne!(
+                    result.files[0].status,
+                    CandidateStatus::AcceptedFacts,
+                    "{text}"
+                );
+                assert_eq!(result.facts.len(), 1);
+                assert!(result.diagnostics.is_empty());
+            }
+        }
+        for text in [
+            "x += y = eval()",
+            "x += y += eval()",
+            "x += a,b",
+            "del x,y",
+            "x +=\neval()",
+            "del\nx",
+            "self.x\n+= eval()",
+        ] {
+            let result = candidates(format!("eval()\n{text}\n"));
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{text}"
+            );
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+        accepted("del self.prefix.child\nx += (a,b)\nx += (\n eval()\n)\n");
+    }
+
+    #[test]
+    fn policy10_new_contexts_preserve_metadata_and_header_exclusions() {
+        for value in [
+            "FastAPI()",
+            "pkg.APIRouter()",
+            "app.include_router(child)",
+            "outer(FastAPI())",
+            "(lambda: eval())",
+            "[eval() for x in xs]",
+        ] {
+            for text in [
+                format!("assert {value}"),
+                format!("assert True, {value}"),
+                format!("raise {value}"),
+                format!("raise E from {value}"),
+                format!("try: pass\nexcept {value}: pass"),
+                format!("x += {value}"),
+            ] {
+                let result = candidates(format!("eval()\n{text}\n"));
+                assert_ne!(
+                    result.files[0].status,
+                    CandidateStatus::AcceptedFacts,
+                    "{text}"
+                );
+                assert_eq!(result.facts.len(), 1);
+                assert!(result.diagnostics.is_empty());
+            }
+        }
+        for text in [
+            "try: pass\nexcept E:\n    from fastapi import APIRouter as R",
+            "try: pass\nfinally:\n    from fastapi import FastAPI",
+            "try: pass\nexcept E: import pkg",
+            "try: pass\nfinally: import pkg",
+            "try: pass\nexcept E:\n    def f(x=eval()): pass",
+            "try: pass\nexcept E:\n    @decorate(eval())\n    def f(): pass",
+        ] {
+            let result = candidates(format!("eval()\n{text}\n"));
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{text}"
+            );
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn policy10_exception_jumps_keep_existing_loop_and_definition_boundaries() {
+        for text in [
+            "while ready():\n    try: continue\n    except E: break\n    else: continue\n    finally: break",
+            "for x in xs:\n    try: pass\n    except* E: continue\n    else: break\n    finally: continue",
+            "def f():\n    try: return result()\n    except* E: return fallback()\n    finally: raise",
+            "while outer():\n    while inner(): pass\n    else:\n        try: pass\n        except E: break",
+        ] {
+            accepted(format!("{text}\n"));
+        }
+        for text in [
+            "try: break\nfinally: pass",
+            "try: pass\nexcept E: continue",
+            "while ready():\n    try:\n        def f(): break\n    finally: pass",
+            "while ready():\n    try:\n        class C:\n            continue\n    finally: pass",
+            "while ready(): pass\nelse:\n    try: break\n    finally: pass",
+            "try: return value()\nfinally: pass",
+            "class C:\n    try: return\n    finally: pass",
+        ] {
+            assert_ne!(
+                candidates(text).files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn policy10_resources_cancellation_counted_walk_replay_and_file_reset() {
+        let sources = [source(
+            "a.py",
+            "a",
+            concat!(
+                "try:\n    assert eval(), inner()\nexcept* group(exec()) as error:\n",
+                "    global error\n    nonlocal error\n    del self.error\n",
+                "    self.error += eval()\nelse: raise failed() from cause()\nfinally: pass\n",
+            ),
+        )];
+        let mut parses = 0;
+        let mut visits = 0;
+        let full = extract(
+            &sources,
+            Limits::default(),
+            FactLimits::default(),
+            |phase| {
+                parses += usize::from(phase == Checkpoint::PostParse);
+                visits += usize::from(phase == Checkpoint::Collector);
+                false
+            },
+        )
+        .unwrap();
+        assert_eq!(full.files[0].status, CandidateStatus::AcceptedFacts);
+        assert_eq!(parses, 1);
+        let parsed = parse_batch(&sources).unwrap();
+        assert_eq!(full.files[0].nodes_visited, parsed.files[0].nodes_visited);
+        assert_eq!(full.files[0].max_depth, parsed.files[0].max_depth);
+        assert!(full.files[0].traversal_finished);
+        for stop in [1, visits / 2, visits] {
+            let mut seen = 0;
+            let result = extract(
+                &sources,
+                Limits::default(),
+                FactLimits::default(),
+                |phase| {
+                    seen += usize::from(phase == Checkpoint::Collector);
+                    seen == stop
+                },
+            )
+            .unwrap();
+            assert_eq!(result.files[0].status, CandidateStatus::ResourceLimit);
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+        for limits in [
+            FactLimits {
+                count: full.facts.len() - 1,
+                ..FactLimits::default()
+            },
+            FactLimits {
+                warnings: 0,
+                ..FactLimits::default()
+            },
+            FactLimits {
+                working: 1024,
+                ..FactLimits::default()
+            },
+            FactLimits {
+                bytes: serde_json::to_vec(&full).unwrap().len() - 1,
+                ..FactLimits::default()
+            },
+        ] {
+            let result = extract(&sources, Limits::default(), limits, |_| false).unwrap();
+            assert_eq!(result.files[0].status, CandidateStatus::ResourceLimit);
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+        for limits in [
+            Limits {
+                nodes: parsed.files[0].nodes_visited - 1,
+                ..Limits::default()
+            },
+            Limits {
+                depth: parsed.files[0].max_depth - 1,
+                ..Limits::default()
+            },
+        ] {
+            let result = extract(&sources, limits, FactLimits::default(), |_| false).unwrap();
+            assert_eq!(result.files[0].status, CandidateStatus::ResourceLimit);
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+        let batch = [
+            source("bad.py", "bad", "try:\n    from importlib import import_module as leak\n    eval()\nexcept E: del self.router\n"),
+            source("syntax.py", "syntax", "try: pass\nexcept E, F: pass\nassert (\n"),
+            source("good.py", "good", "try: assert leak()\nexcept E: assert eval()\nfinally: nonlocal missing\n"),
+        ];
+        let result = extract_fact_candidates(&batch).unwrap();
+        assert_eq!(result.files[0].status, CandidateStatus::UnsupportedSyntax);
+        assert_eq!(result.files[1].status, CandidateStatus::SyntaxError);
+        assert_eq!(result.files[2].status, CandidateStatus::AcceptedFacts);
+        assert_eq!(
+            result.facts.iter().filter(|f| f.path != "good.py").count(),
+            2
+        );
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].path, "good.py");
+        assert_eq!(result.diagnostics[0].message, warning(2, "eval"));
+        let replay = extract_fact_candidates(&batch).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&result).unwrap(),
+            serde_json::to_vec(&replay).unwrap()
+        );
     }
 
     #[test]
@@ -3052,11 +3950,10 @@ mod tests {
                 // Parenthesized with-item lists, even valid ones, are deferred.
                 "with (x as y, z as w): pass",
                 "with (\n x as y,\n z as w,\n): pass",
-                "try: pass\nfinally: pass",
                 "match x:\n    case _: pass",
-                "if x: assert y",
-                "if x: raise E",
-                "if x: global y",
+                "if x: assert (y for y in ys)",
+                "if x: raise (lambda: E)",
+                "if x: del items[0]",
                 "if FastAPI(): pass",
                 "while obj.include_router(x): pass",
                 "for x in APIRouter(): pass",
@@ -3172,7 +4069,7 @@ mod tests {
             source(
                 "bad.py",
                 "bad",
-                "if eval():\n    from importlib import import_module as leak\nelse: assert x\n",
+                "if eval():\n    from importlib import import_module as leak\nelse:\n    match x:\n        case _: pass\n",
             ),
             source(
                 "good.py",
@@ -5111,7 +6008,7 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(result.identity.policy, "python-native-private-facts-9");
+        assert_eq!(result.identity.policy, "python-native-private-facts-10");
     }
 
     #[test]
@@ -6188,11 +7085,17 @@ mod tests {
             ),
             source("b.py", "b", "import tools\n".repeat(100)),
         ];
+        // Keep the original small non-frame allowance, while accounting for
+        // fixed progress state in the counted frame arena. The long identifier
+        // still cannot fit; the following shallow file must release its charges.
+        let frame_slots = parse_batch(&sources[1..]).unwrap().files[0].max_depth + 1;
+        let working = 4096 + frame_slots * 4 * std::mem::size_of::<Frame>();
+        assert!(working < 20_000);
         let result = extract(
             &sources,
             Limits::default(),
             FactLimits {
-                working: 4096,
+                working,
                 ..FactLimits::default()
             },
             |_| false,
@@ -6994,9 +7897,9 @@ mod tests {
             "pass\n\u{feff}",
             "# type: ignore\npass",
             "def f(): # type: () -> None\n    pass",
-            "def f():\n    global x",
-            "def f():\n    nonlocal x",
-            "def f():\n    try: pass\n    finally: pass",
+            "def f():\n    match x:\n        case _: pass",
+            "def f():\n    assert (lambda: x)",
+            "def f():\n    try: pass\n    finally: yield x",
             "pass\rpass",
             "# hidden\rimport x",
         ] {
@@ -7273,8 +8176,8 @@ mod tests {
             "return",
             "return x",
             "x: T | U = helper()",
-            "x += helper()",
-            "del x",
+            "items[0] += helper()",
+            "del items[0]",
             "x=y=z",
             "x=(y:=z)",
             "pass; helper()",

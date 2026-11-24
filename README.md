@@ -43,6 +43,8 @@ The [Python completion ledger](docs/python-analysis.md#completion-contract-and-r
 defines six completion gates. Its first broad milestone adds core containers,
 operators/indexing, call-free defaults and ordinary conditional/loop/context-manager
 suites; that bounded coverage is not full Python compatibility or cutover approval.
+G2 work now adds exception paths and related evidence-neutral statements, while
+the remaining generic inventory and production migration gates stay open.
 See the [Python parity gates](docs/python-analysis.md#native-migration-parity-foundation).
 Release/history review remains separate—not a reason to add codebase-specific
 rules to the engine or claim complete application understanding.
