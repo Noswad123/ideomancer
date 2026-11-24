@@ -73,7 +73,7 @@ The finite completion ledger is:
 | Gate | Outcome and required acceptance | State |
 | --- | --- | --- |
 | P1-G1 | Generic expression and ordinary-body coverage: containers/operators/indexing, call-free defaults, conditions, loops and context managers; hidden calls/warnings, owner restoration, spans and one counted walk remain exact. | Implemented and locally validated for the bounded G1 subset below |
-| P1-G2 | Close the generic visitor inventory: remaining statements, targets/writes/imports, arbitrary callees/splats, comprehensions/lambdas/generators, await/yield/walrus, all headers and literal/identifier forms. Every target-version node has a normalization/traversal rule and cross-family oracle cases. | In progress: exception/neutral-statement slice locally validated; remaining inventory open |
+| P1-G2 | Close the generic visitor inventory: remaining statements, targets/writes/imports, arbitrary callees/splats, comprehensions/lambdas/generators, await/yield/walrus, all headers and literal/identifier forms. Every target-version node has a normalization/traversal rule and cross-family oracle cases. | In progress: exceptions, generalized targets/unpacking/calls locally validated; remaining inventory open |
 | P1-G3 | Preserve every existing discovery/framework side output: decorators, CLI/job/API entry facts, route diagnostics and FastAPI host/prefix/include/mutation metadata, including aliases and literal-retention limits. | Pending |
 | P1-G4 | Close grammar/version/encoding/failure differences: original-byte digests, decoding/cookies, physical layout and exact observable parse diagnostics. No unexplained valid-file rejection or invalid-file acceptance in the approved compatibility suite. | Open compatibility blockers |
 | P1-G5 | Integrate distinct native identity, evidence/snapshots, CLI/library dispatch, workflow revalidation and capabilities. Preserve old-save reading/rendering; rediscovery invalidates stale claims. Native operation must not probe Python. | Pending; public migration design required |
@@ -116,6 +116,9 @@ enable these calls merely because their shapes can be rendered.
   a tree for every grammar rejection. Maintain a finite correction/exclusion list.
   Reassess the pinned parser before G2/G3 investment if no credible correction path
   exists; no parser dependency replacement is approved by this plan.
+  A further AST-only discrepancy is the standalone starred conditional root
+  `*(a if ready() else b)`: the Python oracle constructs an AST, while the pinned
+  grammar rejects it. That explicit module-only rejection is not counted as parity.
 - Decide encoding coverage explicitly. The private candidate currently rejects all
   effective cookies, even UTF-8, while the production byte parser supports more.
   A narrower production contract needs an explicit decision, not a silent migration.
@@ -201,8 +204,11 @@ owner/end restoration, alias visitation order, jumps, rollback and replay.
 Eight exception/neutral-statement cases add ordinary/starred handlers, assertions,
 raise/cause traversal, global/nonlocal, narrow delete and all augmented operators,
 alias order, malformed grammar, hidden calls, metadata guards, isolation and replay.
+Ten generalized-target cases add chained/destructuring assignments, AST-root write
+eligibility, grouped annotations, neutral target traversal, shallow metadata guards,
+arbitrary callees/receivers, argument grouping/unpacks, malformed forms and replay.
 
-All eighty-eight oracle cases are **ignored in the ordinary suite**. Run the gate explicitly
+All ninety-eight oracle cases are **ignored in the ordinary suite**. Run the gate explicitly
 with an absolute path to an installed, trusted Python >=3.12:
 
 ```sh
@@ -276,7 +282,7 @@ The accepted file subset is deliberately small:
 - Modules containing supported declarations, `pass`, comments and the limited
   expression/assignment and import statements described in the slices below.
 - Ordinary `if/elif/else`, `while/else`, `for`/`async for`/`else`, and
-  `with`/`async with` suites, with direct-name loop/context binders. These do not
+  `with`/`async with` suites, now with reviewed general target binders. These do not
   create lexical scopes, binder-write facts or control-flow proof.
 - Exception suites, assert/raise/global/nonlocal, and narrowly admitted del/augmented
   statements as described below. These preserve traversal without invented writes.
@@ -355,7 +361,8 @@ introduced `python-native-private-facts-5`; alias-aware warnings advance it to
 `python-native-private-facts-7`; named bases and annotated assignments advance it to
 `python-native-private-facts-8`. G1 core expressions and ordinary suites advance it
 to `python-native-private-facts-9`; the G2 exception/neutral-statement slice advances
-it to `python-native-private-facts-10`, with the expression
+it to `python-native-private-facts-10`. Generalized targets/unpacking/calls advance
+it to `python-native-private-facts-11`, with the expression
 implementation included in its fingerprint. Production identity is unchanged.
 
 Supported annotations are ASCII names/dotted names, safe quoted text, `None`,
@@ -404,12 +411,13 @@ The third private candidate policy adds a deliberately small body/module subset:
 - Expression statements containing names/dotted references, reviewed scalar
   literals, supported calls, grouping or the G1 core expressions below. Plain
   docstrings are evidence-neutral.
-- One assignment target: an ASCII name or a `self`/`cls` attribute chain. These
-  roots are syntax, not proof of a method, class instance or dependency injection.
+- The original single-target subset used ASCII names and `self`/`cls` attribute
+  chains. Policy 11 generalizes target syntax while keeping binding eligibility
+  structural; neither is proof of a receiver type or dependency injection.
 - Function-only bare/value returns. No `return` fact or return-dataflow edge is
   invented; contained calls are retained and statement ends extend function spans.
-- Calls whose callee is a name/dotted reference, with positional arguments followed
-  by explicit named keywords. Argument values can contain supported nested calls.
+- The original name/dotted call subset is generalized by policy 11 to arbitrary
+  admitted callees/receivers and reviewed argument unpacking, described below.
 
 Assignments with normalized name/attribute/call RHS produce `binding` with compact
 sorted-key `source`/`target` shapes. Other admitted RHS roots produce a
@@ -425,10 +433,8 @@ does not reset extraction's shared deadline, traversal, output or working limits
 Grouping preserves AST expression spans separately from complete statement spans:
 an assignment can end after its nested call's closing parenthesis.
 
-Chained/destructuring, starred/subscript/other-receiver targets, unreviewed augmented
-assignment/delete forms, assignment expressions, `await`, yield/generators, lambdas,
-comprehensions, container unpacking, call splats, duplicate explicit keywords and
-call-result callees remain unsupported. Calls in annotations/defaults still reject
+Unreviewed target/augmented/delete forms, assignment expressions, `await`,
+yield/generators, lambdas and comprehensions remain unsupported. Calls in annotations/defaults still reject
 the file. Whole-file rollback and later syntax/resource-error precedence remain.
 Annotated assignments are admitted only through the bounded policy below, not as
 an exception to target, expression or special-metadata guards.
@@ -618,7 +624,7 @@ newlines require actual brackets, not the presence of a colon. Every descendant
 is validated even if rendering clips or exhausts its shape budget.
 
 Generic/subscripted, starred, keyword/metaclass, literal and call-valued bases;
-multiline class headers; grouped assignment targets; unions/unreviewed annotation
+multiline class headers; unions/unreviewed annotation
 expressions; and calls anywhere inside annotations remain excluded. Constructor,
 include-router and router-mutation guards apply to annotated statements too:
 annotation-only `self.router: T` or `self.prefix: T` cannot silently lose the helper's
@@ -705,9 +711,65 @@ last syntax statement, not trailing comments. Exception paths retain existing
 function-only return and loop-body jump boundaries. New progress/normalization
 state is charged through the counted frame/descriptor arenas; cancellation, fact/
 warning/output limits, per-file rollback and later-error precedence remain shared.
-This closes one cohesive part of G2, not its full visitor inventory: `match`, broader
-targets/callees/splats, comprehensions/lambdas/generators, await/yield/walrus, remaining
-imports, declaration headers and literal/identifier compatibility are still open.
+This closed one cohesive part of G2; targets/callees/splats are expanded by policy 11
+below. The remaining inventory includes `match`, comprehensions/lambdas/generators,
+await/yield/walrus, imports, declaration headers and literal/identifier compatibility.
+
+### G2 generalized targets, unpacking and call forms
+
+Policy 11 separates valid target syntax, binding eligibility and top-level metadata
+guards. Ordinary assignment admits chains and nested tuple/list/starred targets,
+grouped scalars, arbitrary attribute receivers and subscript targets. The final RHS
+is shared by every target, and every write fact uses the full outer statement span.
+Chains do not grant physical line joining after `=`; grouped targets require their
+own actual delimiters for continuation.
+
+Only a Name or an Attribute chain reaching the name `self`/`cls` by peeling
+**attributes alone** is binding-eligible. Other targets emit no writes but retain
+all descendant calls/warnings. Entering Tuple/List/Starred makes the destructured
+state sticky: eligible leaves invalidate rather than bind. Scalar parentheses are
+transparent. Non-destructured eligible targets bind only for RHS AST roots Name,
+Attribute or Call; rendered appearance is not a substitute for this rule.
+Class annotation facts recognize normalized grouped Name targets and retain raw
+unclipped field symbols; annotation-only statements still invent no write.
+
+For/with binders use general reviewed Store targets without binder facts or alias
+invalidation. Augmented assignment accepts scalar Name/Attribute/Subscript targets;
+deletion accepts multiple/nested tuple/list targets but no Starred. Their target
+descendant calls are visited, with no generic binding/invalidation facts. Exception
+handler aliases remain direct names, not general targets.
+
+Router mutation checking follows the helper's **shallow top-level** target list.
+An actual top-level attribute requiring that metadata rejects the file until G3,
+regardless of binding eligibility. Destructuring leaves are not promoted to
+top-level mutation targets, and for/with binders invoke no mutation hook. The
+candidate also conservatively rejects raw interior-router chains on top-level
+attributes. Existing constructor and structural `include_router` exclusions apply
+to arbitrary receiver/callee shapes, not just name/dotted references.
+
+Calls now admit arbitrary supported callees and attribute receivers. Shapes and
+warnings continue to use independent fresh rendering budgets. Starred positional
+arguments are grouped before all keywords/double-stars, even when source order
+interleaves them. Double-star keywords render `**=VALUE`; positional and keyword
+groups retain separate 16-item caps/overflow markers. Duplicate explicit keywords
+are admitted because the oracle parses ASTs rather than compiles calls. Invalid
+plain-positional-after-keyword and iterable-unpack-after-keyword-unpack orders reject.
+Tuple/list/set Starred displays and opaque dictionary unpacking retain all descendant
+calls, including beyond rendered items. Starred subscript indices form an AST tuple
+even for one element without a comma.
+
+Unparenthesized Load-Starred roots follow AST `star_expressions` roles, including
+assignment/annotated/augmented RHS, expression statements, returns and for iterables;
+they are not generally permitted in conditions, asserts, raises, keyword values or
+defaults. Compilation may reject some AST-only forms. Descriptor normalization
+preserves nested call spans while lifting CST splats over receivers/calls/operators.
+The documented standalone starred-conditional grammar discrepancy remains explicit.
+
+Target records, strings and temporary traversal state are charged before allocation;
+argument grouping reuses descriptor links instead of allocating group vectors.
+One parse/one counted walk, deadlines, per-file facts/warnings rollback and source-
+deleted replay remain unchanged. G2 is still open for the remaining expression,
+statement, declaration-header, import and lexical inventory; production is unchanged.
 
 ## Current extraction boundary
 

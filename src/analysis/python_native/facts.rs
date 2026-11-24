@@ -8,7 +8,7 @@ mod expressions;
 use expressions::{Expression, Mode};
 
 // Private Python 3.12 target, not the grammar's broader Python-2/3 acceptance.
-const FACT_POLICY: &str = "python-native-private-facts-10";
+const FACT_POLICY: &str = "python-native-private-facts-11";
 const MAX_FACTS: usize = 100_000;
 const SIGNATURE_WORK: usize = 2 * 16384 + 17;
 
@@ -487,7 +487,10 @@ fn body_header_value(parent: &str, field: Option<&str>, kind: &str) -> bool {
 
 fn ordinary_header_token(anchor: &Frame, node: Node<'_>, previous_line: usize) -> bool {
     let kind = node.kind();
-    let placed = if kind == ":" || (anchor.kind == "except_clause" && matches!(kind, "as" | "*")) {
+    let placed = if kind == ":"
+        || (anchor.kind == "except_clause" && matches!(kind, "as" | "*"))
+        || (anchor.kind == "for_statement" && kind == "in")
+    {
         node.start_position().row + 1 == previous_line
     } else {
         node.start_position().row == anchor.row
@@ -550,10 +553,11 @@ enum BodySequence {
 
 struct BodyStatement {
     line: usize,
-    target: Option<String>,
+    targets: Vec<(String, bool)>,
     source: Option<String>,
     binding: bool,
     has_value: bool,
+    annotated: bool,
     annotation: Option<String>,
     // Borrowed source spelling, independent of the clipped binding descriptor.
     field_name: Option<std::ops::Range<usize>>,
@@ -1304,10 +1308,6 @@ impl Collector<'_, '_> {
 
     fn finish_expression<F: FnMut(Checkpoint) -> bool>(&mut self, cancel: &Cancellation<F>) {
         let expression = self.expression.take().unwrap();
-        if expression.mode == Mode::NeutralTarget {
-            self.pending -= expression.working;
-            return;
-        }
         if expression.mode == Mode::ExceptionType && expression.handler_alias {
             self.frames.last_mut().unwrap().progress = 5;
         }
@@ -1343,7 +1343,12 @@ impl Collector<'_, '_> {
         }
         if matches!(
             expression.mode,
-            Mode::BodyValue | Mode::ExceptionType | Mode::AssignmentTarget
+            Mode::BodyValue
+                | Mode::ExceptionType
+                | Mode::AssignmentTarget
+                | Mode::NeutralTarget
+                | Mode::ScalarTarget
+                | Mode::DeleteTarget
         ) {
             self.finish_body_expression(expression, cancel);
             return;
@@ -1397,7 +1402,9 @@ impl Collector<'_, '_> {
             | Mode::BodyValue
             | Mode::ExceptionType
             | Mode::AssignmentTarget
-            | Mode::NeutralTarget => unreachable!(),
+            | Mode::NeutralTarget
+            | Mode::ScalarTarget
+            | Mode::DeleteTarget => unreachable!(),
         }
         self.pending -= expression.working;
     }
@@ -1420,15 +1427,43 @@ impl Collector<'_, '_> {
             .bytes
             .strip_prefix(b"\xef\xbb\xbf")
             .unwrap_or(&self.sources[self.index].bytes);
-        if expression.mode == Mode::AssignmentTarget {
-            let target = expression
-                .render(bytes, cancel)
-                .into_boxed_str()
-                .into_string();
-            let body = self.body.as_mut().unwrap();
-            body.target = Some(target);
-            body.working += retained;
-        } else {
+        let target = matches!(
+            expression.mode,
+            Mode::AssignmentTarget | Mode::ScalarTarget | Mode::DeleteTarget
+        );
+        if target && expression.router_guard(bytes, cancel) {
+            self.unsupported = true;
+            return;
+        }
+        let assignment = matches!(expression.mode, Mode::AssignmentTarget | Mode::ScalarTarget)
+            && self.frames.last().is_some_and(|f| f.kind == "assignment");
+        if assignment {
+            if self.body.as_ref().unwrap().annotated
+                && self.definitions.last().is_some_and(|f| f.class)
+            {
+                self.body.as_mut().unwrap().field_name = expression.name_span();
+            }
+            // Store source-order leaves; reversing at statement close gives
+            // the helper's LIFO order across both chains and destructuring.
+            for (index, destructured) in expression.targets(bytes, cancel) {
+                let charge = 512 + 4 * std::mem::size_of::<(String, bool)>();
+                if !self.reserve_work(charge, cancel) {
+                    return;
+                }
+                let bytes = self.sources[self.index]
+                    .bytes
+                    .strip_prefix(b"\xef\xbb\xbf")
+                    .unwrap_or(&self.sources[self.index].bytes);
+                let value = expression.render_target(index, bytes, cancel);
+                let body = self.body.as_mut().unwrap();
+                body.targets.push((value, destructured));
+                body.working += charge;
+            }
+        }
+        {
+            // Aliases are constant inside admitted expressions, so source-order
+            // call collection (including Dict keys/values and argument groups)
+            // is equivalent after global sorting. This does not admit header calls.
             for index in expression.calls(cancel) {
                 if cancel.at(Checkpoint::Collector) || self.limited.is_some() {
                     break;
@@ -1452,7 +1487,9 @@ impl Collector<'_, '_> {
                 .bytes
                 .strip_prefix(b"\xef\xbb\xbf")
                 .unwrap_or(&self.sources[self.index].bytes);
-            if let Some(body) = self.body.as_mut().filter(|b| b.target.is_some()) {
+            if let Some(body) = self.body.as_mut().filter(|b| {
+                !target && expression.mode != Mode::NeutralTarget && !b.targets.is_empty()
+            }) {
                 body.binding = expression.binding();
                 if body.binding {
                     body.source = Some(
@@ -1501,7 +1538,10 @@ impl Collector<'_, '_> {
             );
             self.pending -= size + 512;
         }
-        if let Some(target) = body.target.as_deref().filter(|_| body.has_value) {
+        for (target, destructured) in body.targets.iter().rev().filter(|_| body.has_value) {
+            if cancel.at(Checkpoint::Collector) || self.limited.is_some() {
+                break;
+            }
             #[derive(Serialize)]
             struct Binding<'a> {
                 #[serde(skip_serializing_if = "Option::is_none")]
@@ -1509,7 +1549,7 @@ impl Collector<'_, '_> {
                 target: &'a str,
             }
             let metadata = Binding {
-                source: body.source.as_deref(),
+                source: body.source.as_deref().filter(|_| !destructured),
                 target,
             };
             let Some(size) = measured(
@@ -1539,7 +1579,7 @@ impl Collector<'_, '_> {
                 .map_or(&self.sources[self.index].module, |f| &f.symbol)
                 .clone();
             self.add(
-                if body.binding {
+                if body.binding && !destructured {
                     "binding"
                 } else {
                     "binding_invalidation"
@@ -1871,16 +1911,14 @@ impl Observer for Collector<'_, '_> {
                             *p = 1;
                             true
                         }
-                        ("identifier" | "attribute", 1) if named && same_line => {
+                        (_, 1) if named && same_line => {
                             *p = 2;
                             true
                         }
                         _ => false,
                     },
                     "augmented_assignment" => match (*p, field) {
-                        (0, Some("left"))
-                            if named && matches!(kind, "identifier" | "attribute") =>
-                        {
+                        (0, Some("left")) if named => {
                             *p = 1;
                             true
                         }
@@ -1909,10 +1947,7 @@ impl Observer for Collector<'_, '_> {
                         (2, Some("right"))
                             if named
                                 && same_line
-                                && !matches!(
-                                    kind,
-                                    "expression_list" | "assignment" | "augmented_assignment"
-                                ) =>
+                                && !matches!(kind, "assignment" | "augmented_assignment") =>
                         {
                             *p = 3;
                             true
@@ -1972,11 +2007,29 @@ impl Observer for Collector<'_, '_> {
             ("typed_parameter" | "typed_default_parameter", Some("type")) => Some(Mode::Annotation),
             ("default_parameter" | "typed_default_parameter", Some("value")) => Some(Mode::Default),
             ("function_definition", Some("return_type")) => Some(Mode::Return),
-            ("assignment", Some("left")) => Some(Mode::AssignmentTarget),
-            ("assignment", Some("right")) => Some(Mode::BodyValue),
+            ("assignment", Some("left")) if self.expression.is_none() => {
+                Some(if self.body.as_ref().is_some_and(|b| b.annotated) {
+                    Mode::ScalarTarget
+                } else {
+                    Mode::AssignmentTarget
+                })
+            }
+            ("assignment", Some("right")) if kind != "assignment" => Some(Mode::BodyValue),
             ("assignment", Some("type")) => Some(Mode::AssignmentAnnotation),
-            ("augmented_assignment", Some("left")) | ("delete_statement", _)
-                if node.is_named() && kind != "comment" =>
+            ("augmented_assignment", Some("left")) if node.is_named() && kind != "comment" => {
+                Some(Mode::ScalarTarget)
+            }
+            ("delete_statement", _) if node.is_named() && kind != "comment" => {
+                Some(Mode::DeleteTarget)
+            }
+            ("for_statement", Some("left")) if node.is_named() => Some(Mode::NeutralTarget),
+            ("as_pattern", Some("alias"))
+                if self
+                    .frames
+                    .iter()
+                    .rev()
+                    .nth(1)
+                    .is_some_and(|f| f.kind == "with_item") =>
             {
                 Some(Mode::NeutralTarget)
             }
@@ -2007,6 +2060,10 @@ impl Observer for Collector<'_, '_> {
                 return;
             }
             // A root expression does not see the gap before its own start.
+            if mode == Mode::NeutralTarget && node.start_position().row + 1 != self.terminal_line {
+                self.unsupported = true;
+                return;
+            }
             // Enclosing expression delimiters, not CST acceptance, authorize
             // implicit continuation after this first physical header token.
             if header_value
@@ -2022,7 +2079,18 @@ impl Observer for Collector<'_, '_> {
                 self.unsupported = true;
                 return;
             }
-            self.expression = Some(Expression::new(mode, node.start_byte()));
+            let mut expression = Expression::new(mode, node.start_byte());
+            // These grammar roles accept star_expressions, including a lone
+            // Load Starred that ast.parse accepts but compilation may reject.
+            expression.star_expressions = mode == Mode::BodyValue
+                && matches!(
+                    (parent, field),
+                    (
+                        "assignment" | "augmented_assignment" | "for_statement",
+                        Some("right")
+                    ) | ("expression_statement" | "return_statement", _)
+                );
+            self.expression = Some(expression);
         }
         let previous_terminal_end = self.terminal_end;
         let previous_terminal_line = self.terminal_line;
@@ -2357,27 +2425,37 @@ impl Observer for Collector<'_, '_> {
                     }
                     self.body = Some(BodyStatement {
                         line: node.start_position().row + 1,
-                        target: None,
+                        targets: Vec::new(),
                         source: None,
                         binding: false,
                         has_value: false,
+                        annotated: false,
                         annotation: None,
                         field_name: None,
                         sequence: BodySequence::Empty,
                         working,
                     });
                 }
-                "assignment" if parent == "expression_statement" => {
+                "assignment"
+                    if parent == "expression_statement"
+                        || (parent == "assignment" && field == Some("right")) =>
+                {
+                    let nested = parent == "assignment";
                     let body = self.body.as_mut().unwrap();
-                    body.has_value = node.child_by_field_name("right").is_some();
-                    if node.child_by_field_name("type").is_some()
-                        && self.definitions.last().is_some_and(|f| f.class)
+                    let annotated = node.child_by_field_name("type").is_some();
+                    // Recursive CST assignments do not start BodyValue, so
+                    // enforce the RHS entry-line gate here too. A grouped
+                    // target may continue after its opening delimiter.
+                    if nested
+                        && (body.annotated
+                            || annotated
+                            || node.start_position().row + 1 != self.terminal_line)
                     {
-                        body.field_name = node
-                            .child_by_field_name("left")
-                            .filter(|left| left.kind() == "identifier")
-                            .map(|left| left.start_byte()..left.end_byte());
+                        self.unsupported = true;
+                        return;
                     }
+                    body.annotated = annotated;
+                    body.has_value = node.child_by_field_name("right").is_some();
                 }
                 "augmented_assignment" if parent == "expression_statement" => {
                     if node.child_by_field_name("left").is_none()
@@ -3074,6 +3152,644 @@ mod tests {
     }
 
     #[test]
+    fn policy11_chained_assignments_do_not_join_physical_lines() {
+        for form in [
+            "a =\nb = rhs()",
+            "a = b =\nc = rhs()",
+            "a = # comment\nb = rhs()",
+        ] {
+            for newline in ["\n", "\r\n"] {
+                let text = format!("eval()\n{form}\n").replace('\n', newline);
+                let sources = [
+                    source("a.py", "a", text),
+                    source("b.py", "b", "a = b = rhs()\n"),
+                ];
+                let result = extract_fact_candidates(&sources).unwrap();
+                assert_ne!(
+                    result.files[0].status,
+                    CandidateStatus::AcceptedFacts,
+                    "{form}"
+                );
+                assert_eq!(result.files[1].status, CandidateStatus::AcceptedFacts);
+                assert_eq!(result.facts.iter().filter(|f| f.path == "a.py").count(), 1);
+                assert!(result.diagnostics.is_empty());
+            }
+        }
+        accepted("a = (\n b\n) = rhs()\n");
+        accepted("(\n a\n) = b = rhs()\n");
+    }
+
+    #[test]
+    fn policy11_chains_share_outer_statement_and_final_rhs() {
+        let result = accepted("first = self.field = (last) = (\n    make()\n)\n");
+        let writes: Vec<_> = result
+            .facts
+            .iter()
+            .filter(|f| f.kind == "binding")
+            .map(|f| (f.line, f.end_line, f.value.as_str()))
+            .collect();
+        assert_eq!(
+            writes,
+            [
+                (1, 3, "{\"source\":\"make()\",\"target\":\"first\"}"),
+                (1, 3, "{\"source\":\"make()\",\"target\":\"last\"}"),
+                (1, 3, "{\"source\":\"make()\",\"target\":\"self.field\"}"),
+            ]
+        );
+        assert_eq!(result.facts.iter().filter(|f| f.kind == "call").count(), 1);
+    }
+
+    #[test]
+    fn policy11_destructuring_is_sticky_and_only_eligible_leaves_write() {
+        let result = accepted(
+            "scalar = ((single,), [self.field, *rest], other.field, items[index()]) = make()\n",
+        );
+        let writes: Vec<_> = result
+            .facts
+            .iter()
+            .filter(|f| f.kind.starts_with("binding"))
+            .map(|f| (f.kind.as_str(), f.value.as_str()))
+            .collect();
+        assert_eq!(
+            writes,
+            [
+                ("binding", "{\"source\":\"make()\",\"target\":\"scalar\"}"),
+                ("binding_invalidation", "{\"target\":\"rest\"}"),
+                ("binding_invalidation", "{\"target\":\"self.field\"}"),
+                ("binding_invalidation", "{\"target\":\"single\"}"),
+            ]
+        );
+        for text in ["*x = make()", "a,*b,*c = make()", "[x] = make()"] {
+            let result = accepted(text);
+            assert!(!result.facts.iter().any(|f| f.kind == "binding"));
+        }
+    }
+
+    #[test]
+    fn policy11_noneligible_targets_keep_calls_warnings_and_import_aliases() {
+        let result = accepted(concat!(
+            "from importlib import import_module as load\n",
+            "other.field = items[load()] = factory(eval()).field = rhs()\n",
+            "self.items[index()].field = self.factory().field = rhs()\n",
+            "load = ordinary\nload()\n",
+        ));
+        assert_eq!(
+            result
+                .facts
+                .iter()
+                .filter(|f| f.kind.starts_with("binding"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            warning_messages(&result),
+            [
+                warning(2, "eval"),
+                warning(2, "importlib.import_module"),
+                warning(5, "importlib.import_module"),
+            ]
+        );
+        for call in [
+            "load()",
+            "factory(eval())",
+            "eval()",
+            "index()",
+            "self.factory()",
+            "rhs()",
+        ] {
+            assert!(
+                result
+                    .facts
+                    .iter()
+                    .any(|f| f.kind == "call" && f.value == call),
+                "{call}"
+            );
+        }
+    }
+
+    #[test]
+    fn policy11_grouped_annotations_keep_raw_names_and_do_not_invent_writes() {
+        let name = "n".repeat(600);
+        let result = accepted(format!("class C:\n    (field): T\n    ({name}): T = make()\n    items[index()]: T\n    (self.field): T\n"));
+        for (symbol, line) in [
+            ("sample.C.field".to_owned(), 2),
+            (format!("sample.C.{name}"), 3),
+        ] {
+            assert!(result.facts.iter().any(|f| f.kind == "attribute_annotation"
+                && f.symbol == symbol
+                && f.line == line
+                && f.end_line == line
+                && f.value == "T"));
+        }
+        let writes: Vec<_> = result
+            .facts
+            .iter()
+            .filter(|f| f.kind.starts_with("binding"))
+            .collect();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(
+            writes[0].value,
+            format!(
+                "{{\"source\":\"make()\",\"target\":\"{}\"}}",
+                "n".repeat(512)
+            )
+        );
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "call" && f.value == "index()"));
+    }
+
+    #[test]
+    fn policy11_neutral_store_augmented_and_delete_targets_visit_calls_without_writes() {
+        let result = accepted(concat!(
+            "for (self.router, [items[index()], *rest]) in iterable(): pass\n",
+            "async for factory().prefix in iterable(): pass\n",
+            "with context() as (self.router, items[index()]): pass\n",
+            "async with context() as factory().prefix: pass\n",
+            "(items[index()]) += left(), right()\n",
+            "del items[index()], [factory().field], (other.field, name)\n",
+        ));
+        assert!(result
+            .facts
+            .iter()
+            .all(|f| matches!(f.kind.as_str(), "module" | "call")));
+        for (line, call) in [
+            (1, "index()"),
+            (1, "iterable()"),
+            (2, "factory()"),
+            (3, "context()"),
+            (3, "index()"),
+            (4, "factory()"),
+            (5, "left()"),
+            (5, "right()"),
+            (6, "factory()"),
+            (6, "index()"),
+        ] {
+            assert!(
+                result
+                    .facts
+                    .iter()
+                    .any(|f| f.kind == "call" && f.line == line && f.value == call),
+                "{line}: {call}"
+            );
+        }
+        for text in [
+            "for (x) in xs: pass",
+            "for x,y in xs: pass",
+            "for *x in xs: pass",
+            "with ctx as (x): pass",
+            "with ctx as [x]: pass",
+            "del x,y",
+            "del (x,y)",
+            "x += a,b",
+        ] {
+            accepted(text);
+        }
+        for target in [
+            "(name)",
+            "a,b",
+            "[a,*b]",
+            "*a",
+            "other.field",
+            "factory().router",
+            "items[probe()]",
+        ] {
+            for statement in [
+                format!("for {target} in probe(): probe()"),
+                format!("async for {target} in probe(): probe()"),
+                format!("with probe() as {target}: probe()"),
+                format!("async with probe() as {target}: probe()"),
+            ] {
+                let result = candidates(format!(
+                    "from arbitrary import eval as probe\n{statement}\nprobe()\n"
+                ));
+                assert_eq!(
+                    result.files[0].status,
+                    CandidateStatus::AcceptedFacts,
+                    "{statement}: {result:?}"
+                );
+                assert!(result
+                    .facts
+                    .iter()
+                    .all(|f| matches!(f.kind.as_str(), "module" | "from_import" | "call")));
+                assert_eq!(
+                    result.diagnostics.len(),
+                    if target == "items[probe()]" { 4 } else { 3 },
+                    "{statement}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn policy11_load_starred_roots_follow_star_expressions_roles_only() {
+        for statement in [
+            "*eval()",
+            "x = *eval()",
+            "x: T = *eval()",
+            "x += *eval()",
+            "def f():\n    return *eval()",
+            "for x in *eval(): pass",
+            "async for x in *eval(): pass",
+            "x = *eval(), *exec()",
+            "x = *source().field + eval()",
+            "x = *factory()() + eval()",
+        ] {
+            let result = candidates(format!("{statement}\n"));
+            assert_eq!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{statement}: {result:?}"
+            );
+            assert!(
+                result
+                    .facts
+                    .iter()
+                    .any(|f| f.kind == "call" && f.value == "eval()"),
+                "{statement}"
+            );
+            assert!(
+                !result.facts.iter().any(|f| f.kind == "binding"),
+                "{statement}"
+            );
+            if statement.starts_with("x =") || statement.starts_with("x:") {
+                assert!(result
+                    .facts
+                    .iter()
+                    .any(|f| f.kind == "binding_invalidation" && f.value == "{\"target\":\"x\"}"));
+            }
+        }
+        for statement in [
+            "if *eval(): pass",
+            "while *eval(): pass",
+            "assert *eval()",
+            "raise *eval()",
+            "raise E from *eval()",
+            "with *eval(): pass",
+            "def f(x=*eval()): pass",
+            "x: *T",
+            "x = (*eval())",
+            "x = a + *eval()",
+            "*a or eval()",
+            "for x in *a or eval(): pass",
+        ] {
+            let result = candidates(format!("eval()\n{statement}\n"));
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{statement}"
+            );
+            assert_eq!(result.facts.len(), 1, "{statement}");
+            assert!(result.diagnostics.is_empty(), "{statement}");
+        }
+    }
+
+    #[test]
+    fn policy11_starred_subscripts_are_tuple_indices_even_without_a_comma() {
+        let result = accepted(concat!(
+            "sink(data[*eval()], data[*exec(), key], data[key, *eval()])\n",
+            "data[*eval()] = rhs()\ndata[*eval()] += rhs()\ndel data[*eval()]\n",
+            "for data[*eval()] in xs: pass\nwith ctx as data[*eval()]: pass\n",
+            "def f(x=data[*items]): pass\nsink(data[*a or b])\n",
+        ));
+        assert!(result.facts.iter().any(|f| f.kind == "call"
+            && f.value == "sink(data[[*eval()]], data[[*exec(), key]], data[[key, *eval()]])"));
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "call" && f.value == "sink(data[[*<BoolOp>]])"));
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "parameter_default" && f.value == "data[[*items]]"));
+        assert!(!result.facts.iter().any(|f| f.kind.starts_with("binding")));
+        assert_eq!(result.diagnostics.len(), 8);
+        let result = accepted(
+            "sink(data[*\n eval()\n])\nsink(data[*a if test() else b], data[*a < probe()])\n",
+        );
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "call" && f.value == "eval()" && f.line == 2 && f.end_line == 2));
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "call" && f.value == "sink(data[[*<IfExp>]], data[[*<Compare>]])"));
+        for target in ["*self.field", "*factory().field"] {
+            let result = accepted(format!("with ctx as {target}: pass\n"));
+            assert!(!result.facts.iter().any(|f| f.kind.starts_with("binding")));
+        }
+    }
+
+    #[test]
+    fn policy11_router_mutation_guards_are_shallow_but_constructor_guards_are_not() {
+        for text in [
+            "factory().router = rhs",
+            "factory().prefix: T",
+            "other.router.child += rhs",
+            "del other.router, x",
+            "del (other.prefix)",
+            "self.router: T",
+            "factory().include_router(child)",
+            "factory().FastAPI()",
+            "items[index()].APIRouter()",
+        ] {
+            let result = candidates(format!("eval()\n{text}\n"));
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{text}"
+            );
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+        for text in [
+            "(self.router,x) = rhs",
+            "[self.prefix] = rhs",
+            "del (other.router,x)",
+            "del [self.prefix]",
+            "for other.router in xs: pass",
+            "with ctx as other.prefix: pass",
+        ] {
+            accepted(text);
+        }
+        let result = accepted("(self.router,x) = rhs\n");
+        assert_eq!(
+            result
+                .facts
+                .iter()
+                .filter(|f| f.kind == "binding_invalidation")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn policy11_arbitrary_callees_receivers_and_fresh_callee_clipping() {
+        let result = accepted("factory()()\nfactory().run()\nitems[index()]()\n[value].field\n(a if ready else b)()\n");
+        for call in [
+            "factory()",
+            "factory()()",
+            "factory().run()",
+            "items[index()]()",
+            "index()",
+            "<IfExp>()",
+        ] {
+            assert!(
+                result
+                    .facts
+                    .iter()
+                    .any(|f| f.kind == "call" && f.value == call),
+                "{call}"
+            );
+        }
+        let text = format!("factory().{}.FastAPIExtra()", "a".repeat(494));
+        assert_eq!(
+            candidates(text).files[0].status,
+            CandidateStatus::UnsupportedSyntax
+        );
+        let text = format!("factory().{}.evalExtra()", "a".repeat(497));
+        let result = accepted(text);
+        assert_eq!(result.diagnostics.len(), 1);
+        assert!(result.diagnostics[0].message.contains(".eval;"));
+    }
+
+    #[test]
+    fn policy11_call_argument_groups_order_splats_duplicates_and_independent_caps() {
+        let result = accepted("f(k=x,*ys,**opts,z=v,k=again)\nf(*a,*b,**c,**d,z=e)\n");
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "call" && f.value == "f(*ys, k=x, **=opts, z=v, k=again)"));
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "call" && f.value == "f(*a, *b, **=c, **=d, z=e)"));
+        let args = std::iter::repeat_n("*a", 17).collect::<Vec<_>>().join(",");
+        let keywords = std::iter::repeat_n("**b", 17).collect::<Vec<_>>().join(",");
+        let result = accepted(format!("f({args},*eval(),{keywords},**exec())"));
+        let outer = result
+            .facts
+            .iter()
+            .find(|f| f.kind == "call" && f.value.starts_with("f("))
+            .unwrap();
+        let expected = format!(
+            "f({}, ..., {}, ...)",
+            std::iter::repeat_n("*a", 16).collect::<Vec<_>>().join(", "),
+            std::iter::repeat_n("**=b", 16)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        assert_eq!(outer.value, expected);
+        assert_eq!(
+            warning_messages(&result),
+            [warning(1, "eval"), warning(1, "exec")]
+        );
+    }
+
+    #[test]
+    fn policy11_display_unpacks_and_arbitrary_call_free_defaults() {
+        let result = accepted(concat!(
+            "def f(x=[*xs].field, y=items[index].field, z={**opts}): pass\n",
+            "sink((*a,), [*b], {*c}, {key(): value(), **opts()})\n",
+        ));
+        for value in ["[*xs].field", "items[index].field", "<Dict>"] {
+            assert!(
+                result
+                    .facts
+                    .iter()
+                    .any(|f| f.kind == "parameter_default" && f.value == value),
+                "{value}"
+            );
+        }
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "call" && f.value == "sink([*a], [*b], [*c], <Dict>)"));
+        for call in ["key()", "value()", "opts()"] {
+            assert!(result
+                .facts
+                .iter()
+                .any(|f| f.kind == "call" && f.value == call));
+        }
+        let padding = std::iter::repeat_n("x", 17).collect::<Vec<_>>().join(",");
+        let result = accepted(format!("sink([{padding}, *eval()])"));
+        assert_eq!(warning_messages(&result), [warning(1, "eval")]);
+        for default in [
+            "[*eval()]",
+            "{**eval()}",
+            "[eval()].field",
+            "items[eval()].field",
+        ] {
+            let result = candidates(format!("eval()\ndef f(x={default}): pass"));
+            assert_eq!(result.files[0].status, CandidateStatus::UnsupportedSyntax);
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn policy11_invalid_star_call_order_target_contexts_and_recursive_assignments() {
+        for text in [
+            "x = (*items)",
+            "f((*items))",
+            "x = a + *items",
+            "f(k=x,y)",
+            "f(**x,*y)",
+            "x = [*a if ready else b]",
+            "x = {*a or b}",
+            "x = {**a if ready else b}",
+            "f(*x,y=1,z)",
+            "a = b: T = value",
+            "a: T = b = value",
+            "a = b += value",
+            "a += b = value",
+            "a += b += value",
+            "(a,b): T = value",
+            "[a]: T",
+            "*a: T",
+            "(a,b) += value",
+            "[a] += value",
+            "*a += value",
+            "del [a,*b]",
+            "del (*a,)",
+            "del call()",
+            "for call() in xs: pass",
+            "with ctx as call(): pass",
+            "{a} = value",
+        ] {
+            let result = candidates(format!("eval()\n{text}\n"));
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{text}: {result:?}"
+            );
+            assert_eq!(result.facts.len(), 1, "{text}");
+            assert!(result.diagnostics.is_empty(), "{text}");
+        }
+        accepted("sink(*(a if ready else b), **(c if ready else d))\nx = [*(a if ready else b)]\ny = {**(a if ready else b)}\n");
+    }
+
+    #[test]
+    fn policy11_resources_single_counted_walk_limits_and_cancellation() {
+        let sources = [source(
+            "a.py",
+            "a",
+            "a = (b,*rest,items[index()]) = factory()(*args,**opts)\nother[eval()] += rhs()\n",
+        )];
+        let mut parses = 0;
+        let mut visits = 0;
+        let full = extract(
+            &sources,
+            Limits::default(),
+            FactLimits::default(),
+            |phase| {
+                parses += usize::from(phase == Checkpoint::PostParse);
+                visits += usize::from(phase == Checkpoint::Collector);
+                false
+            },
+        )
+        .unwrap();
+        assert_eq!(full.files[0].status, CandidateStatus::AcceptedFacts);
+        assert_eq!(parses, 1);
+        let parsed = parse_batch(&sources).unwrap();
+        assert_eq!(full.files[0].nodes_visited, parsed.files[0].nodes_visited);
+        assert_eq!(full.files[0].max_depth, parsed.files[0].max_depth);
+        assert!(full.files[0].traversal_finished);
+        for stop in [1, visits / 2, visits] {
+            let mut seen = 0;
+            let result = extract(
+                &sources,
+                Limits::default(),
+                FactLimits::default(),
+                |phase| {
+                    seen += usize::from(phase == Checkpoint::Collector);
+                    seen == stop
+                },
+            )
+            .unwrap();
+            assert_eq!(result.files[0].status, CandidateStatus::ResourceLimit);
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+        for limits in [
+            FactLimits {
+                working: 1024,
+                ..FactLimits::default()
+            },
+            FactLimits {
+                count: full.facts.len() - 1,
+                ..FactLimits::default()
+            },
+            FactLimits {
+                warnings: 0,
+                ..FactLimits::default()
+            },
+            FactLimits {
+                bytes: serde_json::to_vec(&full).unwrap().len() - 1,
+                ..FactLimits::default()
+            },
+        ] {
+            let result = extract(&sources, Limits::default(), limits, |_| false).unwrap();
+            assert_eq!(result.files[0].status, CandidateStatus::ResourceLimit);
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+        for limits in [
+            Limits {
+                nodes: parsed.files[0].nodes_visited - 1,
+                ..Limits::default()
+            },
+            Limits {
+                depth: parsed.files[0].max_depth - 1,
+                ..Limits::default()
+            },
+        ] {
+            let result = extract(&sources, limits, FactLimits::default(), |_| false).unwrap();
+            assert_eq!(result.files[0].status, CandidateStatus::ResourceLimit);
+            assert_eq!(result.facts.len(), 1);
+        }
+    }
+
+    #[test]
+    fn policy11_replay_file_isolation_syntax_precedence_and_pending_release() {
+        let sources = [
+            source("bad.py", "bad", "from importlib import import_module as leak\na = (b,*c) = eval()\nfactory().router = rhs\n"),
+            source("syntax.py", "syntax", "factory().router = rhs\nf(\n"),
+            source("good.py", "good", "(a,*rest) = leak()\nitems[eval()] += rhs()\n"),
+        ];
+        let result = extract_fact_candidates(&sources).unwrap();
+        assert_eq!(result.files[0].status, CandidateStatus::UnsupportedSyntax);
+        assert_eq!(result.files[1].status, CandidateStatus::SyntaxError);
+        assert_eq!(result.files[2].status, CandidateStatus::AcceptedFacts);
+        assert_eq!(
+            result.facts.iter().filter(|f| f.path != "good.py").count(),
+            2
+        );
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].message, warning(2, "eval"));
+        assert_eq!(
+            serde_json::to_vec(&result).unwrap(),
+            serde_json::to_vec(&extract_fact_candidates(&sources).unwrap()).unwrap()
+        );
+        // Many discarded arenas must not accumulate uncharged retained capacity.
+        let statements = "a = (b,*c) = make(*args,**opts)\n".repeat(80);
+        let sources = [source("a.py", "a", statements)];
+        let result = extract(
+            &sources,
+            Limits::default(),
+            FactLimits {
+                working: 128 * 1024,
+                ..FactLimits::default()
+            },
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(result.files[0].status, CandidateStatus::AcceptedFacts);
+    }
+
+    #[test]
     fn policy10_exception_paths_exact_calls_warnings_and_neutral_facts() {
         let result = accepted(concat!(
             "try:\n    assert check(inner()), message(eval())\n",
@@ -3420,13 +4136,13 @@ mod tests {
             }
         }
         for target in [
-            "(x)",
-            "x,y",
-            "[x]",
-            "*x",
-            "items[0]",
-            "obj.x",
-            "get().x",
+            "(lambda: x)",
+            "x,(lambda: y)",
+            "[x for x in xs]",
+            "*(lambda: x)",
+            "items[lambda: x]",
+            "obj.include_router(x).field",
+            "FastAPI().x",
             "self.router",
             "cls.prefix",
             "self.router.child",
@@ -3446,8 +4162,8 @@ mod tests {
         for text in [
             "x += y = eval()",
             "x += y += eval()",
-            "x += a,b",
-            "del x,y",
+            "x += a,(lambda: b)",
+            "del x,(lambda: y)",
             "x +=\neval()",
             "del\nx",
             "self.x\n+= eval()",
@@ -3925,12 +4641,12 @@ mod tests {
                 "for x in\nxs: pass",
                 "for x in (xs)\n: pass",
                 "async\nfor x in xs: pass",
-                "for (x) in xs: pass",
-                "for x,y in xs: pass",
-                "for [x] in xs: pass",
-                "for *x in xs: pass",
-                "for obj.x in xs: pass",
-                "for xs[0] in xs: pass",
+                "for (lambda: x) in xs: pass",
+                "for x,(lambda: y) in xs: pass",
+                "for [x for x in xs] in xs: pass",
+                "for *(lambda: x) in xs: pass",
+                "for FastAPI().x in xs: pass",
+                "for xs[lambda: x] in xs: pass",
                 "for \u{212a} in xs: pass",
                 "for True in xs: pass",
                 "with\nx: pass",
@@ -3940,12 +4656,12 @@ mod tests {
                 "with x,\ny: pass",
                 "with x, : pass",
                 "with x\n: pass",
-                "with x as (y): pass",
-                "with x as (y,z): pass",
-                "with x as [y]: pass",
-                "with x as obj.y: pass",
-                "with x as y[0]: pass",
-                "with x as *y: pass",
+                "with x as (lambda: y): pass",
+                "with x as (y,lambda: z): pass",
+                "with x as [y for y in ys]: pass",
+                "with x as FastAPI().y: pass",
+                "with x as y[lambda: z]: pass",
+                "with x as *(lambda: y): pass",
                 "with x as \u{212a}: pass",
                 // Parenthesized with-item lists, even valid ones, are deferred.
                 "with (x as y, z as w): pass",
@@ -3953,7 +4669,7 @@ mod tests {
                 "match x:\n    case _: pass",
                 "if x: assert (y for y in ys)",
                 "if x: raise (lambda: E)",
-                "if x: del items[0]",
+                "if x: del items[lambda: y]",
                 "if FastAPI(): pass",
                 "while obj.include_router(x): pass",
                 "for x in APIRouter(): pass",
@@ -4593,23 +5309,23 @@ mod tests {
             "sink(,)",
             "xs[]",
             "xs[a:b:c:d]",
-            "[*xs]",
-            "(*xs,)",
-            "{*xs}",
-            "{**xs}",
-            "*xs,",
-            "sink(*xs)",
-            "sink(**xs)",
-            "[*xs][0]",
+            "[*xs, lambda: x]",
+            "(*xs, lambda: x)",
+            "{*xs, lambda: x}",
+            "{**xs, x: lambda: y}",
+            "*xs, lambda: x",
+            "sink(*xs, lambda: x)",
+            "sink(**xs, k=lambda: x)",
+            "[*xs][lambda: x]",
             "[x for x in xs]",
             "(lambda: x)",
             "(x:=y)",
             "(x for x in xs)",
             "(yield x)",
             "await x",
-            "[a].field",
-            "xs[a].field",
-            "xs[a]()",
+            "[lambda: a].field",
+            "xs[lambda: a].field",
+            "xs[lambda: a]()",
             "{a: FastAPI()}",
             "[obj.include_router(x)]",
             "a if pkg.APIRouter() else b",
@@ -5136,10 +5852,10 @@ mod tests {
             assert!(result.diagnostics.is_empty(), "{annotation}");
         }
         for target in [
-            "(x)",
-            "(self.member)",
-            "other.member",
-            "x[0]",
+            "(lambda: x)",
+            "(FastAPI().member)",
+            "other.include_router(x).member",
+            "x[lambda: y]",
             "x,y",
             "self.router",
             "self.prefix",
@@ -6008,7 +6724,7 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(result.identity.policy, "python-native-private-facts-10");
+        assert_eq!(result.identity.policy, "python-native-private-facts-11");
     }
 
     #[test]
@@ -7396,8 +8112,8 @@ mod tests {
             "{x: x for x in xs}",
             "(x for x in xs)",
             "(x:=value)",
-            "[*xs]",
-            "{**xs}",
+            "[*xs, lambda: x]",
+            "{**xs, x: lambda: y}",
             "await value",
             "(yield value)",
             "value <> other",
@@ -8113,13 +8829,13 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         for expression in [
-            "factory()()",
-            "factory().run()",
-            "f(*xs)",
-            "f(**xs)",
+            "factory(lambda: x)()",
+            "factory().run(lambda: x)",
+            "f(*xs, lambda: x)",
+            "f(**xs, k=lambda: x)",
             "f(x for x in xs)",
             "f(k=x, y)",
-            "f(k=x,k=y)",
+            "f(k=x,k=lambda: y)",
             "await f()",
             "lambda: x",
             "[x for x in xs]",
@@ -8149,15 +8865,15 @@ mod tests {
             }
         }
         for target in [
-            "other.field",
+            "FastAPI().field",
             "self.router",
             "cls.prefix",
             "self.router.child",
             "self.field.router.child",
-            "x[0]",
-            "x,y",
-            "*x",
-            "x=y",
+            "x[lambda: y]",
+            "x,(lambda: y)",
+            "*(lambda: x)",
+            "x=y:T",
         ] {
             let result = candidates(format!("def before(): pass\n{target}=helper()\n"));
             assert_ne!(
@@ -8176,9 +8892,9 @@ mod tests {
             "return",
             "return x",
             "x: T | U = helper()",
-            "items[0] += helper()",
-            "del items[0]",
-            "x=y=z",
+            "items[lambda: x] += helper()",
+            "del items[lambda: x]",
+            "x=y:T=z",
             "x=(y:=z)",
             "pass; helper()",
         ] {

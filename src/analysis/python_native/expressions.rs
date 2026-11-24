@@ -12,6 +12,8 @@ pub(super) enum Mode {
     ExceptionType,
     AssignmentTarget,
     NeutralTarget,
+    ScalarTarget,
+    DeleteTarget,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -31,6 +33,8 @@ enum Class {
     Core,
     Pair,
     Slice,
+    Starred,
+    Unpack,
 }
 
 #[derive(Clone, Copy)]
@@ -46,6 +50,8 @@ enum Shape {
     Call(usize, usize),
     Arguments(Option<usize>),
     Keyword(usize, usize),
+    Starred(usize),
+    Unpack(usize),
     Binary(usize, &'static str, usize),
     Opaque(&'static str),
 }
@@ -72,6 +78,7 @@ pub(super) struct Expression {
     pub(super) terminal_end_line: usize,
     pub(super) start: usize,
     pub(super) handler_alias: bool,
+    pub(super) star_expressions: bool,
     base_depth: usize,
     bracket_depth: usize,
     entries: Vec<Entry>,
@@ -97,6 +104,7 @@ impl Expression {
             terminal_end_line: 0,
             start,
             handler_alias: false,
+            star_expressions: false,
             base_depth,
             bracket_depth: base_depth,
             entries: Vec::new(),
@@ -178,7 +186,7 @@ impl Expression {
             | "concatenated_string"
             | "unary_operator" => (Class::Ignore, Shape::Ignore),
             "call" | "argument_list" | "keyword_argument"
-                if matches!(self.mode, Mode::BodyValue | Mode::ExceptionType) =>
+                if self.core_mode() && self.mode != Mode::Default =>
             {
                 (Class::Ignore, Shape::Ignore)
             }
@@ -235,6 +243,13 @@ impl Expression {
                 (Class::Ignore, Shape::Ignore)
             }
             "list"
+            | "list_pattern"
+            | "tuple_pattern"
+            | "pattern_list"
+            | "list_splat_pattern"
+            | "list_splat"
+            | "dictionary_splat"
+            | "as_pattern_target"
             | "set"
             | "dictionary"
             | "pair"
@@ -258,9 +273,7 @@ impl Expression {
             {
                 (Class::Ignore, Shape::Ignore)
             }
-            "=" if matches!(self.mode, Mode::BodyValue | Mode::ExceptionType)
-                && !node.is_named() =>
-            {
+            "=" if self.core_mode() && self.mode != Mode::Default && !node.is_named() => {
                 (Class::Ignore, Shape::Ignore)
             }
             "comment" if !type_comment(text, cancel) => (Class::Ignore, Shape::Ignore),
@@ -329,9 +342,67 @@ impl Expression {
         }
         let annotation =
             |class| matches!(class, Class::Reference | Class::Annotation | Class::Text);
+        if matches!(kind, "list_splat" | "dictionary_splat")
+            && !entry
+                .parent
+                .is_some_and(|p| matches!(self.entries[p].kind, "argument_list" | "subscript"))
+            && first.is_some_and(|i| {
+                matches!(
+                    self.entries[i].kind,
+                    "conditional_expression"
+                        | "boolean_operator"
+                        | "comparison_operator"
+                        | "not_operator"
+                )
+            })
+        {
+            // Displays unpack a bitwise_or; call/index splats accept an expression.
+            // Inspect the wrapper, so grouping still admits the wider operand.
+            return Err(());
+        }
+        // The CST can attach a leading splat to a primary's callee/receiver
+        // instead of its complete value: Call(Starred(f), args). Lift it to
+        // Starred(Call(f, args)), reusing the splat entry rather than allocating.
+        let raw_first = first;
+        let mut wide_star = false;
+        if first.is_some_and(|i| matches!(self.entries[i].shape, Shape::Starred(_))) {
+            let mut parent = entry.parent;
+            while let Some(i) = parent {
+                if cancel.at(Checkpoint::Collector) {
+                    return Err(());
+                }
+                match self.entries[i].kind {
+                    "subscript" | "argument_list" => {
+                        wide_star = true;
+                        break;
+                    }
+                    "boolean_operator" | "comparison_operator" | "conditional_expression" => {
+                        parent = self.entries[i].parent;
+                    }
+                    _ => break,
+                }
+            }
+        }
+        let lifted = first.filter(|&i| {
+            (matches!(kind, "call" | "attribute" | "subscript" | "binary_operator")
+                || (wide_star
+                    && matches!(
+                        kind,
+                        "boolean_operator" | "comparison_operator" | "conditional_expression"
+                    )))
+                && matches!(self.entries[i].shape, Shape::Starred(_))
+        });
+        if let Some(i) = lifted {
+            let Shape::Starred(value) = self.entries[i].shape else {
+                unreachable!()
+            };
+            first = Some(value);
+        }
         let normalized = match kind {
             "as_pattern_target"
-                if count == 1 && self.entries[first.unwrap()].kind == "identifier" =>
+                if self.mode == Mode::ExceptionType
+                    && count == 1
+                    && self.entries[first.unwrap()].kind == "identifier" =>
             {
                 Some((Class::Ignore, Shape::Ignore))
             }
@@ -367,7 +438,7 @@ impl Expression {
             }
             "binary_operator" | "boolean_operator" if count == 2 => {
                 let (a, b) = (first.unwrap(), second.unwrap());
-                let mut op = self.entries[a].next.ok_or(())?;
+                let mut op = self.entries[raw_first.unwrap()].next.ok_or(())?;
                 while self.entries[op].kind == "comment" {
                     if cancel.at(Checkpoint::Collector) {
                         return Err(());
@@ -412,7 +483,12 @@ impl Expression {
                     let e = &self.entries[i];
                     if e.kind != "comment" {
                         if operand {
-                            if !self.body_value(i) {
+                            let value = if Some(i) == raw_first {
+                                first.unwrap()
+                            } else {
+                                i
+                            };
+                            if !self.body_value(value) {
                                 return Err(());
                             }
                         } else if !matches!(
@@ -448,9 +524,14 @@ impl Expression {
                 if self.entries[second.unwrap()].kind == "conditional_expression" {
                     return Err(());
                 }
-                let mut child = first;
+                let mut child = raw_first;
                 while let Some(i) = child {
-                    if cancel.at(Checkpoint::Collector) || !self.body_value(i) {
+                    let value = if Some(i) == raw_first {
+                        first.unwrap()
+                    } else {
+                        i
+                    };
+                    if cancel.at(Checkpoint::Collector) || !self.body_value(value) {
                         return Err(());
                     }
                     child = self.entries[i].next_value;
@@ -489,9 +570,25 @@ impl Expression {
                 }
                 Some((Class::Slice, Shape::Opaque("<Slice>")))
             }
-            "list" | "set" | "dictionary" | "expression_list" | "tuple" if self.core_mode() => {
-                // M2 owns starred displays/unpacks. No splat descriptor is
-                // admitted, including behind opaque or truncated containers.
+            "list_splat" | "list_splat_pattern"
+                if count == 1 && self.body_value(first.unwrap()) =>
+            {
+                Some((Class::Starred, Shape::Starred(first.unwrap())))
+            }
+            "dictionary_splat" if count == 1 && self.body_value(first.unwrap()) => {
+                Some((Class::Unpack, Shape::Unpack(first.unwrap())))
+            }
+            "tuple_pattern" if count == 1 && !comma => {
+                let i = first.unwrap();
+                if self.entries[self.resolve(i)].class == Class::Starred {
+                    return Err(());
+                }
+                Some((self.entries[i].class, Shape::Alias(self.resolve(i))))
+            }
+            "list" | "set" | "dictionary" | "expression_list" | "tuple" | "list_pattern"
+            | "tuple_pattern" | "pattern_list"
+                if self.core_mode() =>
+            {
                 let mut child = entry.first;
                 let mut want_value = true;
                 while let Some(i) = child {
@@ -504,9 +601,9 @@ impl Expression {
                         "," if !want_value => want_value = true,
                         _ => {
                             let valid = if kind == "dictionary" {
-                                e.class == Class::Pair
+                                matches!(e.class, Class::Pair | Class::Unpack)
                             } else {
-                                self.body_value(i)
+                                self.body_value(i) || e.class == Class::Starred
                             };
                             if !want_value || !valid {
                                 return Err(());
@@ -517,7 +614,11 @@ impl Expression {
                     child = e.next;
                 }
                 if (count == 0 && (comma || matches!(kind, "set" | "expression_list")))
-                    || (kind == "expression_list" && !comma)
+                    || (matches!(kind, "expression_list" | "pattern_list") && !comma)
+                    || (kind == "tuple"
+                        && count == 1
+                        && !comma
+                        && self.entries[first.unwrap()].class == Class::Starred)
                 {
                     return Err(());
                 }
@@ -541,20 +642,19 @@ impl Expression {
                 if count == 0 && comma {
                     return Err(());
                 }
-                // Borrowed names and the set's temporary buckets are covered by
-                // ENTRY_WORK; no keyword text or subtrees are copied.
-                let mut keywords = HashSet::new();
                 let mut child = first;
                 let mut keyword_seen = false;
+                let mut unpack_seen = false;
                 while let Some(i) = child {
                     if cancel.at(Checkpoint::Collector) {
                         return Err(());
                     }
                     let item = &self.entries[i];
-                    if let Shape::Keyword(key, _) = item.shape {
+                    if matches!(item.shape, Shape::Keyword(..) | Shape::Unpack(..)) {
                         keyword_seen = true;
-                        let key = &self.entries[key];
-                        if !keywords.insert(&bytes[key.start..key.end]) {
+                        unpack_seen |= matches!(item.shape, Shape::Unpack(..));
+                    } else if matches!(item.shape, Shape::Starred(..)) {
+                        if unpack_seen {
                             return Err(());
                         }
                     } else if keyword_seen || !self.body_value(i) {
@@ -566,19 +666,18 @@ impl Expression {
             }
             "call" if count == 2 => {
                 let (callee, args) = (first.unwrap(), second.unwrap());
-                if self.entries[callee].class != Class::Reference
-                    || self.entries[args].class != Class::Arguments
-                {
+                if !self.body_value(callee) || self.entries[args].class != Class::Arguments {
                     return Err(());
                 }
                 let callee = self.resolve(callee);
-                let last = match self.entries[callee].shape {
-                    Shape::Attribute(_, last) => last,
-                    Shape::Name => callee,
-                    _ => return Err(()),
+                let name = match self.entries[callee].shape {
+                    Shape::Attribute(_, last) => {
+                        let name = &self.entries[last];
+                        &bytes[name.start..name.end]
+                    }
+                    Shape::Name => &bytes[self.entries[callee].start..self.entries[callee].end],
+                    _ => b"".as_slice(),
                 };
-                let name = &self.entries[last];
-                let name = &bytes[name.start..name.end];
                 if constructor_terminal(name)
                     || (name == b"include_router"
                         && matches!(self.entries[callee].shape, Shape::Attribute(..)))
@@ -597,13 +696,19 @@ impl Expression {
                 let callee = first.unwrap();
                 Some((Class::Call, Shape::Call(callee, args)))
             }
-            "type" | "parenthesized_expression" if count == 1 => {
+            "type" | "parenthesized_expression" | "as_pattern_target" if count == 1 => {
                 let i = first.unwrap();
+                if kind == "parenthesized_expression"
+                    && self.entries[self.resolve(i)].class == Class::Starred
+                {
+                    return Err(());
+                }
                 Some((self.entries[i].class, Shape::Alias(self.resolve(i))))
             }
             "attribute" | "member_type" if count == 2 => {
                 let (a, b) = (first.unwrap(), second.unwrap());
-                if self.entries[a].class != Class::Reference
+                if !(self.entries[a].class == Class::Reference
+                    || (self.core_mode() && self.body_value(a)))
                     || !matches!(self.entries[b].shape, Shape::Name)
                 {
                     return Err(());
@@ -660,6 +765,7 @@ impl Expression {
                         if e.class != Class::Ignore
                             && !self.body_value(i)
                             && e.class != Class::Slice
+                            && e.class != Class::Starred
                         {
                             return Err(());
                         }
@@ -676,7 +782,12 @@ impl Expression {
                 }
                 Some((
                     if core { Class::Core } else { Class::Annotation },
-                    Shape::Subscript(base, slice, kind == "subscript" && (count > 2 || comma)),
+                    Shape::Subscript(
+                        base,
+                        slice,
+                        kind == "subscript"
+                            && (count > 2 || comma || self.entries[slice].class == Class::Starred),
+                    ),
                 ))
             }
             "concatenated_string" if count >= 2 => {
@@ -727,8 +838,30 @@ impl Expression {
             _ => None,
         };
         if let Some((class, shape)) = normalized {
-            self.entries[index].class = class;
-            self.entries[index].shape = shape;
+            if let Some(star) = lifted {
+                let value = first.unwrap();
+                self.entries[star].class = class;
+                self.entries[star].shape = shape;
+                self.entries[star].start = self.entries[value].start;
+                self.entries[star].line = self.entries[value].line;
+                self.entries[star].end = self.entries[index].end;
+                self.entries[star].end_line = self.terminal_end_line;
+                let mut child = self.entries[index].first;
+                while let Some(i) = child {
+                    if cancel.at(Checkpoint::Collector) {
+                        return Err(());
+                    }
+                    if i != star {
+                        self.entries[i].parent = Some(star);
+                    }
+                    child = self.entries[i].next;
+                }
+                self.entries[index].class = Class::Starred;
+                self.entries[index].shape = Shape::Starred(star);
+            } else {
+                self.entries[index].class = class;
+                self.entries[index].shape = shape;
+            }
         }
         self.entries[index].end_line = self.terminal_end_line;
         self.current = self.entries[index].parent;
@@ -745,14 +878,12 @@ impl Expression {
                 return Err(());
             }
             let class = self.entries[index].class;
-            let valid = if self.mode == Mode::Base {
+            let valid = if self.target_mode() {
+                self.valid_target(index, cancel)
+            } else if self.mode == Mode::Base {
                 class == Class::Reference
             } else if self.core_mode() {
-                self.body_value(index)
-            } else if matches!(self.mode, Mode::AssignmentTarget | Mode::NeutralTarget) {
-                self.valid_target(index, bytes, cancel)
-                    && (self.mode != Mode::NeutralTarget
-                        || matches!(self.entries[index].kind, "identifier" | "attribute"))
+                self.body_value(index) || (self.star_expressions && class == Class::Starred)
             } else {
                 annotation(class)
             };
@@ -773,54 +904,177 @@ impl Expression {
 
     fn body_value(&self, index: usize) -> bool {
         // Defaults share core values, but reject every call at admission.
-        // Pair and Slice are context-only descriptors, not general values.
-        !matches!(self.entries[index].class, Class::Slice | Class::Pair)
-            && matches!(
-                self.entries[self.resolve(index)].shape,
-                Shape::Name
-                    | Shape::Attribute(..)
-                    | Shape::Call(..)
-                    | Shape::Literal
-                    | Shape::Unary
-                    | Shape::Tuple(..)
-                    | Shape::Subscript(..)
-                    | Shape::Binary(..)
-                    | Shape::Opaque(_)
-            )
+        // Slices, pairs and splats are context-only, not general values.
+        !matches!(
+            self.entries[index].class,
+            Class::Slice | Class::Pair | Class::Starred | Class::Unpack
+        ) && matches!(
+            self.entries[self.resolve(index)].shape,
+            Shape::Name
+                | Shape::Attribute(..)
+                | Shape::Call(..)
+                | Shape::Literal
+                | Shape::Unary
+                | Shape::Tuple(..)
+                | Shape::Subscript(..)
+                | Shape::Binary(..)
+                | Shape::Opaque(_)
+        )
     }
 
     fn core_mode(&self) -> bool {
         matches!(
             self.mode,
             Mode::BodyValue | Mode::ExceptionType | Mode::Default
+        ) || self.target_mode()
+    }
+
+    fn target_mode(&self) -> bool {
+        matches!(
+            self.mode,
+            Mode::AssignmentTarget | Mode::NeutralTarget | Mode::ScalarTarget | Mode::DeleteTarget
         )
     }
 
     fn valid_target<F: FnMut(Checkpoint) -> bool>(
         &self,
         index: usize,
+        cancel: &Cancellation<F>,
+    ) -> bool {
+        if cancel.at(Checkpoint::Collector) {
+            return false;
+        }
+        let index = self.resolve(index);
+        match self.entries[index].shape {
+            Shape::Name | Shape::Attribute(..) | Shape::Subscript(..) => true,
+            Shape::Starred(value)
+                if !matches!(self.mode, Mode::ScalarTarget | Mode::DeleteTarget) =>
+            {
+                self.valid_target(value, cancel)
+            }
+            Shape::Tuple(mut child)
+                if self.mode != Mode::ScalarTarget && self.entries[index].kind != "set" =>
+            {
+                while let Some(i) = child {
+                    if !self.valid_target(i, cancel) {
+                        return false;
+                    }
+                    child = self.entries[i].next_value;
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub(super) fn router_guard<F: FnMut(Checkpoint) -> bool>(
+        &self,
         bytes: &[u8],
         cancel: &Cancellation<F>,
     ) -> bool {
-        if matches!(self.entries[index].shape, Shape::Name) {
+        let root = self.resolve(0);
+        // Delete's ungrouped expression list is several AST targets, unlike a Tuple.
+        if self.mode == Mode::DeleteTarget && self.entries[root].kind == "expression_list" {
+            let Shape::Tuple(mut child) = self.entries[root].shape else {
+                return false;
+            };
+            while let Some(i) = child {
+                if cancel.at(Checkpoint::Collector) || self.router_target(i, bytes, cancel) {
+                    return true;
+                }
+                child = self.entries[i].next_value;
+            }
+            false
+        } else {
+            self.router_target(root, bytes, cancel)
+        }
+    }
+
+    fn router_target<F: FnMut(Checkpoint) -> bool>(
+        &self,
+        index: usize,
+        bytes: &[u8],
+        cancel: &Cancellation<F>,
+    ) -> bool {
+        let index = self.resolve(index);
+        let Shape::Attribute(_, attr) = self.entries[index].shape else {
+            return false;
+        };
+        let attr = &self.entries[attr];
+        if matches!(&bytes[attr.start..attr.end], b"router" | b"prefix")
+            || self
+                .render_node(index, 0, &mut 80, bytes, cancel)
+                .contains(".router.")
+        {
             return true;
         }
+        // Retain the conservative raw interior-router exclusion, but only on
+        // an actual top-level Attribute, never on destructured target leaves.
         let mut current = index;
-        let mut outer = true;
+        while let Shape::Attribute(base, attr) = self.entries[current].shape {
+            if cancel.at(Checkpoint::Collector) {
+                return true;
+            }
+            let attr = &self.entries[attr];
+            if &bytes[attr.start..attr.end] == b"router" {
+                return true;
+            }
+            current = self.resolve(base);
+        }
+        false
+    }
+
+    pub(super) fn name_span(&self) -> Option<std::ops::Range<usize>> {
+        let root = &self.entries[self.resolve(0)];
+        matches!(root.shape, Shape::Name).then_some(root.start..root.end)
+    }
+
+    pub(super) fn targets<'a, F: FnMut(Checkpoint) -> bool>(
+        &'a self,
+        bytes: &'a [u8],
+        cancel: &'a Cancellation<F>,
+    ) -> impl Iterator<Item = (usize, bool)> + 'a {
+        self.entries
+            .iter()
+            .enumerate()
+            .take_while(|_| !cancel.at(Checkpoint::Collector))
+            .filter_map(move |(i, e)| {
+                if !matches!(e.shape, Shape::Name | Shape::Attribute(..)) {
+                    return None;
+                }
+                let mut parent = e.parent;
+                let mut destructured = false;
+                while let Some(p) = parent {
+                    if cancel.at(Checkpoint::Collector) {
+                        return None;
+                    }
+                    match self.entries[p].shape {
+                        Shape::Alias(_) => {}
+                        Shape::Tuple(_) | Shape::Starred(_) => destructured = true,
+                        _ => return None,
+                    }
+                    parent = self.entries[p].parent;
+                }
+                self.eligible(i, bytes, cancel).then_some((i, destructured))
+            })
+    }
+
+    fn eligible<F: FnMut(Checkpoint) -> bool>(
+        &self,
+        index: usize,
+        bytes: &[u8],
+        cancel: &Cancellation<F>,
+    ) -> bool {
+        let mut current = self.resolve(index);
+        if matches!(self.entries[current].shape, Shape::Name) {
+            return true;
+        }
         loop {
             if cancel.at(Checkpoint::Collector) {
                 return false;
             }
             match self.entries[current].shape {
-                Shape::Attribute(base, attr) => {
-                    let attr = &self.entries[attr];
-                    let name = &bytes[attr.start..attr.end];
-                    if name == b"router" || (outer && name == b"prefix") {
-                        return false;
-                    }
-                    current = base;
-                    outer = false;
-                }
+                Shape::Attribute(base, _) => current = self.resolve(base),
                 Shape::Name => {
                     let root = &self.entries[current];
                     return matches!(&bytes[root.start..root.end], b"self" | b"cls");
@@ -889,6 +1143,17 @@ impl Expression {
         self.render_node(0, 0, &mut 80, bytes, cancel)
     }
 
+    pub(super) fn render_target<F: FnMut(Checkpoint) -> bool>(
+        &self,
+        index: usize,
+        bytes: &[u8],
+        cancel: &Cancellation<F>,
+    ) -> String {
+        self.render_node(index, 0, &mut 80, bytes, cancel)
+            .into_boxed_str()
+            .into_string()
+    }
+
     fn render_node<F: FnMut(Checkpoint) -> bool>(
         &self,
         index: usize,
@@ -911,6 +1176,13 @@ impl Expression {
             Shape::Literal => append(&mut result, "<literal>"),
             Shape::Unary => append(&mut result, "<UnaryOp>"),
             Shape::Opaque(label) => append(&mut result, label),
+            Shape::Starred(value) => {
+                append(&mut result, "*");
+                append(
+                    &mut result,
+                    &self.render_node(value, depth + 1, budget, bytes, cancel),
+                );
+            }
             Shape::Binary(a, op, b) => {
                 append(
                     &mut result,
@@ -960,55 +1232,72 @@ impl Expression {
                     &self.render_node(callee, depth + 1, budget, bytes, cancel),
                 );
                 append(&mut result, "(");
-                let Shape::Arguments(mut current) = self.entries[arguments].shape else {
+                let Shape::Arguments(first) = self.entries[arguments].shape else {
                     unreachable!("validated arguments")
                 };
                 let mut positional = 0;
                 let mut keyword = 0;
                 let mut emitted = false;
-                while let Some(i) = current {
-                    if cancel.at(Checkpoint::Collector) {
-                        break;
-                    }
-                    let entry = &self.entries[i];
-                    current = entry.next_value;
-                    let is_keyword = matches!(entry.shape, Shape::Keyword(..));
-                    let count = if is_keyword {
-                        &mut keyword
-                    } else {
-                        &mut positional
-                    };
-                    *count += 1;
-                    if *count > 17 {
-                        continue;
-                    }
-                    if emitted {
-                        append(&mut result, ", ");
-                    }
-                    emitted = true;
-                    if *count == 17 {
-                        append(&mut result, "...");
-                    } else if let Shape::Keyword(key, value) = entry.shape {
-                        let key = &self.entries[key];
-                        append(
-                            &mut result,
-                            std::str::from_utf8(&bytes[key.start..key.end]).unwrap(),
-                        );
-                        append(&mut result, "=");
-                        append(
-                            &mut result,
-                            &self.render_node(value, depth + 1, budget, bytes, cancel),
-                        );
-                    } else {
-                        append(
-                            &mut result,
-                            &self.render_node(i, depth + 1, budget, bytes, cancel),
-                        );
+                // AST groups positional arguments (including *) before keywords
+                // (including **). Linked descriptors need no temporary vectors.
+                for keywords in [false, true] {
+                    let mut current = first;
+                    while let Some(i) = current {
+                        if cancel.at(Checkpoint::Collector) {
+                            break;
+                        }
+                        let entry = &self.entries[i];
+                        current = entry.next_value;
+                        let is_keyword =
+                            matches!(entry.shape, Shape::Keyword(..) | Shape::Unpack(..));
+                        if is_keyword != keywords {
+                            continue;
+                        }
+                        let count = if is_keyword {
+                            &mut keyword
+                        } else {
+                            &mut positional
+                        };
+                        *count += 1;
+                        if *count > 17 {
+                            continue;
+                        }
+                        if emitted {
+                            append(&mut result, ", ");
+                        }
+                        emitted = true;
+                        if *count == 17 {
+                            append(&mut result, "...");
+                        } else if let Shape::Keyword(key, value) = entry.shape {
+                            let key = &self.entries[key];
+                            append(
+                                &mut result,
+                                std::str::from_utf8(&bytes[key.start..key.end]).unwrap(),
+                            );
+                            append(&mut result, "=");
+                            append(
+                                &mut result,
+                                &self.render_node(value, depth + 1, budget, bytes, cancel),
+                            );
+                        } else if let Shape::Unpack(value) = entry.shape {
+                            append(&mut result, "**=");
+                            append(
+                                &mut result,
+                                &self.render_node(value, depth + 1, budget, bytes, cancel),
+                            );
+                        } else {
+                            append(
+                                &mut result,
+                                &self.render_node(i, depth + 1, budget, bytes, cancel),
+                            );
+                        }
                     }
                 }
                 append(&mut result, ")");
             }
-            Shape::Arguments(_) | Shape::Keyword(..) => unreachable!("descriptor, not expression"),
+            Shape::Arguments(_) | Shape::Keyword(..) | Shape::Unpack(_) => {
+                unreachable!("descriptor, not expression")
+            }
             Shape::Alias(_) | Shape::Ignore => unreachable!("normalized expression"),
         }
         result
