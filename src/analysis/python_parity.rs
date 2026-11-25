@@ -4,6 +4,15 @@
 //! Later native work still needs broader syntax, binding/control-flow, resource,
 //! and cross-version coverage before it can propose a production migration.
 
+#[path = "python_parity/fstring_batch.rs"]
+mod fstring_batch;
+#[path = "python_parity/generic_batch.rs"]
+mod generic_batch;
+#[path = "python_parity/literal_batch.rs"]
+mod literal_batch;
+#[path = "python_parity/structure_batch.rs"]
+mod structure_batch;
+
 use super::*;
 use serde_json::{json, Value};
 
@@ -850,7 +859,14 @@ fn assert_warning_candidates_match_ast(python: &Path, scan: &Scan) -> Value {
             .files
             .iter()
             .all(|file| file.status == CandidateStatus::AcceptedFacts),
-        "{native:?}"
+        "{native:?}; captured synthetic inputs: {:?}",
+        scan.sources
+            .iter()
+            .map(|source| (
+                &source.path,
+                String::from_utf8_lossy(&source.bytes[..source.bytes.len().min(512)])
+            ))
+            .collect::<Vec<_>>()
     );
     // Compare the whole ordered AST vector: never filter it to supported kinds.
     assert_eq!(
@@ -877,6 +893,1798 @@ fn assert_warning_candidates_match_ast(python: &Path, scan: &Scan) -> Value {
 
 #[test]
 #[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn suspension_expression_candidate_four_shapes_roots_and_nonwrites() {
+    let python = oracle();
+    for (value, shape) in [
+        ("await hidden()", "<Await>"),
+        ("(yield hidden())", "<Yield>"),
+        ("(yield from hidden())", "<YieldFrom>"),
+        ("(written := hidden())", "<NamedExpr>"),
+    ] {
+        let text = format!("root = {value}\nsink({value})\nouter = ({value}).field\ncalled = ({value})()\nself.field = {value}\n");
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        let native = assert_declaration_candidates_match_ast(&python, &scan);
+        assert_eq!(
+            native["identity"]["policy"],
+            "python-native-private-facts-15"
+        );
+        let sink = format!("sink({shape})");
+        let attribute = format!(r#"{{"source":"{shape}.field","target":"outer"}}"#);
+        let call = format!("{shape}()");
+        let binding = format!(r#"{{"source":"{call}","target":"called"}}"#);
+        assert_eq!(
+            native["facts"],
+            json!(expected(
+                "unit.py",
+                &[
+                    (1, 1, "binding_invalidation", "unit", r#"{"target":"root"}"#),
+                    (1, 1, "call", "unit", "hidden()"),
+                    (1, 1, "module", "unit", "unit"),
+                    (2, 2, "call", "unit", "hidden()"),
+                    (2, 2, "call", "unit", &sink),
+                    (3, 3, "binding", "unit", &attribute),
+                    (3, 3, "call", "unit", "hidden()"),
+                    (4, 4, "binding", "unit", &binding),
+                    (4, 4, "call", "unit", &call),
+                    (4, 4, "call", "unit", "hidden()"),
+                    (
+                        5,
+                        5,
+                        "binding_invalidation",
+                        "unit",
+                        r#"{"target":"self.field"}"#
+                    ),
+                    (5, 5, "call", "unit", "hidden()"),
+                ]
+            )),
+            "{value}"
+        );
+    }
+    // NamedExpr is generic traversal, not Assign/AnnAssign or a class attribute.
+    let (_, scan) = capture(&[(
+        "unit.py",
+        b"class Box:\n    (field := value)\n    (router := value)\n    (prefix := value)\n",
+    )]);
+    let native = assert_declaration_candidates_match_ast(&python, &scan);
+    assert_eq!(
+        native["facts"],
+        json!(expected(
+            "unit.py",
+            &[
+                (1, 1, "module", "unit", "unit"),
+                (1, 4, "class", "unit.Box", "Box"),
+            ]
+        ))
+    );
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn suspension_expression_candidate_ast_only_contexts_and_lexical_owners() {
+    let python = oracle();
+    // ast.parse is the authority, not compile, function kind, or runtime permission.
+    for text in [
+        "await value\nyield\nyield value\nyield from values\n",
+        "def f():\n    await work()\n    yield value\n    yield from values\n",
+        "sink(lambda: await work())\nsink(lambda: (yield work()))\nsink(lambda: (yield from work()))\n",
+        "def f(a=(yield value), b=await other, c=(name := value)): pass\n",
+        "sink([(yield work()) for x in xs])\nsink([await work() for x in xs])\n",
+        "sink({await work() for x in xs})\nsink({x:(y := work()) for x in xs})\n",
+        "sink(await work() for x in xs)\nsink(x for x in xs if (y := work()))\n",
+        "sink([x := x for x in xs])\nsink([x for x in (ys := values)])\n",
+        "class Box:\n    sink([x := x for x in xs])\n    await work()\n    yield value\n",
+        "def f():\n    global value\n    (x := values)\n    nonlocal other\n    (yield values)\n",
+        "try: await work()\nfinally: yield value\n",
+    ] {
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        assert_declaration_candidates_match_ast(&python, &scan);
+    }
+    let (_, scan) = capture(&[("unit.py", b"class Box:\n    sink(lambda: await hidden())\n    def run():\n        sink([written := hidden() for x in xs])\n")]);
+    let native = assert_declaration_candidates_match_ast(&python, &scan);
+    assert_eq!(
+        native["facts"],
+        json!(expected(
+            "unit.py",
+            &[
+                (1, 1, "module", "unit", "unit"),
+                (1, 4, "class", "unit.Box", "Box"),
+                (2, 2, "call", "unit.Box", "hidden()"),
+                (2, 2, "call", "unit.Box", "sink(<Lambda>)"),
+                (3, 4, "function", "unit.Box.run", "run"),
+                (
+                    3,
+                    4,
+                    "signature",
+                    "unit.Box.run",
+                    r#"{"keywordOnly":[],"positional":[],"positionalOnly":0}"#
+                ),
+                (4, 4, "call", "unit.Box.run", "hidden()"),
+                (4, 4, "call", "unit.Box.run", "sink(<ListComp>)"),
+            ]
+        ))
+    );
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn suspension_expression_candidate_named_roles_grouping_and_spans() {
+    let python = oracle();
+    for text in [
+        "if x := work(): pass\nelif y := other(): pass\n",
+        "while x := work(): break\n",
+        "sink(x := work())\nsink([x := work()], (x := work(),), {x := work()})\n",
+        "sink([x := work() for item in xs])\nsink({x := work() for item in xs})\n",
+        "sink(x := work() for item in xs)\nsink(items[x := work()])\n",
+        "item = (x := work())\ndef f():\n    return (x := work())\n",
+        "raise (x := work()) from (y := other())\nassert (x := work()), (y := other())\nyield (x := work())\n",
+        "def f(a=(x := value)): pass\nsink(lambda: (x := work()))\n",
+        "sink(k=(x := work()), **(opts := work()))\nsink(*(args := work()))\n",
+        "sink({(x := work()): (y := other())})\nsink({(x := work()): (y := other()) for item in xs})\n",
+        "sink([item for item in (xs := work()) if (test := ready())])\n",
+        "sink(left if (test := ready()) else right)\nsink((left := work()) if ready else (right := other()))\n",
+        "sink((x := work()) + (y := other()), not (z := ready()))\n",
+        "sink(items[(start := work()):(stop := other()):(step := stride())])\n",
+        "sink((outer := (inner := work())))\n",
+        "sink((\n    written\n    :=\n    work()\n))\n",
+        "for data[(x := work())] in xs: pass\nwith cm() as (x := work()).field: pass\n",
+    ] {
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        assert_declaration_candidates_match_ast(&python, &scan);
+    }
+    for newline in ["\n", "\r\n"] {
+        let text = "sink(\n    written := hidden(\n        value\n    ),\n    key=(other := neighbor())\n)\n".replace('\n', newline);
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        let native = assert_declaration_candidates_match_ast(&python, &scan);
+        assert_eq!(
+            native["facts"],
+            json!(expected(
+                "unit.py",
+                &[
+                    (1, 1, "module", "unit", "unit"),
+                    (1, 6, "call", "unit", "sink(<NamedExpr>, key=<NamedExpr>)"),
+                    (2, 4, "call", "unit", "hidden(value)"),
+                    (5, 5, "call", "unit", "neighbor()"),
+                ]
+            ))
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn suspension_expression_candidate_named_bad_roles_targets_and_rollback() {
+    use super::python_native::{extract_fact_candidates, CandidateStatus};
+    let python = oracle();
+    // These are syntax failures, not comprehension binding/compiler restrictions.
+    for form in [
+        "x := value",
+        "item = x := value",
+        "def f():\n    return x := value",
+        "raise x := value",
+        "assert x := value",
+        "yield x := value",
+        "def f(a=x := value): pass",
+        "sink(lambda: x := value)",
+        "sink(k=x := value)",
+        "sink(*x := value)",
+        "sink(**x := value)",
+        "sink({x := value: other})",
+        "sink({key: x := value})",
+        "sink({x := value: other for item in xs})",
+        "sink({key: x := value for item in xs})",
+        "sink([item for item in x := value])",
+        "sink([item for item in xs if x := value])",
+        "sink(x := value if y := other else z)",
+        "sink(left if ready else x := value)",
+        "sink(left or x := value)",
+        "sink(not x := value)",
+        "sink(left < x := value)",
+        "sink(items[x := value:stop])",
+        "sink(items[start:x := value])",
+        "sink(x := y := value)",
+        "for item in x := values: pass",
+        "sink((obj.field := value))",
+        "sink((items[0] := value))",
+        "sink(((x) := value))",
+        "sink(((x,y) := value))",
+        "sink(([x] := value))",
+        "sink((*x := value))",
+        "sink(((lambda: x) := value))",
+        "sink((True := value))",
+        "sink((for := value))",
+        "sink((x :=))",
+        "sink((:= value))",
+        "x :=\nvalue",
+        "item = x\n:= value",
+        "if x :=\nvalue: pass",
+        "sink((x : = value))",
+        "sink((x :\n= value))",
+    ] {
+        let text = format!("eval()\nclass Before: pass\n{form}\nexec()\n");
+        let (_, scan) = capture(&[
+            ("bad.py", text.as_bytes()),
+            ("good.py", b"sink((x := eval()))\n"),
+        ]);
+        let ast = extract_captured(&python, &scan.sources).unwrap();
+        assert!(!ast.complete, "AST accepted {form}");
+        assert_eq!(ast.diagnostics[0].code, "parse_failure", "{form}");
+        let native = extract_fact_candidates(&scan.sources).unwrap();
+        assert_ne!(
+            native.files[0].status,
+            CandidateStatus::AcceptedFacts,
+            "{form}"
+        );
+        assert_eq!(native.files[1].status, CandidateStatus::AcceptedFacts);
+        let mut facts = expected("bad.py", &[(1, 1, "module", "bad", "bad")]);
+        facts.extend(expected(
+            "good.py",
+            &[
+                (1, 1, "call", "good", "eval()"),
+                (1, 1, "call", "good", "sink(<NamedExpr>)"),
+                (1, 1, "module", "good", "good"),
+            ],
+        ));
+        assert_eq!(
+            serde_json::to_value(&native.facts).unwrap(),
+            json!(facts),
+            "{form}"
+        );
+        assert_eq!(
+            serde_json::to_value(&native.diagnostics).unwrap(),
+            json!([{
+                "code":"dynamic_discovery_unresolved", "path":"good.py",
+                "message":"line 1: eval; runtime targets are not inferred"
+            }]),
+            "{form}"
+        );
+    }
+    // A non-ASCII Name is AST-positive but remains outside the private name slice.
+    let text = "sink((\u{212a} := value))\n";
+    let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+    assert!(extract_captured(&python, &scan.sources).unwrap().complete);
+    let native = extract_fact_candidates(&scan.sources).unwrap();
+    assert_eq!(native.files[0].status, CandidateStatus::UnsupportedSyntax);
+    assert_eq!(
+        serde_json::to_value(&native.facts).unwrap(),
+        json!(expected("unit.py", &[(1, 1, "module", "unit", "unit"),]))
+    );
+    assert!(native.diagnostics.is_empty());
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn suspension_expression_candidate_yield_roles_tuples_stars_and_from() {
+    use super::python_native::{extract_fact_candidates, CandidateStatus};
+    let python = oracle();
+    for text in [
+        "yield\nyield value\nyield a,b\nyield *xs, last\nyield *xs,\n",
+        "item = yield\nitem: T = yield value\nitem += yield from values\n",
+        "yield from (x := values)\nyield from (yield value)\nyield from (a,b)\n",
+        "sink((yield), (yield a,b), (yield value,), (yield from values))\n",
+        "sink([(yield work())], {(yield work())}, {(yield key()): (yield value())})\n",
+        "sink((yield work()) + (yield other()))\nsink(lambda: (yield work()))\n",
+        "def f(a=(yield value), b=(yield from values)): pass\n",
+        "def f():\n    return (yield work())\n",
+        "raise (yield work())\nassert (yield work())\nsink(key=(yield work()))\n",
+        "x = [*(yield items)]\nx = (*(yield items),)\nx = {*(yield items)}\nx = {**(yield items)}\n",
+        "sink(items[(yield start()):(yield stop())])\n",
+    ] {
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        assert_declaration_candidates_match_ast(&python, &scan);
+    }
+    let (_, scan) = capture(&[(
+        "unit.py",
+        b"sink((yield 'from'), (yield from hidden()), (yield), (yield *items, tail))\n",
+    )]);
+    let native = assert_declaration_candidates_match_ast(&python, &scan);
+    assert_eq!(
+        native["facts"],
+        json!(expected(
+            "unit.py",
+            &[
+                (1, 1, "call", "unit", "hidden()"),
+                (
+                    1,
+                    1,
+                    "call",
+                    "unit",
+                    "sink(<Yield>, <YieldFrom>, <Yield>, <Yield>)"
+                ),
+                (1, 1, "module", "unit", "unit"),
+            ]
+        ))
+    );
+    for text in [
+        "sink((yield *eval(), tail))\n",
+        "yield from lambda: eval()\n",
+        "a = b = yield from eval()\n",
+    ] {
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        assert_warning_candidates_match_ast(&python, &scan);
+    }
+    let (_, scan) = capture(&[("unit.py", b"sink((yield value,))\nsink(((yield value),))\n")]);
+    let native = assert_declaration_candidates_match_ast(&python, &scan);
+    assert_eq!(
+        native["facts"],
+        json!(expected(
+            "unit.py",
+            &[
+                (1, 1, "call", "unit", "sink(<Yield>)"),
+                (1, 1, "module", "unit", "unit"),
+                (2, 2, "call", "unit", "sink([<Yield>])"),
+            ]
+        ))
+    );
+    for form in [
+        "yield head, x := eval()",
+        "yield from",
+        "yield from *xs",
+        "yield from x := value",
+        "yield from yield value",
+        "yield from a,b",
+        "sink(yield value)",
+        "sink([yield value])",
+        "sink({yield value})",
+        "sink({key: yield value})",
+        "def f():\n    return yield value",
+        "def f(a=yield value): pass",
+        "sink(lambda: yield value)",
+        "sink(left + yield value)",
+        "sink(left if yield value else right)",
+        "for item in yield values: pass",
+        "yield from\nvalues",
+    ] {
+        let text = format!("eval()\n{form}\nexec()\n");
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        let ast = extract_captured(&python, &scan.sources).unwrap();
+        assert!(!ast.complete, "AST accepted {form}");
+        assert_eq!(ast.diagnostics[0].code, "parse_failure");
+        let native = extract_fact_candidates(&scan.sources).unwrap();
+        assert_ne!(
+            native.files[0].status,
+            CandidateStatus::AcceptedFacts,
+            "{form}"
+        );
+        assert_eq!(
+            serde_json::to_value(&native.facts).unwrap(),
+            json!(expected("unit.py", &[(1, 1, "module", "unit", "unit"),]))
+        );
+        assert!(native.diagnostics.is_empty());
+    }
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn suspension_expression_candidate_await_primaries_power_association_and_bytes() {
+    use super::python_native::{extract_fact_candidates, CandidateStatus};
+    let python = oracle();
+    for operand in [
+        "value",
+        "obj.field",
+        "items[index()]",
+        "factory()",
+        "factory()().field[index()]",
+        "None",
+        "True",
+        "1",
+        "'PRIVATE_LITERAL'",
+        "[]",
+        "{}",
+        "{value}",
+        "(value,)",
+        "[x for x in xs]",
+        "{x for x in xs}",
+        "{x:x for x in xs}",
+        "(x for x in xs)",
+        "(await work())",
+        "(-work())",
+        "(left() + right())",
+        "(lambda: work())",
+        "(yield work())",
+        "(written := work())",
+    ] {
+        let text = format!("sink(await {operand})\n");
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        let native = assert_declaration_candidates_match_ast(&python, &scan);
+        assert!(!native.to_string().contains("PRIVATE_LITERAL"));
+    }
+    for (value, shape) in [
+        ("await x ** y", "<Await> Pow y"),
+        ("await (x ** y)", "<Await>"),
+        ("await x ** y ** z", "<Await> Pow y Pow z"),
+        ("await x ** await y ** z", "<Await> Pow <Await> Pow z"),
+        ("await x ** -y", "<Await> Pow <UnaryOp>"),
+        ("await x ** y ** -z", "<Await> Pow y Pow <UnaryOp>"),
+        ("(await x) ** y", "<Await> Pow y"),
+        ("await x + y", "<Await> Add y"),
+        ("-await x ** y", "<UnaryOp>"),
+    ] {
+        let text = format!("sink({value})\n");
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        let native = assert_declaration_candidates_match_ast(&python, &scan);
+        let call = format!("sink({shape})");
+        assert_eq!(
+            native["facts"],
+            json!(expected(
+                "unit.py",
+                &[
+                    (1, 1, "call", "unit", &call),
+                    (1, 1, "module", "unit", "unit"),
+                ]
+            )),
+            "{value}"
+        );
+    }
+    for text in [
+        "sink(*await left() ** right())\n",
+        "sink(*(await left() ** right()))\n",
+        "(await left() ** await right()).eval()\n",
+    ] {
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        assert_warning_candidates_match_ast(&python, &scan);
+    }
+    for depth in [10, 11, 12, 13, 14, 30] {
+        let chain = (0..depth)
+            .map(|n| format!("await v{n}"))
+            .collect::<Vec<_>>()
+            .join(" ** ");
+        let text = format!("sink({chain})\n");
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        assert_declaration_candidates_match_ast(&python, &scan);
+    }
+    for count in [11, 12, 13] {
+        let padding = vec!["[a,b,c,d,e]"; count].join(",");
+        let text = format!("sink([{padding}], await left() ** right())\n");
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        assert_declaration_candidates_match_ast(&python, &scan);
+    }
+    for newline in ["\n", "\r\n"] {
+        for bom in ["", "\u{feff}"] {
+            let text =
+                format!("{bom}sink(\n await left(\n  eval()\n ) ** right(\n  exec()\n )\n)\n")
+                    .replace('\n', newline);
+            let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+            let native = assert_warning_candidates_match_ast(&python, &scan);
+            assert_eq!(
+                native["facts"],
+                json!(expected(
+                    "unit.py",
+                    &[
+                        (1, 1, "module", "unit", "unit"),
+                        (1, 7, "call", "unit", "sink(<Await> Pow right(exec()))"),
+                        (2, 4, "call", "unit", "left(eval())"),
+                        (3, 3, "call", "unit", "eval()"),
+                        (4, 6, "call", "unit", "right(exec())"),
+                        (5, 5, "call", "unit", "exec()"),
+                    ]
+                ))
+            );
+            assert_eq!(
+                native["diagnostics"],
+                json!([
+                    {"code":"dynamic_discovery_unresolved", "path":"unit.py", "message":"line 3: eval; runtime targets are not inferred"},
+                    {"code":"dynamic_discovery_unresolved", "path":"unit.py", "message":"line 5: exec; runtime targets are not inferred"},
+                ])
+            );
+        }
+    }
+    for operand in [
+        "-x ** y",
+        "await x ** y",
+        "await value",
+        "-value",
+        "+value",
+        "~value",
+        "*xs",
+        "lambda: value",
+        "yield value",
+    ] {
+        let text = format!("eval()\nsink(await {operand})\n");
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        assert!(
+            !extract_captured(&python, &scan.sources).unwrap().complete,
+            "{operand}"
+        );
+        let native = extract_fact_candidates(&scan.sources).unwrap();
+        assert_ne!(
+            native.files[0].status,
+            CandidateStatus::AcceptedFacts,
+            "{operand}"
+        );
+        assert_eq!(
+            serde_json::to_value(&native.facts).unwrap(),
+            json!(expected("unit.py", &[(1, 1, "module", "unit", "unit")]))
+        );
+        assert!(native.diagnostics.is_empty());
+    }
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn suspension_expression_candidate_alias_constancy_dynamic_terms_and_targets() {
+    let python = oracle();
+    for name in [
+        "__import__",
+        "import_module",
+        "iter_modules",
+        "walk_packages",
+        "entry_points",
+        "load_entry_point",
+        "find_spec",
+        "exec",
+        "eval",
+    ] {
+        for value in [
+            "await probe()",
+            "(yield probe())",
+            "(yield from probe())",
+            "(probe := probe())",
+        ] {
+            let text = format!("from arbitrary import {name} as probe\nsink({value})\nprobe()\n");
+            let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+            let native = assert_warning_candidates_match_ast(&python, &scan);
+            assert_eq!(
+                native["diagnostics"],
+                json!([
+                    {"code":"dynamic_discovery_unresolved", "path":"unit.py", "message":format!("line 2: arbitrary.{name}; runtime targets are not inferred")},
+                    {"code":"dynamic_discovery_unresolved", "path":"unit.py", "message":format!("line 3: arbitrary.{name}; runtime targets are not inferred")},
+                ])
+            );
+        }
+        for value in [
+            "lambda probe: (probe := probe())",
+            "[probe := probe() for probe in xs]",
+            "{await probe() for probe in xs}",
+            "{probe:(yield probe()) for probe in xs}",
+            "((yield from probe()) for probe in xs)",
+            "[x for items[(probe := probe())] in xs]",
+            "[x for (await probe()).field in xs]",
+        ] {
+            let text = format!("from arbitrary import {name} as probe\nsink({value})\nprobe()\n");
+            let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+            let native = assert_warning_candidates_match_ast(&python, &scan);
+            assert_eq!(
+                native["diagnostics"].as_array().unwrap().len(),
+                2,
+                "{name}: {value}"
+            );
+        }
+    }
+    for value in [
+        "await probe()",
+        "(yield probe())",
+        "(yield from probe())",
+        "(probe := probe())",
+    ] {
+        for statement in [
+            format!("items[{value}] = rhs"),
+            format!("({value}).field = rhs"),
+            format!("items[{value}] += rhs"),
+            format!("del items[{value}]"),
+            format!("for items[{value}] in xs: pass"),
+            format!("with ctx as ({value}).field: pass"),
+            format!("if {value}: pass"),
+            format!("while {value}: break"),
+            format!("try: pass\nexcept {value}: pass"),
+            format!("raise {value} from ({value})"),
+            format!("assert {value}, {value}"),
+        ] {
+            let text = format!("from arbitrary import eval as probe\n{statement}\nprobe()\n");
+            let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+            assert_warning_candidates_match_ast(&python, &scan);
+        }
+    }
+    // Rebinding even to a plain literal does not update the helper's import table.
+    let (_, scan) = capture(&[(
+        "unit.py",
+        b"from arbitrary import eval as probe\n(probe := None)\nprobe()\n",
+    )]);
+    let native = assert_warning_candidates_match_ast(&python, &scan);
+    assert_eq!(
+        native["facts"],
+        json!(expected(
+            "unit.py",
+            &[
+                (
+                    1,
+                    1,
+                    "from_import",
+                    "unit",
+                    r#"{"level":0,"module":"arbitrary","names":[{"asname":"probe","name":"eval"}]}"#
+                ),
+                (1, 1, "module", "unit", "unit"),
+                (3, 3, "call", "unit", "probe()"),
+            ]
+        ))
+    );
+    assert_eq!(
+        native["diagnostics"],
+        json!([{"code":"dynamic_discovery_unresolved", "path":"unit.py", "message":"line 3: arbitrary.eval; runtime targets are not inferred"}])
+    );
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn suspension_expression_candidate_opaque_budgets_and_fresh_hidden_callees() {
+    let python = oracle();
+    for (value, opaque) in [
+        ("await eval()", "<Await>"),
+        ("(yield eval())", "<Yield>"),
+        ("(yield from eval())", "<YieldFrom>"),
+        ("(x := eval())", "<NamedExpr>"),
+    ] {
+        for extra in [1, 2, 3] {
+            let mut items = vec!["U[a,a,a,a,a,a]"; 8];
+            items.extend(std::iter::repeat_n("a", extra));
+            items.push(value);
+            let text = format!("sink(T[{}])\n", items.join(","));
+            let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+            let native = assert_warning_candidates_match_ast(&python, &scan);
+            let mut rendered = vec!["U[[a, a, a, a, a, a]]"; 8];
+            rendered.extend(std::iter::repeat_n("a", extra));
+            rendered.push(if extra == 3 { "..." } else { opaque });
+            let shape = format!("sink(T[[{}]])", rendered.join(", "));
+            assert_eq!(
+                native["facts"],
+                json!(expected(
+                    "unit.py",
+                    &[
+                        (1, 1, "call", "unit", "eval()"),
+                        (1, 1, "call", "unit", &shape),
+                        (1, 1, "module", "unit", "unit"),
+                    ]
+                )),
+                "{value}: {extra}"
+            );
+        }
+        for depth in [11, 12, 13] {
+            let text = format!("sink({}{value}{})\n", "[".repeat(depth), "]".repeat(depth));
+            let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+            assert_warning_candidates_match_ast(&python, &scan);
+        }
+        for count in [16, 17] {
+            let args = vec![value; count].join(",\n");
+            let keywords = (0..count)
+                .map(|n| format!("k{n}={value}"))
+                .collect::<Vec<_>>()
+                .join(",\n");
+            let text = format!("sink({args},\n{keywords})\n");
+            let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+            let native = assert_warning_candidates_match_ast(&python, &scan);
+            assert_eq!(native["diagnostics"].as_array().unwrap().len(), count * 2);
+            let mut rendered = vec![opaque.to_owned(); 16];
+            if count == 17 {
+                rendered.push("...".into());
+            }
+            rendered.extend((0..16).map(|n| format!("k{n}={opaque}")));
+            if count == 17 {
+                rendered.push("...".into());
+            }
+            let call = format!("sink({})", rendered.join(", "));
+            let call = &call[..call.len().min(512)];
+            let mut rows = vec![
+                (1, 1, "module", "unit", "unit"),
+                (1, count * 2, "call", "unit", call),
+            ];
+            rows.extend((1..=count * 2).map(|line| (line, line, "call", "unit", "eval()")));
+            // The outer Call starts alongside its first argument, not after it.
+            rows.sort_by_key(|row| (row.0, row.1, row.2, row.3, row.4));
+            assert_eq!(native["facts"], json!(expected("unit.py", &rows)));
+        }
+        for size in [511, 512, 513] {
+            let text = format!("{}({value})\n", "a".repeat(size));
+            let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+            assert_warning_candidates_match_ast(&python, &scan);
+        }
+        let heavy = format!(
+            "[{}, ({value}).eval()]",
+            ["[a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a]"; 16].join(",")
+        );
+        for text in [
+            format!("sink({heavy}, ({value}).eval())\n"),
+            format!("sink({}, ({value}).eval())\n", ["a"; 17].join(",")),
+            format!("{}(({value}).eval())\n", "a".repeat(513)),
+        ] {
+            let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+            assert_warning_candidates_match_ast(&python, &scan);
+        }
+    }
+    let wide = ["item"; 100].join(",");
+    for (value, shape) in [
+        (format!("await [{wide}, eval()]"), "<Await>"),
+        (format!("(yield [{wide}, eval()])"), "<Yield>"),
+        (format!("(yield from [{wide}, eval()])"), "<YieldFrom>"),
+        (format!("(x := [{wide}, eval()])"), "<NamedExpr>"),
+    ] {
+        let text = format!("sink({value}, tail)\n");
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        let native = assert_warning_candidates_match_ast(&python, &scan);
+        let call = format!("sink({shape}, tail)");
+        assert_eq!(
+            native["facts"],
+            json!(expected(
+                "unit.py",
+                &[
+                    (1, 1, "call", "unit", "eval()"),
+                    (1, 1, "call", "unit", &call),
+                    (1, 1, "module", "unit", "unit"),
+                ]
+            ))
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn suspension_expression_candidate_defaults_headers_and_metadata_guards() {
+    use super::python_native::{extract_fact_candidates, CandidateStatus};
+    let python = oracle();
+    for (value, shape) in [
+        ("await value", "<Await>"),
+        ("(yield value)", "<Yield>"),
+        ("(yield from values)", "<YieldFrom>"),
+        ("(written := value)", "<NamedExpr>"),
+    ] {
+        let text = format!("def f(arg={value}): pass\n");
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        let native = assert_declaration_candidates_match_ast(&python, &scan);
+        assert_eq!(
+            native["facts"],
+            json!(expected(
+                "unit.py",
+                &[
+                    (1, 1, "function", "unit.f", "f"),
+                    (1, 1, "module", "unit", "unit"),
+                    (1, 1, "parameter", "unit.f.arg", "arg"),
+                    (1, 1, "parameter_default", "unit.f.arg", shape),
+                    (
+                        1,
+                        1,
+                        "signature",
+                        "unit.f",
+                        r#"{"keywordOnly":[],"positional":["arg"],"positionalOnly":0}"#
+                    ),
+                ]
+            ))
+        );
+        for header in [
+            format!("class Box(({value}, hidden())): pass"),
+            format!("def f(arg: ({value}, hidden())): pass"),
+            format!("def f() -> ({value}, hidden()): pass"),
+            format!("field: ({value}, hidden())"),
+            format!("@decorate({value})\ndef f(): pass"),
+            format!("self.router = {value}"),
+            format!("self.prefix += {value}"),
+            format!("del ({value}).router"),
+        ] {
+            let text = format!("eval()\nclass Before: pass\n{header}\nexec()\n");
+            let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+            assert!(
+                extract_captured(&python, &scan.sources).unwrap().complete,
+                "{header}"
+            );
+            let native = extract_fact_candidates(&scan.sources).unwrap();
+            assert_eq!(
+                native.files[0].status,
+                CandidateStatus::UnsupportedSyntax,
+                "{header}"
+            );
+            assert_eq!(
+                serde_json::to_value(&native.facts).unwrap(),
+                json!(expected("unit.py", &[(1, 1, "module", "unit", "unit")]))
+            );
+            assert!(native.diagnostics.is_empty());
+        }
+    }
+    for value in [
+        "lambda: await value",
+        "[await value for x in xs]",
+        "{(yield key):(x := value) for x in xs}",
+        "((yield from values) for x in xs)",
+        "(outer := (inner := value))",
+    ] {
+        let text = format!("def f(arg={value}): pass\n");
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        assert_declaration_candidates_match_ast(&python, &scan);
+    }
+    for hidden in [
+        "eval()",
+        "FastAPI()",
+        "pkg.APIRouter()",
+        "app.include_router(child)",
+    ] {
+        for value in [
+            format!("await {hidden}"),
+            format!("(yield {hidden})"),
+            format!("(yield from {hidden})"),
+            format!("(x := {hidden})"),
+        ] {
+            let mut contexts = vec![
+                format!("def f(arg={value}): pass"),
+                format!("def f(arg=lambda: [{value} for item in xs]): pass"),
+                format!("def f(arg=[item for items[{value}] in xs]): pass"),
+                format!("def f(arg=[item for item in xs if ({value})]): pass"),
+                format!("def f(arg=lambda a=({value}): a): pass"),
+            ];
+            if hidden != "eval()" {
+                contexts.extend([
+                    format!("sink({value})"),
+                    format!("sink(lambda: [{value} for item in xs])"),
+                    format!("sink([item for items[{value}] in xs])"),
+                    format!("sink({}, {value})", ["a"; 17].join(",")),
+                ]);
+            }
+            for context in contexts {
+                let text = format!("eval()\nclass Before: pass\n{context}\nexec()\n");
+                let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+                assert!(
+                    extract_captured(&python, &scan.sources).unwrap().complete,
+                    "{context}"
+                );
+                let native = extract_fact_candidates(&scan.sources).unwrap();
+                assert_eq!(
+                    native.files[0].status,
+                    CandidateStatus::UnsupportedSyntax,
+                    "{context}"
+                );
+                assert_eq!(
+                    serde_json::to_value(&native.facts).unwrap(),
+                    json!(expected("unit.py", &[(1, 1, "module", "unit", "unit")]))
+                );
+                assert!(native.diagnostics.is_empty(), "{context}");
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn suspension_expression_candidate_replay_isolation_resources_and_no_execution() {
+    use super::python_native::{extract_fact_candidates, parse_batch, CandidateStatus};
+    let python = oracle();
+    let (root, _) = capture(&[("placeholder.py", b"")]);
+    let marker = root.path().join("executed");
+    let first_source = format!("from arbitrary import eval as probe\n(probe := None)\nclass Box(Base):\n    field: T = (written := value)\n    def run(arg=(yield DEFAULT)):\n        try:\n            sink(await probe() ** other(), (yield from probe()), (x := probe()))\n        except (error := E):\n            assert [await probe() for items[(index := probe())] in xs]\n        return (yield probe())\n(await open({:?}, 'w')).write('PRIVATE_MARKER')\n", marker.to_str().unwrap());
+    let entries: &[(&str, &[u8])] = &[
+        ("a.py", first_source.as_bytes()),
+        (
+            "b.py",
+            b"probe()\nsink((yield from values()), [x := x for x in xs])\n",
+        ),
+        ("c.py", b"eval()\nsink(await FastAPI())\n"),
+        ("d.py", b"eval()\nsink((x := probe()))\nlater = (\n"),
+    ];
+    let (sources_root, mut scan) = capture(entries);
+    let (_good_root, good_scan) = capture(&entries[..2]);
+    let good = assert_warning_candidates_match_ast(&python, &good_scan);
+    let native = extract_fact_candidates(&scan.sources).unwrap();
+    assert_eq!(native.files[2].status, CandidateStatus::UnsupportedSyntax);
+    assert_eq!(native.files[3].status, CandidateStatus::SyntaxError);
+    let first = serde_json::to_value(native).unwrap();
+    let mut facts = good["facts"].as_array().unwrap().clone();
+    facts.extend(expected("c.py", &[(1, 1, "module", "c", "c")]));
+    facts.extend(expected("d.py", &[(1, 1, "module", "d", "d")]));
+    assert_eq!(first["facts"], json!(facts));
+    assert_eq!(first["diagnostics"], good["diagnostics"]);
+    let ast = extract_captured(&python, &scan.sources).unwrap();
+    assert!(!marker.exists());
+    for (path, _) in entries {
+        fs::remove_file(sources_root.path().join(path)).unwrap();
+    }
+    assert_eq!(
+        first,
+        serde_json::to_value(extract_fact_candidates(&scan.sources).unwrap()).unwrap()
+    );
+    assert_eq!(
+        semantics(&ast),
+        semantics(&extract_captured(&python, &scan.sources).unwrap())
+    );
+    scan.sources.reverse();
+    let reversed = serde_json::to_value(extract_fact_candidates(&scan.sources).unwrap()).unwrap();
+    assert_eq!(first["facts"], reversed["facts"]);
+    assert_eq!(first["diagnostics"], reversed["diagnostics"]);
+    assert_eq!(
+        semantics(&ast),
+        semantics(&extract_captured(&python, &scan.sources).unwrap())
+    );
+    assert!(!marker.exists());
+    let text =
+        "sink(await left(eval()) ** await right(exec()), (yield from values()), (x := probe()))\n"
+            .repeat(80);
+    let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+    let native = assert_warning_candidates_match_ast(&python, &scan);
+    let parsed = parse_batch(&scan.sources).unwrap();
+    assert_eq!(
+        native["files"][0]["nodes_visited"],
+        json!(parsed.files[0].nodes_visited)
+    );
+    assert_eq!(
+        native["files"][0]["max_depth"],
+        json!(parsed.files[0].max_depth)
+    );
+    assert_eq!(native["files"][0]["traversal_finished"], true);
+    assert_eq!(native["diagnostics"].as_array().unwrap().len(), 160);
+    for value in [
+        format!("await {}eval(){}", "nest(".repeat(180), ")".repeat(180)),
+        format!("(yield {}eval(){})", "nest(".repeat(180), ")".repeat(180)),
+        format!(
+            "(yield from {}eval(){})",
+            "nest(".repeat(180),
+            ")".repeat(180)
+        ),
+        format!("(x := {}eval(){})", "nest(".repeat(180), ")".repeat(180)),
+    ] {
+        let text = format!("eval()\nsink({value})\n");
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        assert!(extract_captured(&python, &scan.sources).unwrap().complete);
+        let native = extract_fact_candidates(&scan.sources).unwrap();
+        assert_eq!(
+            native.files[0].status,
+            CandidateStatus::ResourceLimit,
+            "{value}"
+        );
+        assert_eq!(
+            serde_json::to_value(&native.facts).unwrap(),
+            json!(expected("unit.py", &[(1, 1, "module", "unit", "unit")]))
+        );
+        assert!(native.diagnostics.is_empty());
+    }
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn closure_expression_candidate_five_shapes_roots_callees_and_receivers() {
+    let python = oracle();
+    for (value, shape) in [
+        ("lambda: hidden()", "<Lambda>"),
+        ("[hidden() for x in xs]", "<ListComp>"),
+        ("{hidden() for x in xs}", "<SetComp>"),
+        ("{x:hidden() for x in xs}", "<DictComp>"),
+        ("(hidden() for x in xs)", "<GeneratorExp>"),
+    ] {
+        let text = format!("root = {value}\nsink({value})\n({value})()\n({value}).method()\nself.field = {value}\n");
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        let native = assert_declaration_candidates_match_ast(&python, &scan);
+        assert_eq!(
+            native["identity"]["policy"],
+            "python-native-private-facts-15"
+        );
+        let sink = format!("sink({shape})");
+        let call = format!("{shape}()");
+        let method = format!("{shape}.method()");
+        assert_eq!(
+            native["facts"],
+            json!(expected(
+                "unit.py",
+                &[
+                    (1, 1, "binding_invalidation", "unit", r#"{"target":"root"}"#),
+                    (1, 1, "call", "unit", "hidden()"),
+                    (1, 1, "module", "unit", "unit"),
+                    (2, 2, "call", "unit", "hidden()"),
+                    (2, 2, "call", "unit", &sink),
+                    (3, 3, "call", "unit", &call),
+                    (3, 3, "call", "unit", "hidden()"),
+                    (4, 4, "call", "unit", &method),
+                    (4, 4, "call", "unit", "hidden()"),
+                    (
+                        5,
+                        5,
+                        "binding_invalidation",
+                        "unit",
+                        r#"{"target":"self.field"}"#
+                    ),
+                    (5, 5, "call", "unit", "hidden()"),
+                ]
+            ))
+        );
+        // All ordinary Body dispatch sites, including Load children of Store targets.
+        for statement in [
+            format!("assert {value}, {value}"),
+            format!("raise {value} from ({value})"),
+            format!("if {value}: pass"),
+            format!("while {value}: break"),
+            format!("for item in {value}: pass"),
+            format!("with ({value}) as item: pass"),
+            format!("try: pass\nexcept {value}: pass"),
+            format!("items[({value})] = rhs"),
+            format!("({value}).field = rhs"),
+            format!("items[({value})] += rhs"),
+            format!("del items[({value})]"),
+            format!("for items[({value})] in xs: pass"),
+            format!("with ctx as ({value}).field: pass"),
+            format!("def f():\n    return {value}"),
+            format!("field: T = {value}"),
+        ] {
+            let (_, scan) = capture(&[("unit.py", statement.as_bytes())]);
+            assert_declaration_candidates_match_ast(&python, &scan);
+        }
+    }
+    for text in [
+        "sink(flag or (lambda: eval()))\n",
+        "sink(flag and (lambda: eval()))\n",
+        "sink(not (lambda: eval()))\n",
+        "sink(left if (lambda: test()) else right)\n",
+        "sink(lambda: flag or eval())\n",
+        "sink(left if ready else lambda: eval())\n",
+        "def f(value=flag or (lambda: item)): pass\n",
+        "try: pass\nexcept flag or (lambda: eval()) as error: pass\n",
+    ] {
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        assert_warning_candidates_match_ast(&python, &scan);
+    }
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn closure_expression_candidate_lambda_parameters_are_not_definitions() {
+    let python = oracle();
+    // Duplicate names are ast.parse-positive even when compile rejects them.
+    for parameters in [
+        "",
+        "a",
+        "a,",
+        "a,b",
+        "a, /",
+        "a, /, b=one",
+        "a=one, /, b=two",
+        "*rest",
+        "**opts",
+        "*rest, **opts",
+        "*, key",
+        "*, key=one",
+        "a, /, b=one, *rest, key, other=two, **opts",
+        "a=one, b=two, *rest, key, **opts",
+        "a,a",
+        "a,/,a",
+        "a,*,a",
+        "*a,**a",
+        "a=one,*,b",
+        "a=lambda: one, *, b=lambda: two",
+        "*rest,",
+        "**opts,",
+        "a,/,",
+        "a,*a",
+        "a,**a",
+        "a=one,/,a=two,*,a=three",
+        "a=lambda: one,*,b=lambda x=two: x",
+    ] {
+        let text = format!("sink(lambda {parameters}: body())\n");
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        let native = assert_declaration_candidates_match_ast(&python, &scan);
+        assert_eq!(
+            native["facts"],
+            json!(expected(
+                "unit.py",
+                &[
+                    (1, 1, "call", "unit", "body()"),
+                    (1, 1, "call", "unit", "sink(<Lambda>)"),
+                    (1, 1, "module", "unit", "unit"),
+                ]
+            )),
+            "parameters: {parameters}"
+        );
+    }
+    for text in [
+        "sink(lambda: lambda: body())\n",
+        "sink(lambda a=pos(), /, b=other(), *rest, k=kw(), **opts: body())\n",
+        "sink(\n    lambda a=one, /,\n        b=two, *, k=three:\n        body()\n)\n",
+    ] {
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        assert_declaration_candidates_match_ast(&python, &scan);
+    }
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn closure_expression_candidate_lambda_defaults_body_aliases_and_warnings() {
+    let python = oracle();
+    for name in [
+        "__import__",
+        "import_module",
+        "iter_modules",
+        "walk_packages",
+        "entry_points",
+        "load_entry_point",
+        "find_spec",
+        "exec",
+        "eval",
+    ] {
+        let text = format!("from arbitrary import {name} as probe\nsink(lambda probe=probe(), *, key=probe(): probe())\nprobe()\nclass Box:\n    sink(lambda probe=probe(), *, key=probe(): probe())\n    def run():\n        sink(lambda probe=probe(), *, key=probe(): probe())\n        probe()\nprobe()\n");
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        let native = assert_warning_candidates_match_ast(&python, &scan);
+        let mut diagnostics = Vec::new();
+        for (line, count) in [(2, 3), (3, 1), (5, 3), (7, 3), (8, 1), (9, 1)] {
+            for _ in 0..count {
+                diagnostics.push(json!({"code":"dynamic_discovery_unresolved", "path":"unit.py",
+                    "message":format!("line {line}: arbitrary.{name}; runtime targets are not inferred")}));
+            }
+        }
+        assert_eq!(native["diagnostics"], json!(diagnostics), "{name}");
+        assert!(native["facts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| !f["symbol"].as_str().unwrap().contains("<lambda>")
+                && !matches!(
+                    f["kind"].as_str().unwrap(),
+                    "parameter" | "parameter_default" | "binding" | "binding_invalidation"
+                )));
+    }
+    // Keyword defaults precede positional defaults in AST field order, but no
+    // expression can change aliases; globally sorted observable vectors agree.
+    let (_, scan) = capture(&[("unit.py", b"sink(lambda a=pos(), *, b=kw(): body())\n")]);
+    let native = assert_declaration_candidates_match_ast(&python, &scan);
+    assert_eq!(
+        native["facts"],
+        json!(expected(
+            "unit.py",
+            &[
+                (1, 1, "call", "unit", "body()"),
+                (1, 1, "call", "unit", "kw()"),
+                (1, 1, "call", "unit", "pos()"),
+                (1, 1, "call", "unit", "sink(<Lambda>)"),
+                (1, 1, "module", "unit", "unit"),
+            ]
+        ))
+    );
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn closure_expression_candidate_comprehension_clauses_targets_and_owners() {
+    let python = oracle();
+    let expression = "[result() async for (self.router, [items[index()], *rest]) in source() if first() if second() for factory().prefix in more() if final()]";
+    for (prefix, indent, owner, end) in [
+        ("", "", "unit", 1),
+        ("class Box:\n", "    ", "unit.Box", 2),
+        (
+            "class Box:\n    def run():\n",
+            "        ",
+            "unit.Box.run",
+            3,
+        ),
+    ] {
+        let text = format!("{prefix}{indent}{expression}\n");
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        let native = assert_declaration_candidates_match_ast(&python, &scan);
+        let mut rows = vec![(1, 1, "module", "unit", "unit")];
+        if end > 1 {
+            rows.push((1, end, "class", "unit.Box", "Box"));
+        }
+        if end == 3 {
+            rows.push((2, 3, "function", owner, "run"));
+            rows.push((
+                2,
+                3,
+                "signature",
+                owner,
+                r#"{"keywordOnly":[],"positional":[],"positionalOnly":0}"#,
+            ));
+        }
+        for call in [
+            "factory()",
+            "final()",
+            "first()",
+            "index()",
+            "more()",
+            "result()",
+            "second()",
+            "source()",
+        ] {
+            rows.push((end, end, "call", owner, call));
+        }
+        // At module level same-line call facts precede the module baseline.
+        if end == 1 {
+            rows.rotate_left(1);
+        }
+        assert_eq!(native["facts"], json!(expected("unit.py", &rows)));
+    }
+    for result in [
+        "[probe() for probe in xs]",
+        "{probe() async for probe in xs}",
+        "{probe(): probe() for probe in xs}",
+        "(probe() async for probe in xs)",
+        "[probe() for self.router in xs for cls.prefix in ys]",
+        "[probe() for *probe in xs]",
+        "[probe() for a,*probe in xs]",
+        "[probe() for (lambda: probe()).field in xs]",
+        "[probe() for items[(probe() for x in xs)] in xs]",
+        "[probe() for probe in (lambda: probe()) if (lambda: probe())]",
+        "[[*xs] for x in xs]",
+        "[{**opts} for x in xs]",
+        "[x for x in (a,b)]",
+        "[x for x in (a if b else c)]",
+        "[x for x in xs if (a if b else c)]",
+    ] {
+        let text = format!("from arbitrary import eval as probe\n{result}\nprobe()\n");
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        let native = assert_warning_candidates_match_ast(&python, &scan);
+        assert!(native["facts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| !matches!(
+                f["kind"].as_str().unwrap(),
+                "binding" | "binding_invalidation" | "router_mutation"
+            )));
+    }
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn closure_expression_candidate_generator_call_grouping_and_byte_spans() {
+    let python = oracle();
+    let text = "sink(\n    result() for x in source()\n)\nsink((result() for x in source()), neighbor(), key=value())\nsink((x for x in xs),)\n";
+    for newline in ["\n", "\r\n"] {
+        for bom in ["", "\u{feff}"] {
+            let text = format!("{bom}{text}").replace('\n', newline);
+            let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+            let native = assert_declaration_candidates_match_ast(&python, &scan);
+            assert_eq!(
+                native["facts"],
+                json!(expected(
+                    "unit.py",
+                    &[
+                        (1, 1, "module", "unit", "unit"),
+                        (1, 3, "call", "unit", "sink(<GeneratorExp>)"),
+                        (2, 2, "call", "unit", "result()"),
+                        (2, 2, "call", "unit", "source()"),
+                        (4, 4, "call", "unit", "neighbor()"),
+                        (4, 4, "call", "unit", "result()"),
+                        (
+                            4,
+                            4,
+                            "call",
+                            "unit",
+                            "sink(<GeneratorExp>, neighbor(), key=value())"
+                        ),
+                        (4, 4, "call", "unit", "source()"),
+                        (4, 4, "call", "unit", "value()"),
+                        (5, 5, "call", "unit", "sink(<GeneratorExp>)"),
+                    ]
+                ))
+            );
+        }
+    }
+    for text in [
+        "sink(x async for x in xs)\n",
+        "sink((x for x in xs), other, k=value)\n",
+        "sink(other, (x for x in xs), *args, **opts)\n",
+        "sink(inner(x for x in source()) for y in outer())\n",
+        "sink(*(x for x in source()), **{k:v for k in keys()})\n",
+        "sink(\n    result()\n    async for items[index()] in source()\n    if test()\n)\n",
+    ] {
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        assert_declaration_candidates_match_ast(&python, &scan);
+    }
+    for count in [16, 17] {
+        let args = vec!["(eval() for x in xs)"; count].join(",");
+        let keywords = (0..count)
+            .map(|n| format!("k{n}={{x:eval() for x in xs}}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let text = format!("sink({args},{keywords})\n");
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        let native = assert_warning_candidates_match_ast(&python, &scan);
+        assert_eq!(native["diagnostics"].as_array().unwrap().len(), 2 * count);
+    }
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn closure_expression_candidate_defaults_headers_and_metadata_guards() {
+    use super::python_native::{extract_fact_candidates, CandidateStatus};
+    let python = oracle();
+    for (value, shape) in [
+        ("lambda a=one, /, *, b=two: a", "<Lambda>"),
+        ("[x for x in xs if flag]", "<ListComp>"),
+        ("{x for x in xs}", "<SetComp>"),
+        ("{x:y for x in xs}", "<DictComp>"),
+        ("(x async for x in xs)", "<GeneratorExp>"),
+    ] {
+        let text = format!("def f(value={value}): pass\n");
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        let native = assert_declaration_candidates_match_ast(&python, &scan);
+        assert_eq!(
+            native["facts"],
+            json!(expected(
+                "unit.py",
+                &[
+                    (1, 1, "function", "unit.f", "f"),
+                    (1, 1, "module", "unit", "unit"),
+                    (1, 1, "parameter", "unit.f.value", "value"),
+                    (1, 1, "parameter_default", "unit.f.value", shape),
+                    (
+                        1,
+                        1,
+                        "signature",
+                        "unit.f",
+                        r#"{"keywordOnly":[],"positional":["value"],"positionalOnly":0}"#
+                    ),
+                ]
+            ))
+        );
+        for header in [
+            format!("class C(({value}, hidden())): pass"),
+            format!("def f(x: ({value}, hidden())): pass"),
+            format!("def f() -> ({value}, hidden()): pass"),
+            format!("x: ({value}, hidden())"),
+            format!("@decorate({value})\ndef f(): pass"),
+        ] {
+            let (_, scan) = capture(&[("unit.py", header.as_bytes())]);
+            assert!(
+                extract_captured(&python, &scan.sources).unwrap().complete,
+                "{header}"
+            );
+            let native = extract_fact_candidates(&scan.sources).unwrap();
+            assert_ne!(
+                native.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{header}"
+            );
+            assert_eq!(native.facts.len(), 1);
+            assert!(native.diagnostics.is_empty());
+        }
+    }
+    for hidden in [
+        "eval()",
+        "FastAPI()",
+        "pkg.APIRouter()",
+        "app.include_router(child)",
+    ] {
+        for value in [
+            format!("lambda a={hidden}: a"),
+            format!("lambda *, a={hidden}: a"),
+            format!("lambda: {hidden}"),
+            format!("lambda a=lambda: {hidden}: a"),
+            format!("[{hidden} for x in xs]"),
+            format!("{{{hidden} for x in xs}}"),
+            format!("{{{hidden}: x for x in xs}}"),
+            format!("{{x: {hidden} for x in xs}}"),
+            format!("({hidden} for x in xs)"),
+            format!("[x for items[{hidden}] in xs]"),
+            format!("[x for ({hidden}).field in xs]"),
+            format!("[x for x in {hidden}]"),
+            format!("[x for x in xs if {hidden}]"),
+        ] {
+            // Calls reject recursively in Default; G3 triggers also reject in Body.
+            let mut contexts = vec![format!("def f(x={value}): pass")];
+            if hidden != "eval()" {
+                contexts.push(format!("sink({value})"));
+            }
+            for context in contexts {
+                let text = format!("eval()\nclass Before: pass\n{context}\nexec()\n");
+                let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+                assert!(
+                    extract_captured(&python, &scan.sources).unwrap().complete,
+                    "{context}"
+                );
+                let native = extract_fact_candidates(&scan.sources).unwrap();
+                assert_eq!(
+                    native.files[0].status,
+                    CandidateStatus::UnsupportedSyntax,
+                    "{context}"
+                );
+                assert_eq!(
+                    serde_json::to_value(&native.facts).unwrap(),
+                    json!(expected("unit.py", &[(1, 1, "module", "unit", "unit"),]))
+                );
+                assert!(native.diagnostics.is_empty(), "{context}");
+            }
+        }
+    }
+    for value in [
+        "lambda a=lambda: one, *, b=(x for x in xs): [a for a in xs]",
+        "[x for (lambda: obj).field in xs]",
+        "[x for items[(x for x in xs)] in xs if (lambda: flag)]",
+        "{(lambda: key):(x for x in xs) for x in (lambda: xs)}",
+        "({x for x in xs} async for x in xs)",
+    ] {
+        let text = format!("def f(value={value}): pass\n");
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        assert_declaration_candidates_match_ast(&python, &scan);
+    }
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn closure_expression_candidate_opaque_render_budgets_and_hidden_call_roles() {
+    let python = oracle();
+    let heavy = format!(
+        "[{},eval()]",
+        ["[a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a]"; 16].join(",")
+    );
+    for (value, shape) in [
+        (format!("lambda a={heavy}, *, b=exec(): body()"), "<Lambda>"),
+        (
+            format!("[{heavy} for items[index()] in source() if test()]"),
+            "<ListComp>",
+        ),
+        (format!("{{{heavy} for x in xs}}"), "<SetComp>"),
+        (format!("{{{heavy}:exec() for x in xs}}"), "<DictComp>"),
+        (format!("({heavy} for x in xs)"), "<GeneratorExp>"),
+    ] {
+        let text = format!("sink({value}, tail)\n");
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        let native = assert_warning_candidates_match_ast(&python, &scan);
+        assert!(native["facts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["value"] == format!("sink({shape}, tail)")));
+        for count in [16, 17] {
+            let text = format!("sink({})\n", vec![value.as_str(); count].join(","));
+            let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+            let native = assert_warning_candidates_match_ast(&python, &scan);
+            let rendered = format!(
+                "sink({}{})",
+                vec![shape; 16].join(", "),
+                if count == 17 { ", ..." } else { "" }
+            );
+            assert!(native["facts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["value"] == rendered));
+        }
+        for depth in [11, 12, 13] {
+            let text = format!("sink({}{value}{})\n", "[".repeat(depth), "]".repeat(depth));
+            let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+            assert_warning_candidates_match_ast(&python, &scan);
+        }
+        for size in [511, 512, 513] {
+            let text = format!("{}({value})\n", "a".repeat(size));
+            let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+            assert_warning_candidates_match_ast(&python, &scan);
+        }
+    }
+    // Place an opaque node at visits 79/80/81 of a fresh 80-node shape.
+    for (value, opaque) in [
+        ("lambda: eval()", "<Lambda>"),
+        ("[eval() for x in xs]", "<ListComp>"),
+        ("{eval() for x in xs}", "<SetComp>"),
+        ("{x:eval() for x in xs}", "<DictComp>"),
+        ("(eval() for x in xs)", "<GeneratorExp>"),
+    ] {
+        for extra in [1, 2, 3] {
+            let mut items = vec!["U[a,a,a,a,a,a]"; 8];
+            items.extend(std::iter::repeat_n("a", extra));
+            items.push(value);
+            let text = format!("sink(T[{}])\n", items.join(","));
+            let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+            let native = assert_warning_candidates_match_ast(&python, &scan);
+            let mut rendered = vec!["U[[a, a, a, a, a, a]]"; 8];
+            rendered.extend(std::iter::repeat_n("a", extra));
+            rendered.push(if extra == 3 { "..." } else { opaque });
+            let shape = format!("sink(T[[{}]])", rendered.join(", "));
+            assert_eq!(
+                native["facts"],
+                json!(expected(
+                    "unit.py",
+                    &[
+                        (1, 1, "call", "unit", "eval()"),
+                        (1, 1, "call", "unit", &shape),
+                        (1, 1, "module", "unit", "unit"),
+                    ]
+                )),
+                "80-node boundary: {value}, extra={extra}"
+            );
+        }
+    }
+    for value in [
+        "lambda a=eval(), *, b=exec(): body()",
+        "lambda: eval()",
+        "[eval() for x in xs]",
+        "{eval() for x in xs}",
+        "{eval():exec() for x in xs}",
+        "(eval() for x in xs)",
+        "[x for items[eval()] in xs]",
+        "[x for eval().field in xs]",
+        "[x for x in eval()]",
+        "[x for x in xs if eval()]",
+    ] {
+        for text in [
+            format!("sink({heavy}, {value})\n"),
+            format!("sink({}, {value})\n", ["a"; 17].join(",")),
+            format!("sink({}, {value})\n", "a".repeat(513)),
+        ] {
+            let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+            assert_warning_candidates_match_ast(&python, &scan);
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn closure_expression_candidate_malformed_grammar_and_future_forms_rollback() {
+    use super::python_native::{extract_fact_candidates, CandidateStatus};
+    let python = oracle();
+    let mut malformed = Vec::new();
+    for parameters in [
+        "/",
+        "*",
+        "*, **opts",
+        "a, /, /",
+        "a, *rest, /",
+        "**opts, a",
+        "*a, *b",
+        "**a, **b",
+        "a=one,b",
+        "a=one,/,b",
+        "a:T",
+        "a:T=one",
+        "(a,b)",
+        "(a,b)=one",
+        "*obj.attr",
+        "**obj[index]",
+        "*rest=one",
+        "True",
+    ] {
+        malformed.push(format!("sink(lambda {parameters}: body())"));
+    }
+    for value in [
+        "flag or lambda: exec()",
+        "flag and lambda: eval()",
+        "not lambda: eval()",
+        "left if lambda: test() else right",
+        "[x for x in a,b]",
+        "[x for x in xs,]",
+        "[x for x in lambda: xs]",
+        "[x for x in a if b else c]",
+        "[x for x in xs if lambda: flag]",
+        "[x for x in xs if a if b else c]",
+        "[x for x in flag or lambda: xs]",
+        "[x for x in xs if flag or lambda: ready]",
+        "[*x for x in xs]",
+        "{*x for x in xs}",
+        "(*x for x in xs)",
+        "{**x for x in xs}",
+        "{*x:y for x in xs}",
+        "{x:*y for x in xs}",
+        "[x for x in *xs]",
+        "[x for x in xs if *flag]",
+        "[x for call() in xs]",
+        "[x for (lambda: y) in xs]",
+        "[x if flag for x in xs]",
+        "[for x in xs]",
+        "[x for in xs]",
+        "[x for x in]",
+        "lambda: ",
+    ] {
+        malformed.push(format!("sink({value})"));
+    }
+    for arguments in [
+        "x for x in xs,",
+        "x for x in xs,other",
+        "x for x in xs,key=v",
+        "key=v,x for x in xs",
+        "other,x for x in xs",
+        "*x for x in xs",
+    ] {
+        malformed.push(format!("sink({arguments})"));
+    }
+    malformed.push("def f(value=flag or lambda: item): pass".into());
+    malformed.push("try: pass\nexcept flag or lambda: eval() as error: pass".into());
+    for (forms, ast_failure) in [
+        (malformed, true),
+        (
+            vec![
+                "def f(value=lambda: (yield work())): pass".into(),
+                "def f(value=lambda: (yield from work())): pass".into(),
+                "def f(value=lambda: await work()): pass".into(),
+                "def f(value=lambda: (x := work())): pass".into(),
+                "def f(value=[await work() for x in xs]): pass".into(),
+                "def f(value={x:(y := work()) for x in xs}): pass".into(),
+                "def f(value=(x for x in xs if (y := work()))): pass".into(),
+                "match value:\n    case _: FastAPI()".into(),
+            ],
+            false,
+        ),
+    ] {
+        for form in forms {
+            let text = format!("eval()\nclass Before: pass\n{form}\nclass After: pass\nexec()\n");
+            let (_, scan) = capture(&[
+                ("bad.py", text.as_bytes()),
+                ("good.py", b"sink(lambda: eval())\n"),
+            ]);
+            let ast = extract_captured(&python, &scan.sources).unwrap();
+            if ast_failure {
+                assert!(!ast.complete, "AST accepted {form}");
+                assert_eq!(ast.diagnostics[0].code, "parse_failure", "{form}");
+            }
+            let native = extract_fact_candidates(&scan.sources).unwrap();
+            assert_ne!(
+                native.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{form}"
+            );
+            assert_eq!(native.files[1].status, CandidateStatus::AcceptedFacts);
+            let mut facts = expected("bad.py", &[(1, 1, "module", "bad", "bad")]);
+            facts.extend(expected(
+                "good.py",
+                &[
+                    (1, 1, "call", "good", "eval()"),
+                    (1, 1, "call", "good", "sink(<Lambda>)"),
+                    (1, 1, "module", "good", "good"),
+                ],
+            ));
+            assert_eq!(
+                serde_json::to_value(&native.facts).unwrap(),
+                json!(facts),
+                "{form}"
+            );
+            assert_eq!(
+                serde_json::to_value(&native.diagnostics).unwrap(),
+                json!([
+                    {"code":"dynamic_discovery_unresolved", "path":"good.py",
+                     "message":"line 1: eval; runtime targets are not inferred"}
+                ]),
+                "{form}"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn closure_expression_candidate_exception_lambda_alias_normalization() {
+    use super::python_native::{extract_fact_candidates, CandidateStatus};
+    let python = oracle();
+    for marker in ["except", "except*"] {
+        for value in [
+            "lambda: foo()",
+            "(lambda: foo())",
+            "lambda: lambda: foo()",
+            "lambda a=foo(): a",
+            "lambda *, a=foo(): a",
+            "(lambda a=foo(): a)",
+            "(lambda: foo(), E)",
+            "lambda: left() if test() else foo()",
+            "left() if test() else lambda: foo()",
+            "lambda: left() if test() else lambda: foo()",
+        ] {
+            let text = format!("from arbitrary import eval as err\ntry: pass\n{marker} {value} as err: pass\nerr()\n");
+            let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+            let native = assert_warning_candidates_match_ast(&python, &scan);
+            let mut rows = vec![
+                (
+                    1,
+                    1,
+                    "from_import",
+                    "unit",
+                    r#"{"level":0,"module":"arbitrary","names":[{"asname":"err","name":"eval"}]}"#,
+                ),
+                (1, 1, "module", "unit", "unit"),
+                (3, 3, "call", "unit", "foo()"),
+            ];
+            if value.contains("left()") {
+                rows.push((3, 3, "call", "unit", "left()"));
+                rows.push((3, 3, "call", "unit", "test()"));
+            }
+            rows.push((4, 4, "call", "unit", "err()"));
+            assert_eq!(
+                native["facts"],
+                json!(expected("unit.py", &rows)),
+                "{marker} {value}"
+            );
+            assert_eq!(
+                native["diagnostics"],
+                json!([
+                    {"code":"dynamic_discovery_unresolved", "path":"unit.py",
+                     "message":"line 4: arbitrary.eval; runtime targets are not inferred"}
+                ])
+            );
+        }
+        for value in [
+            "(lambda: foo() as err)",
+            "(lambda: foo() as err, E)",
+            "lambda x as err: foo()",
+            "lambda x=foo() as err: x",
+            "lambda: (foo() as err)",
+            "lambda: foo() if test() else (bar() as err)",
+            "(lambda: foo(), E as err)",
+        ] {
+            let text = format!("eval()\ntry: pass\n{marker} {value}: pass\nexec()\n");
+            let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+            let ast = extract_captured(&python, &scan.sources).unwrap();
+            assert!(!ast.complete, "AST accepted {marker} {value}");
+            assert_eq!(ast.diagnostics[0].code, "parse_failure");
+            let native = extract_fact_candidates(&scan.sources).unwrap();
+            assert_ne!(
+                native.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{marker} {value}"
+            );
+            assert_eq!(
+                serde_json::to_value(&native.facts).unwrap(),
+                json!(expected("unit.py", &[(1, 1, "module", "unit", "unit"),]))
+            );
+            assert!(native.diagnostics.is_empty());
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+fn closure_expression_candidate_replay_isolation_order_and_hidden_resources() {
+    use super::python_native::{extract_fact_candidates, parse_batch, CandidateStatus};
+    let python = oracle();
+    let entries: &[(&str, &[u8])] = &[
+        ("a.py", b"from arbitrary import eval as probe\nclass Box(Base):\n    field: T\n    def run(x=lambda: DEFAULT):\n        try:\n            sink(lambda probe=probe(), *, k=probe(): [probe() async for items[probe()] in source() if probe()])\n        except lambda: probe() as probe:\n            assert {probe():probe() for self.router in xs}\n        return (probe() for probe in xs)\nprobe()\n"),
+        ("b.py", b"sink(x async for x in xs)\nsink((lambda: eval()), {exec() for x in xs})\n"),
+        ("c.py", b"eval()\nsink(lambda: FastAPI())\n"),
+        ("d.py", b"sink(lambda: eval())\nlater = (\n"),
+    ];
+    let (root, mut scan) = capture(entries);
+    let (_good_root, good_scan) = capture(&entries[..2]);
+    let good = assert_warning_candidates_match_ast(&python, &good_scan);
+    let native = extract_fact_candidates(&scan.sources).unwrap();
+    assert_eq!(native.files[2].status, CandidateStatus::UnsupportedSyntax);
+    assert_eq!(native.files[3].status, CandidateStatus::SyntaxError);
+    let first = serde_json::to_value(native).unwrap();
+    let mut facts = good["facts"].as_array().unwrap().clone();
+    facts.extend(expected("c.py", &[(1, 1, "module", "c", "c")]));
+    facts.extend(expected("d.py", &[(1, 1, "module", "d", "d")]));
+    assert_eq!(first["facts"], json!(facts));
+    assert_eq!(first["diagnostics"], good["diagnostics"]);
+    let ast = extract_captured(&python, &scan.sources).unwrap();
+    for (path, _) in entries {
+        fs::remove_file(root.path().join(path)).unwrap();
+    }
+    assert_eq!(
+        first,
+        serde_json::to_value(extract_fact_candidates(&scan.sources).unwrap()).unwrap()
+    );
+    assert_eq!(
+        semantics(&ast),
+        semantics(&extract_captured(&python, &scan.sources).unwrap())
+    );
+    scan.sources.reverse();
+    let reversed = serde_json::to_value(extract_fact_candidates(&scan.sources).unwrap()).unwrap();
+    assert_eq!(first["facts"], reversed["facts"]);
+    assert_eq!(first["diagnostics"], reversed["diagnostics"]);
+    assert_eq!(
+        semantics(&ast),
+        semantics(&extract_captured(&python, &scan.sources).unwrap())
+    );
+    let text = "sink(lambda a=eval(), *, b=exec(): [body() async for items[index()] in source() if test()])\n".repeat(80);
+    let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+    let native = assert_warning_candidates_match_ast(&python, &scan);
+    let parsed = parse_batch(&scan.sources).unwrap();
+    assert_eq!(
+        native["files"][0]["nodes_visited"],
+        json!(parsed.files[0].nodes_visited)
+    );
+    assert_eq!(
+        native["files"][0]["max_depth"],
+        json!(parsed.files[0].max_depth)
+    );
+    assert_eq!(native["files"][0]["traversal_finished"], true);
+    assert_eq!(native["diagnostics"].as_array().unwrap().len(), 160);
+    // Opaque rendering must not hide CST depth from the counted resource walk.
+    for value in [
+        format!("lambda: {}eval(){}", "nest(".repeat(180), ")".repeat(180)),
+        format!(
+            "[{}eval(){} for x in xs]",
+            "nest(".repeat(180),
+            ")".repeat(180)
+        ),
+    ] {
+        let text = format!("eval()\nsink({value})\n");
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        assert!(extract_captured(&python, &scan.sources).unwrap().complete);
+        let native = extract_fact_candidates(&scan.sources).unwrap();
+        assert_eq!(native.files[0].status, CandidateStatus::ResourceLimit);
+        assert_eq!(
+            serde_json::to_value(&native.facts).unwrap(),
+            json!(expected("unit.py", &[(1, 1, "module", "unit", "unit"),]))
+        );
+        assert!(native.diagnostics.is_empty());
+    }
+}
+
+#[test]
+#[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
 fn generalized_target_candidate_chains_destructuring_and_outer_statement_spans() {
     let python = oracle();
     let text = concat!(
@@ -893,7 +2701,7 @@ fn generalized_target_candidate_chains_destructuring_and_outer_statement_spans()
         let native = assert_declaration_candidates_match_ast(&python, &scan);
         assert_eq!(
             native["identity"]["policy"],
-            "python-native-private-facts-11"
+            "python-native-private-facts-15"
         );
         assert_eq!(
             native["facts"],
@@ -2218,9 +4026,9 @@ fn exception_statement_candidate_malformed_and_deferred_forms_rollback() {
     ];
     let deferred = [
         "try: pass\nexcept E as \u{212a}: pass",
-        "try: pass\nexcept\tE: pass",
-        "assert\tvalue",
-        "global\tvalue",
+        "try: pass\nexcept\tE: FastAPI()",
+        "assert\tFastAPI()",
+        "global\tvalue; FastAPI()",
         "try: pass\nexcept E: # type: ignore\n    pass",
         "del (self.router)",
         "del other.router,y",
@@ -2232,11 +4040,11 @@ fn exception_statement_candidate_malformed_and_deferred_forms_rollback() {
         "(self.router) += eval()",
         "x,y += eval()",
         "[x] += eval()",
-        "items[0] += [x for x in xs]",
+        "items[0] += await FastAPI()",
         "obj.router += eval()",
         "get().prefix += eval()",
         "\u{212a} += eval()",
-        "x += a,(lambda: b)",
+        "x += a,(yield APIRouter())",
         "try: break\nfinally: pass",
         "try: pass\nexcept E: continue",
         "while ready():\n    try:\n        def f(): break\n    finally: pass",
@@ -2294,7 +4102,7 @@ fn exception_statement_candidate_malformed_and_deferred_forms_rollback() {
     for form in [
         "del obj.router",
         "obj.prefix += eval()",
-        "assert [x for x in values]",
+        "assert (x := values)",
     ] {
         let text = format!("eval()\n{form}\nclass After: pass\neval()\nlater = (\n");
         let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
@@ -2320,13 +4128,13 @@ fn exception_statement_candidate_side_output_guards_and_hidden_call_budgets() {
         "pkg.APIRouter()",
         "app.include_router(child)",
         "outer(FastAPI())",
-        "(lambda: eval())",
-        "[eval() for x in xs]",
-        "outer(*[x for x in items])",
-        "outer(**{x:x for x in items})",
-        "await work()",
-        "(yield value)",
-        "(x := eval())",
+        "(lambda: FastAPI())",
+        "[APIRouter() for x in xs]",
+        "outer(*[app.include_router(x) for x in items])",
+        "outer(**{x:FastAPI() for x in items})",
+        "await FastAPI()",
+        "(yield APIRouter())",
+        "(x := app.include_router(child))",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -2903,22 +4711,22 @@ fn compound_suite_candidate_malformed_deferred_and_invalid_jump_rollback() {
         "while flag: pass\nelif other: pass",
         "with cm(): pass\nelse: pass",
         "if flag:\n    pass\n  wrong()",
-        "if flag: pass; later()",
-        "if\tflag: pass",
-        "if flag:\n\tpass",
-        "if (\n\tflag\n): pass",
-        "if flag \\\n: pass",
+        "if flag: FastAPI(); later()",
+        "if\tflag: FastAPI()",
+        "if flag:\n\tFastAPI()",
+        "if (\n\tflag\n): FastAPI()",
+        "if flag \\\n: FastAPI()",
         "if flag: # type: ignore\n    pass",
         "for\nitem in items: pass",
         "for item\nin items: pass",
         "for item in\nitems: pass",
         "async\nfor item in items: pass",
-        "for (item) in items: [x for x in xs]",
-        "for a,b in items: (lambda: value)",
+        "for (item) in items: await FastAPI()",
+        "for a,b in items: (yield APIRouter())",
         "for [a] in items: app.include_router(child)",
         "for *a in items: FastAPI()",
         "for obj.a in items: APIRouter()",
-        "for data[0] in items: [x for x in xs]",
+        "for data[0] in items: (x := FastAPI())",
         "for \u{212a} in items: pass",
         "for True in items: pass",
         "with\ncm(): pass",
@@ -2926,22 +4734,22 @@ fn compound_suite_candidate_malformed_deferred_and_invalid_jump_rollback() {
         "with cm()\nas x: pass",
         "with cm() as\nx: pass",
         "with cm(),\nother(): pass",
-        "with cm() as (x): [x for x in xs]",
-        "with cm() as (x,y): (lambda: value)",
+        "with cm() as (x): await FastAPI()",
+        "with cm() as (x,y): (yield APIRouter())",
         "with cm() as [x]: app.include_router(child)",
         "with cm() as obj.x: FastAPI()",
         "with cm() as data[0]: APIRouter()",
-        "with cm() as *x: [x for x in xs]",
+        "with cm() as *x: (y := FastAPI())",
         "with cm() as \u{212a}: pass",
-        "with (cm() as x, other() as y): pass",
-        "with (\n    cm() as x,\n    other() as y,\n): pass",
-        "try: [x for x in values]\nfinally: pass",
-        "match value:\n    case _: pass",
-        "if flag: raise [x for x in values]",
-        "if flag: assert [x for x in values]",
-        "if flag: x += [x for x in values]",
-        "if flag: a,b = [x for x in values]",
-        "if flag: emit(*[x for x in values])",
+        "with (cm() as x, other() as y): FastAPI()",
+        "with (\n    cm() as x,\n    other() as y,\n): FastAPI()",
+        "try: await FastAPI()\nfinally: pass",
+        "match value:\n    case _: FastAPI()",
+        "if flag: raise (yield FastAPI())",
+        "if flag: assert (x := APIRouter())",
+        "if flag: x += await FastAPI()",
+        "if flag: a,b = (yield APIRouter())",
+        "if flag: emit(*[FastAPI() for x in values])",
         "if factory()(): app.include_router(child)",
         "if flag:\n    def f(x=hidden()): pass",
         "if flag:\n    def f(x: T[hidden()]): pass",
@@ -2994,7 +4802,7 @@ fn compound_suite_candidate_replay_order_and_mixed_file_isolation() {
     use super::python_native::{extract_fact_candidates, CandidateStatus};
     let python = oracle();
     let (root, mut scan) = capture(&[
-        ("a.py", b"if eval():\n    before()\nmatch value:\n    case _: pass\n"),
+        ("a.py", b"if eval():\n    before()\nmatch value:\n    case _: FastAPI()\n"),
         ("b.py", b"if ready():\n    yes()\nelse:\n    no()\n"),
         ("c.py", b"\xef\xbb\xbffor eval in items():\r\n    with context() as eval:\r\n        emit(eval(), eval()) # PRIVATE_REPLAY_COMMENT\r\nelse:\r\n    done()\r\n"),
         ("d.py", b"if eval():\n    before()\nif broken\n"),
@@ -3043,6 +4851,7 @@ fn compound_suite_candidate_replay_order_and_mixed_file_isolation() {
             (1, 1, "call", "a", "eval()"),
             (1, 1, "module", "a", "a"),
             (2, 2, "call", "a", "before()"),
+            (4, 4, "call", "a", "FastAPI()"),
         ],
     );
     ast_facts.extend(good_b.iter().cloned());
@@ -3519,30 +5328,30 @@ fn core_expression_candidate_malformed_future_forms_and_header_calls_roll_back()
         "x = a[]",
         "x = a[b:::c]",
         "x = a +\nb",
-        "x = a \\\n + b",
-        "x = [*(lambda: items)]",
-        "x = (*(lambda: items),)",
-        "x = {*(lambda: items)}",
-        "x = {**(lambda: items)}",
-        "x = [a for a in b]",
-        "x = {a for a in b}",
-        "x = {a:b for a in c}",
-        "x = (a for a in b)",
-        "x = lambda: a",
-        "x = await work()",
-        "x = (yield a)",
-        "x = (a := b)",
-        "emit(*[x for x in items])",
-        "emit(**{x:x for x in items})",
+        "x = a \\\n + FastAPI()",
+        "def f(x=[*(yield hidden())]): pass",
+        "def f(x=(*(yield hidden()),)): pass",
+        "def f(x={*(yield hidden())}): pass",
+        "def f(x={**(yield hidden())}): pass",
+        "def f(x=[await work() for a in b]): pass",
+        "def f(x={await work() for a in b}): pass",
+        "def f(x={a:await work() for a in c}): pass",
+        "def f(x=(await work() for a in b)): pass",
+        "def f(x=lambda: (a := hidden())): pass",
+        "def f(x=await work()): pass",
+        "def f(x=(yield hidden())): pass",
+        "def f(x=(a := hidden())): pass",
+        "emit(*[APIRouter() for x in items])",
+        "emit(**{x:FastAPI() for x in items})",
         "emit(key=a, b)",
-        "emit(key=a, key=(lambda: b))",
+        "emit(key=a, key=(lambda: (yield FastAPI())))",
         "data[0](FastAPI())",
         "factory()()(APIRouter())",
         "factory().include_router(child)",
         "other.router = [a]",
-        "class Box(A | B): pass",
-        "def f(x: A | B): pass",
-        "x: A | B = [a]",
+        "class Box(A | B | hidden()): pass",
+        "def f(x: A | B | hidden()): pass",
+        "x: A | B | hidden() = [a]",
         "def f(x={a: hidden()}): pass",
         "def f(x=not hidden()): pass",
         "def f(x={hidden(): a}): pass",
@@ -3555,7 +5364,7 @@ fn core_expression_candidate_malformed_future_forms_and_header_calls_roll_back()
         "def f(x: T[hidden()]): pass",
         "def f() -> T[hidden()]: pass",
         "class Box(hidden()): pass",
-        "def f(x=r'a\\b'): pass",
+        "def f(x='\\xQ0'): pass",
         "def f(x=513_): pass",
         "def f(x=0b102): pass",
     ]
@@ -3573,13 +5382,13 @@ fn core_expression_candidate_malformed_future_forms_and_header_calls_roll_back()
         "[".repeat(15),
         "]".repeat(15)
     ));
-    forms.push(format!("def f(x={}): pass", "1".repeat(513)));
+    forms.push(format!("def f(x={}): pass", "1".repeat(4301)));
     for future in [
-        "[*[x for x in items]]",
-        "{**{x:x for x in items}}",
-        "[a for a in b]",
-        "(lambda: a)",
-        "(a := b)",
+        "[*[await FastAPI() for x in items]]",
+        "{**{x:await FastAPI() for x in items}}",
+        "[APIRouter() for a in b]",
+        "(lambda: (yield FastAPI()))",
+        "(a := FastAPI())",
     ] {
         forms.extend([
             format!("x = {{a: {future}}}"),
@@ -3897,22 +5706,22 @@ fn base_annotation_candidate_unreviewed_and_metadata_trigger_forms_roll_back() {
     let python = oracle();
     let mut forms = vec![
         "class Box(factory()): pass".to_string(),
-        "class Box(T[U]): pass".into(),
-        "class Box(1): pass".into(),
-        "class Box((A, B)): pass".into(),
-        "class Box(A | B): pass".into(),
-        "class Box(*bases): pass".into(),
-        "class Box(metaclass=Meta): pass".into(),
-        "class Box[T](Base): pass".into(),
-        "class Box(\n Base,\n): pass".into(),
+        "class Box(T[U, hidden()]): pass".into(),
+        "class Box((1, hidden())): pass".into(),
+        "class Box((A, B, hidden())): pass".into(),
+        "class Box(A | B | hidden()): pass".into(),
+        "class Box(*(bases, hidden())): pass".into(),
+        "class Box(metaclass=hidden()): pass".into(),
+        "class Box[T](Base[hidden()]): pass".into(),
+        "class Box(\n Base[hidden()],\n): pass".into(),
         "@decorate\nclass Box(Base): pass".into(),
         "class Box(Base):\n    field: mark()".into(),
         "class Box(Base):\n    field: T[mark()]".into(),
-        "class Box(Base):\n    field: T | U".into(),
-        "class Box(Base):\n    field: 1".into(),
-        "class Box(Base):\n    field: (T, U)".into(),
-        "class Box(Base):\n    field: T[A][B]".into(),
-        "class Box(Base):\n    (field): T | U".into(),
+        "class Box(Base):\n    field: T | U | hidden()".into(),
+        "class Box(Base):\n    field: (1, hidden())".into(),
+        "class Box(Base):\n    field: (T, U, hidden())".into(),
+        "class Box(Base):\n    field: T[A][B, hidden()]".into(),
+        "class Box(Base):\n    (field): T | U | hidden()".into(),
         "(self.router): T = value".into(),
         "other.prefix: T = value".into(),
         "values[0]: T = FastAPI()".into(),
@@ -3975,7 +5784,7 @@ fn base_annotation_candidate_replay_isolation_and_order_use_only_captured_bytes(
     use super::python_native::{extract_fact_candidates, CandidateStatus};
     let python = oracle();
     let (root, mut scan) = capture(&[
-        ("a.py", b"class Before(Base):\n    field: T = eval()\nclass Hidden(metaclass=Meta): pass\n"),
+        ("a.py", b"class Before(Base):\n    field: T = eval()\nclass Hidden(metaclass=hidden()): pass\n"),
         ("b.py", b"class Box(Base, pkg.Other):\n    field: list[T] = build()\n    def run(self):\n        self.member: T = None\n"),
         ("c.py", b"from arbitrary import eval as load\nclass Box(Base):\n    field: T = load()\n"),
     ]);
@@ -4211,20 +6020,20 @@ fn class_candidate_excluded_headers_and_suite_returns_rollback_whole_files() {
     use super::python_native::{extract_fact_candidates, CandidateStatus};
     let python = oracle();
     for unsupported in [
-        "class Box(Base[T]): pass",
+        "class Box(Base[T, hidden()]): pass",
         "class Box(object()): pass",
-        "class Box(*bases): pass",
-        "class Box(metaclass=Meta): pass",
-        "class Box(**options): pass",
-        "class Box[T]: pass",
+        "class Box(*(bases, hidden())): pass",
+        "class Box(metaclass=hidden()): pass",
+        "class Box(**(options, hidden())): pass",
+        "class Box[T: hidden()]: pass",
         "class Box(factory()): pass",
         "@decorate\nclass Box: pass",
         "class Box:\n    @staticmethod\n    def run(): pass",
         "class Box:\n    @classmethod\n    def run(cls): pass",
         "class Box:\n    @property\n    def value(self): pass",
-        "class Box:\n    value: T | U",
-        "class Box:\n    value: T | U = build()",
-        "class Box:\n    def run(self):\n        self.value: T | U = value",
+        "class Box:\n    value: T | U | hidden()",
+        "class Box:\n    value: T | U | hidden() = build()",
+        "class Box:\n    def run(self):\n        self.value: T | U | hidden() = value",
         "class Box:\n    return work()",
         "def outer():\n    class Box:\n        return work()",
         "class Box:\n    def run(self):\n        class Local:\n            return work()",
@@ -4233,13 +6042,13 @@ fn class_candidate_excluded_headers_and_suite_returns_rollback_whole_files() {
         "class Box:\n    self.router = value",
         "class Box:\n    def run(self):\n        self.prefix = None",
         "class Box:\n    host.include_router(child)",
-        "class Box:\n    assert [x for x in values]",
-        "class Box:\n    def run(self):\n        await work()",
-        "class Box(\n): pass",
+        "class Box:\n    assert (x := FastAPI())",
+        "class Box:\n    def run(self):\n        await APIRouter()",
+        "class Box(\n): FastAPI()",
         "class\nBox: pass",
-        "class \\\nBox: pass",
-        "class Box: pass; work()",
-        "class Box:\n\tpass",
+        "class \\\nBox: FastAPI()",
+        "class Box: FastAPI(); work()",
+        "class Box:\n\tFastAPI()",
         "class \u{212a}: pass",
     ] {
         let text = format!("eval()\nclass Before: pass\n{unsupported}\nclass After: pass\n");
@@ -4272,7 +6081,7 @@ fn class_candidate_replay_transactions_and_source_order_preserve_complete_semant
     use super::python_native::{extract_fact_candidates, CandidateStatus};
     let python = oracle();
     let (root, mut scan) = capture(&[
-        ("a.py", b"class Before: pass\neval()\nclass Hidden(metaclass=Meta): pass\n"),
+        ("a.py", b"class Before: pass\neval()\nclass Hidden(metaclass=hidden()): pass\n"),
         ("b.py", b"class Worker:\n    def __init__(self, service):\n        self.service = service\n    def run(self):\n        return self.service.process()\n"),
         ("c.py", b"class Box:\n    from arbitrary import eval as load\n    def run(self):\n        load()\n"),
     ]);
@@ -4498,12 +6307,12 @@ fn alias_warning_candidate_rejections_erase_pending_warnings_not_other_files() {
     use super::python_native::{extract_fact_candidates, CandidateStatus};
     let python = oracle();
     for suffix in [
-        "class Hidden(metaclass=Meta): pass\n",
+        "class Hidden(metaclass=hidden()): pass\n",
         "from arbitrary import FastAPI as factory\n",
         "FastAPI()\n",
         "other.include_router(child)\n",
         "def f(x: eval()): pass\n",
-        "from package import *\n",
+        "from package import APIRouter as unused\n",
         "def broken(:\n",
     ] {
         let text = format!("from arbitrary import eval as load\nload()\n{suffix}");
@@ -4787,21 +6596,21 @@ fn import_candidate_unreviewed_grammar_rolls_back_before_and_after_facts() {
 
     let python = oracle();
     for unsupported in [
-        "from package import *",
+        "from package import APIRouter as unused",
         "from package import ((item))",
         "from package import (\n    *,\n)",
         "import package,",
         "from package import item,",
         "from package import item.child",
-        "from __future__ import annotations",
-        "def f(): import package",
-        "import package; ordinary()",
-        "import\tpackage",
+        "from __future__ import FastAPI",
+        "def f(): import package.APIRouter as unused",
+        "import package.APIRouter as unused; ordinary()",
+        "import\tpackage.APIRouter as unused",
         "import package\u{c}",
         "import \u{212a}",
         "from package import \u{212a}",
-        "import package \\\n .child",
-        "from package \\\n import item",
+        "import package \\\n .APIRouter as unused",
+        "from package \\\n import APIRouter as unused",
         "from package import item # type: ignore",
         "import package as class",
         "from package import True",
@@ -5047,13 +6856,16 @@ fn multiline_import_candidate_malformed_and_unmodeled_forms_rollback_whole_files
         ("from package import (item) (other)", true),
         ("from package import (True)", true),
         ("from package import (item as class)", true),
-        ("from __future__ import (annotations,)", false),
-        ("from package \\\n import (item)", false),
-        ("from package import (item \\\n as local)", false),
-        ("def f(): from package import (item)", false),
-        ("from package import (item); ordinary()", false),
-        ("from\tpackage import (item)", false),
-        ("from package import (\n\titem\n)", false),
+        ("from __future__ import (FastAPI,)", false),
+        ("from package \\\n import (APIRouter as unused)", false),
+        ("from package import (APIRouter \\\n as local)", false),
+        ("def f(): from package import (APIRouter as unused)", false),
+        (
+            "from package import (APIRouter as unused); ordinary()",
+            false,
+        ),
+        ("from\tpackage import (APIRouter as unused)", false),
+        ("from package import (\n\tAPIRouter as unused\n)", false),
         ("from package import (item\u{c},)", false),
         ("from package import (\u{212a},)", false),
         ("from package import (item as \u{212a},)", false),
@@ -5286,18 +7098,18 @@ fn declaration_candidate_unsupported_forms_never_leak_a_declaration_prefix() {
 
     let python = oracle();
     for unsupported in [
-        "from tools import *\n",
-        "class Hidden(metaclass=Meta):\n    pass\n",
+        "from tools import APIRouter as unused\n",
+        "class Hidden(metaclass=hidden()):\n    pass\n",
         "def f(a=build()): pass\n",
         "def f(a: marker()): pass\n",
         "def f() -> marker(): pass\n",
         "@decorate()\ndef f(): pass\n",
         "def f[T: build()](): pass\n",
-        "def f():\n    f'{hidden()}'\n",
-        "def f(): pass; hidden()\n",
-        "def f():\n    try:\n        [x for x in values]\n    finally:\n        pass\n",
-        "def f():\n    global value\n    [x for x in values]\n",
-        "def f():\n    nonlocal value\n    [x for x in values]\n",
+        "def f():\n    f'{FastAPI()}'\n",
+        "def f(): pass; FastAPI()\n",
+        "def f():\n    try:\n        await FastAPI()\n    finally:\n        pass\n",
+        "def f():\n    global value\n    (x := APIRouter())\n",
+        "def f():\n    nonlocal value\n    (yield FastAPI())\n",
         "def f(a, a): pass\n",
         "def f(*, **opts): pass\n",
         "def f(a, /, /): pass\n",
@@ -5305,12 +7117,12 @@ fn declaration_candidate_unsupported_forms_never_leak_a_declaration_prefix() {
         "def caf\u{e9}(): pass\n",
         "def \u{212a}(): pass\n",
         "def f(\u{212a}): pass\n",
-        "def f():\n\tpass\n",
+        "def f():\n\tFastAPI()\n",
         "def f():\n  pass\n    pass\n",
-        "def \\\nf():\n    pass\n",
+        "def \\\nf():\n    FastAPI()\n",
         "\u{200b}def f(): pass\n",
         "# type: ignore\n",
-        "def f(\n a,\n): pass\n",
+        "def f(\n a,\n): FastAPI()\n",
         "print 1\n",
         "# \0\n",
     ] {
@@ -5455,6 +7267,12 @@ fn header_candidate_literal_spellings_match_without_retaining_values() {
         "b'PRIVATE_HEADER_LITERAL'",
         "br'PRIVATE_HEADER_LITERAL'",
         "Rb'PRIVATE_HEADER_LITERAL'",
+        "r'a\\b'",
+        "'a\\n'",
+        "'unknown\\q'",
+        "'octal\\777'",
+        "f'PRIVATE_HEADER_LITERAL'",
+        "f'{value}'",
         "'''PRIVATE_HEADER_LITERAL\nSECOND_LITERAL'''",
         "('PRIVATE_HEADER_LITERAL' # between\n 'SECOND_LITERAL')",
         "(b'one'\n br'two')",
@@ -5464,6 +7282,11 @@ fn header_candidate_literal_spellings_match_without_retaining_values() {
         let result = assert_declaration_candidates_match_ast(&python, &scan);
         assert!(!result.to_string().contains("PRIVATE_HEADER_LITERAL"));
         assert!(!result.to_string().contains("SECOND_LITERAL"));
+    }
+    for digits in [513, 4300] {
+        let text = format!("def f(value={}): pass\n", "1".repeat(digits));
+        let (_, scan) = capture(&[("unit.py", text.as_bytes())]);
+        assert_declaration_candidates_match_ast(&python, &scan);
     }
     for annotation in [
         "'PRIVATE_HEADER_LITERAL'",
@@ -5528,12 +7351,12 @@ fn header_candidate_hidden_calls_and_unreviewed_literals_reject_whole_files() {
     let mut annotations = vec![
         "build()".into(),
         "T[build()]".into(),
-        "A | B".into(),
-        "Callable[[A],B]".into(),
-        "T[A:B]".into(),
-        "T[*A]".into(),
-        "T[A][B]".into(),
-        "f'PRIVATE_HEADER_LITERAL'".into(),
+        "A | B | hidden()".into(),
+        "Callable[[A],B,hidden()]".into(),
+        "T[A:B:hidden()]".into(),
+        "T[*A,hidden()]".into(),
+        "T[A][B,hidden()]".into(),
+        "f'PRIVATE_HEADER_LITERAL{hidden()}'".into(),
     ];
     annotations.extend([
         format!("T[{},build()]", ["A"; 17].join(",")),
@@ -5546,21 +7369,22 @@ fn header_candidate_hidden_calls_and_unreviewed_literals_reject_whole_files() {
         .map(|annotation| format!("def f(x: {annotation}): pass\n"))
         .collect::<Vec<_>>();
     // Call-free nonliteral/operator defaults have positive core-expression
-    // gates. Calls, future forms and unsafe literal spellings still reject.
+    // gates. Calls, future forms and malformed literal spellings still reject.
     for default in [
         "build()",
         "[build()]",
         "{'key': build()}",
         "DEFAULT[build()]",
-        "lambda: DEFAULT",
-        "f'PRIVATE_HEADER_LITERAL'",
+        "lambda: build()",
+        "f'PRIVATE_HEADER_LITERAL{hidden()}'",
         "f'{build()}'",
         "t'text'",
         "ur'text'",
         "'a' b'b'",
         "b'a' 'b'",
-        "r'a\\b'",
-        "'a\\n'",
+        "'\\xQ0'",
+        "'\\u123'",
+        "'\\U00110000'",
         "b'\u{3bb}'",
         "1L",
         "0xffL",
@@ -5582,7 +7406,7 @@ fn header_candidate_hidden_calls_and_unreviewed_literals_reject_whole_files() {
         "def f(*args: A=1): pass\n".into(),
         "def f(x:A, x:B=2): pass\n".into(),
         "def f(x: A) -> build(): pass\n".into(),
-        format!("def f(x={}): pass\n", "1".repeat(513)),
+        format!("def f(x={}): pass\n", "1".repeat(4301)),
     ]);
     for unsupported in cases {
         let text = format!("def before(): pass\n{unsupported}def after(): pass\n");
@@ -5818,33 +7642,36 @@ fn body_candidate_side_outputs_and_unmodeled_forms_reject_whole_files() {
         "self.prefix = None".into(),
         "cls.router.child = value".into(),
         "other.router = value".into(),
-        "x: T | U = value".into(),
+        "x: T | U | hidden() = value".into(),
         "a = b = FastAPI()".into(),
-        "a, b = [x for x in values]".into(),
-        "[a] = (lambda: value)".into(),
+        "a, b = [await FastAPI() for x in values]".into(),
+        "[a] = (lambda: (yield APIRouter()))".into(),
         "x[0] = APIRouter()".into(),
-        "x += [work() for x in values]".into(),
-        "del x\n    [work() for x in values]".into(),
-        "(x := work())".into(),
-        "await work()".into(),
-        "yield value".into(),
-        "outer(*[x for x in items])".into(),
-        "outer(**{x:x for x in options})".into(),
-        "outer(x=1, x=(lambda: value))".into(),
+        "x += [APIRouter() for x in values]".into(),
+        "del x\n    [await FastAPI() for x in values]".into(),
+        "(x := APIRouter())".into(),
+        "await FastAPI()".into(),
+        "yield APIRouter()".into(),
+        "outer(*[FastAPI() for x in items])".into(),
+        "outer(**{x:APIRouter() for x in options})".into(),
+        "outer(x=1, x=(lambda: (yield FastAPI())))".into(),
         "factory()()(FastAPI())".into(),
         "factory().include_router(child)".into(),
-        "outer(x for x in source)".into(),
-        "outer([x for x in source])".into(),
-        "outer(lambda: work())".into(),
-        "outer([*[x for x in items]])".into(),
-        "x = a + (lambda: b)".into(),
+        "outer(await FastAPI() for x in source)".into(),
+        "outer([APIRouter() for x in source])".into(),
+        "outer(lambda: FastAPI())".into(),
+        "outer([*[await FastAPI() for x in items]])".into(),
+        "x = a + (lambda: (b := APIRouter()))".into(),
     ];
     for callee in ["FastAPI", "APIRouter"] {
         statements.push(format!("{callee}('PRIVATE_BODY_LITERAL')"));
         statements.push(format!("package.{callee}('PRIVATE_BODY_LITERAL')"));
     }
     statements.extend([
-        format!("outer({}, *[x for x in items])", ["value"; 17].join(",")),
+        format!(
+            "outer({}, *[FastAPI() for x in items])",
+            ["value"; 17].join(",")
+        ),
         format!(
             "outer({}, FastAPI('PRIVATE_BODY_LITERAL'))",
             ["value"; 17].join(",")
@@ -5987,7 +7814,7 @@ fn body_candidate_replay_transactions_and_source_order_are_deterministic() {
 
     let python = oracle();
     let (root, mut scan) = capture(&[
-        ("a.py", b"def before(): pass\nx = work()\nfrom hidden import *\n"),
+        ("a.py", b"def before(): pass\nx = work()\nfrom hidden import APIRouter as unused\n"),
         ("b.py", b"def ready(value: T=None):\n    local = value\n    local = 1\n    return work(local)\n"),
     ]);
     let native = extract_fact_candidates(&scan.sources).unwrap();

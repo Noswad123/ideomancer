@@ -4,6 +4,7 @@ use super::*;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Mode {
     Base,
+    HeaderValue,
     AssignmentAnnotation,
     Annotation,
     Default,
@@ -16,14 +17,23 @@ pub(super) enum Mode {
     DeleteTarget,
 }
 
+// Raw syntax permissions, independent of value classes and resolved aliases.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Role {
+    Expression,
+    Named,
+    Yield,
+    Grouped,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Class {
     Ignore,
     Reference,
     Annotation,
-    Tuple,
     Text,
     Bytes,
+    Formatted,
     Number,
     Constant,
     Unary,
@@ -35,6 +45,8 @@ enum Class {
     Slice,
     Starred,
     Unpack,
+    // Validated grammar roles, never values or renderable AST nodes.
+    Structure,
 }
 
 #[derive(Clone, Copy)]
@@ -53,11 +65,14 @@ enum Shape {
     Starred(usize),
     Unpack(usize),
     Binary(usize, &'static str, usize),
+    Slice(u8),
     Opaque(&'static str),
 }
 
 struct Entry {
     kind: &'static str,
+    named: bool,
+    role: Role,
     parent: Option<usize>,
     first: Option<usize>,
     last: Option<usize>,
@@ -70,6 +85,9 @@ struct Entry {
     end: usize,
     line: usize,
     end_line: usize,
+    literal: Option<literals::Start>,
+    field_depth: u8,
+    bracket_depth: usize,
 }
 
 pub(super) struct Expression {
@@ -79,6 +97,7 @@ pub(super) struct Expression {
     pub(super) start: usize,
     pub(super) handler_alias: bool,
     pub(super) star_expressions: bool,
+    pub(super) role: Role,
     base_depth: usize,
     bracket_depth: usize,
     entries: Vec<Entry>,
@@ -86,6 +105,15 @@ pub(super) struct Expression {
 }
 
 impl Expression {
+    pub(super) fn literal_payload(&self) -> bool {
+        self.current.is_some_and(|i| {
+            matches!(
+                self.entries[i].kind,
+                "string_content" | "format_specifier" | "escape_sequence" | "escape_interpolation"
+            )
+        })
+    }
+
     // Four entries per logical node also covers Vec's initial four-slot
     // allocation, not just subsequent geometric capacity growth.
     pub(super) const ENTRY_WORK: usize = 4 * std::mem::size_of::<Entry>();
@@ -105,6 +133,7 @@ impl Expression {
             start,
             handler_alias: false,
             star_expressions: false,
+            role: Role::Expression,
             base_depth,
             bracket_depth: base_depth,
             entries: Vec::new(),
@@ -118,16 +147,28 @@ impl Expression {
         gap: &[u8],
         cancel: &Cancellation<F>,
     ) -> bool {
+        if node.kind() == "line_continuation"
+            && (!matches!(node.end_byte() - node.start_byte(), 2 | 3)
+                || node.end_position().row != node.start_position().row + 1
+                || node.end_position().column != 0)
+        {
+            // The pinned token also admits backslash-NUL. enter checks the
+            // exact captured payload; terminal must not accept that alternative.
+            return false;
+        }
+        let payload = self.literal_payload();
         for chunk in gap.chunks(4096) {
             if cancel.at(Checkpoint::Collector)
-                || (self.bracket_depth == 0 && chunk.iter().any(|b| matches!(b, b'\n' | b'\r')))
+                || (!payload
+                    && self.bracket_depth == 0
+                    && chunk.iter().any(|b| matches!(b, b'\n' | b'\r')))
             {
                 return false;
             }
         }
         // Only grammar punctuation changes implicit continuation. Brackets and
         // newlines inside literal payloads or comments are not syntax tokens.
-        if !node.is_named() {
+        if !payload && !node.is_named() {
             match node.kind() {
                 "(" | "[" | "{" => self.bracket_depth += 1,
                 ")" | "]" | "}" if self.bracket_depth > self.base_depth => self.bracket_depth -= 1,
@@ -135,10 +176,15 @@ impl Expression {
                 _ => {}
             }
         }
-        if node.kind() != "comment" {
+        if !matches!(node.kind(), "comment" | "line_continuation") {
             self.terminal_end_line = node.end_position().row + 1;
         }
         true
+    }
+
+    pub(super) fn set_base_depth(&mut self, depth: usize) {
+        self.base_depth = depth;
+        self.bracket_depth = depth;
     }
 
     pub(super) fn enter<F: FnMut(Checkpoint) -> bool>(
@@ -149,10 +195,52 @@ impl Expression {
     ) -> bool {
         let kind = node.kind();
         let text = &bytes[node.start_byte()..node.end_byte()];
-        let in_string = self
-            .current
-            .is_some_and(|i| matches!(self.entries[i].kind, "string" | "string_content"));
+        let parent = self.current.map(|i| self.entries[i].kind).unwrap_or("");
+        if kind == "lambda" && node.is_named() {
+            let mut ancestor = self.current;
+            while let Some(i) = ancestor {
+                if cancel.at(Checkpoint::Collector) {
+                    return false;
+                }
+                let entry = &self.entries[i];
+                if matches!(entry.kind, "interpolation" | "format_expression") {
+                    // A field's opening brace grants continuation, but only an
+                    // additional real delimiter protects a lambda's colon.
+                    if self.bracket_depth <= entry.bracket_depth + 1 {
+                        return false;
+                    }
+                    break;
+                }
+                ancestor = entry.parent;
+            }
+        }
+        let mut field_depth = self.current.map_or(0, |i| self.entries[i].field_depth);
+        let mut literal = self.current.and_then(|i| self.entries[i].literal);
+        if !matches!(
+            parent,
+            "string"
+                | "string_content"
+                | "format_specifier"
+                | "escape_sequence"
+                | "escape_interpolation"
+        ) {
+            literal = None;
+        }
         let (class, shape) = match kind {
+            _ if parent == "string_content"
+                || matches!(parent, "escape_sequence" | "escape_interpolation") =>
+            {
+                if node.is_named() && !matches!(kind, "escape_sequence" | "escape_interpolation") {
+                    return false;
+                }
+                (Class::Ignore, Shape::Ignore)
+            }
+            _ if parent == "format_specifier" && !node.is_named() => {
+                if kind != ":" && !literal_segment(text, literal.unwrap(), true, cancel) {
+                    return false;
+                }
+                (Class::Ignore, Shape::Ignore)
+            }
             "identifier" => {
                 if !identifier(std::str::from_utf8(text).unwrap_or(""), cancel) {
                     return false;
@@ -167,12 +255,88 @@ impl Expression {
                 }
                 (Class::Number, Shape::Literal)
             }
-            "string" => match string(text, cancel) {
-                Some(false) => (Class::Text, Shape::Literal),
-                Some(true) => (Class::Bytes, Shape::Literal),
-                None => return false,
-            },
-            "string_start" | "string_content" | "string_end" if in_string => {
+            "string" => {
+                field_depth = 0;
+                let Some(start) = node.child(0).filter(|n| n.kind() == "string_start") else {
+                    return false;
+                };
+                let Ok(info) = literals::start(&bytes[start.start_byte()..start.end_byte()]) else {
+                    return false;
+                };
+                literal = Some(info);
+                match info.flavor {
+                    literals::Flavor::Formatted => (Class::Formatted, Shape::Opaque("<JoinedStr>")),
+                    _ => match string(text, cancel) {
+                        Some(false) => (Class::Text, Shape::Literal),
+                        Some(true) => (Class::Bytes, Shape::Literal),
+                        None => return false,
+                    },
+                }
+            }
+            "string_content" if parent == "string" => {
+                let Some(info) = literal else {
+                    return false;
+                };
+                if matches!(info.flavor, literals::Flavor::Formatted)
+                    && !literal_segment(text, info, false, cancel)
+                {
+                    return false;
+                }
+                (Class::Ignore, Shape::Ignore)
+            }
+            "string_start" | "string_end" if parent == "string" => {
+                if kind == "string_end" {
+                    let Some(info) = literal else {
+                        return false;
+                    };
+                    if text.len() != (if info.triple { 3 } else { 1 })
+                        || text.iter().any(|&b| b != info.quote)
+                    {
+                        return false;
+                    }
+                }
+                (Class::Ignore, Shape::Ignore)
+            }
+            "interpolation" | "format_expression"
+                if (kind == "interpolation"
+                    && parent == "string"
+                    && literal
+                        .is_some_and(|s| matches!(s.flavor, literals::Flavor::Formatted)))
+                    || (kind == "format_expression" && parent == "format_specifier") =>
+            {
+                // CPython 3.12 tokenizer.h MAX_EXPR_NESTING is three fields
+                // per f-string; a nested f-string starts its own counter.
+                field_depth += 1;
+                if field_depth > 3 {
+                    return false;
+                }
+                (Class::Ignore, Shape::Ignore)
+            }
+            "format_specifier" if matches!(parent, "interpolation" | "format_expression") => {
+                // Inherit only the owning string's flags, not its body/span.
+                let mut owner = self.current;
+                while let Some(i) = owner {
+                    if cancel.at(Checkpoint::Collector) {
+                        return false;
+                    }
+                    if self.entries[i].kind == "string" {
+                        literal = self.entries[i].literal;
+                        break;
+                    }
+                    owner = self.entries[i].parent;
+                }
+                if literal.is_none() {
+                    return false;
+                }
+                (Class::Ignore, Shape::Ignore)
+            }
+            "type_conversion"
+                if matches!(parent, "interpolation" | "format_expression")
+                    && matches!(text, b"!s" | b"!r" | b"!a") =>
+            {
+                (Class::Ignore, Shape::Ignore)
+            }
+            "line_continuation" if matches!(text, b"\\\n" | b"\\\r\n") => {
                 (Class::Ignore, Shape::Ignore)
             }
             "type"
@@ -180,26 +344,67 @@ impl Expression {
             | "attribute"
             | "member_type"
             | "generic_type"
-            | "type_parameter"
+            | "union_type"
             | "subscript"
             | "tuple"
             | "concatenated_string"
             | "unary_operator" => (Class::Ignore, Shape::Ignore),
-            "call" | "argument_list" | "keyword_argument"
-                if self.core_mode() && self.mode != Mode::Default =>
+            "type_parameter"
+                if self.current.is_some_and(|p| {
+                    self.entries[p].kind == "generic_type" && self.entries[p].last_value.is_some()
+                }) =>
             {
                 (Class::Ignore, Shape::Ignore)
             }
+            "constrained_type" if self.type_slice() => (Class::Ignore, Shape::Ignore),
+            "splat_type"
+                if self.type_slice()
+                    || (self.star_expressions
+                        && self.current.is_none_or(|p| {
+                            self.entries[p].kind == "type" && self.entries[p].parent.is_none()
+                        })) =>
+            {
+                (Class::Ignore, Shape::Ignore)
+            }
+            "call" | "argument_list" | "keyword_argument"
+                if !matches!(
+                    self.mode,
+                    Mode::Base
+                        | Mode::HeaderValue
+                        | Mode::Annotation
+                        | Mode::AssignmentAnnotation
+                        | Mode::Return
+                        | Mode::Default
+                ) =>
+            {
+                (Class::Ignore, Shape::Ignore)
+            }
+            "lambda"
+            | "await"
+            | "yield"
+            | "named_expression"
+            | "lambda_parameters"
+            | "default_parameter"
+            | "positional_separator"
+            | "keyword_separator"
+            | "dictionary_splat_pattern"
+            | "list_comprehension"
+            | "set_comprehension"
+            | "dictionary_comprehension"
+            | "generator_expression"
+            | "for_in_clause"
+            | "if_clause" => (Class::Ignore, Shape::Ignore),
+            "for" | "async" | "from" | ":=" if !node.is_named() => (Class::Ignore, Shape::Ignore),
             "as_pattern" if self.mode == Mode::ExceptionType && !self.handler_alias => {
                 // The grammar can attach a handler's `as name` to the final
-                // else operand. Only an ungrouped conditional else spine may
-                // carry it; brackets or any other expression parent forbid it.
+                // else operand or lambda body. Only those ungrouped trailing
+                // expression spines may carry it; grouping/defaults forbid it.
                 let mut ancestor = self.current;
                 if ancestor.is_none() {
                     return false;
                 }
                 while let Some(i) = ancestor {
-                    if self.entries[i].kind != "conditional_expression" {
+                    if !matches!(self.entries[i].kind, "conditional_expression" | "lambda") {
                         return false;
                     }
                     let mut child = self.entries[i].first;
@@ -211,7 +416,16 @@ impl Expression {
                         values += usize::from(self.entries[j].class != Class::Ignore);
                         child = self.entries[j].next;
                     }
-                    if values != 2 {
+                    let expected = if self.entries[i].kind == "lambda" {
+                        usize::from(
+                            self.entries[i]
+                                .last_value
+                                .is_some_and(|p| self.entries[p].kind == "lambda_parameters"),
+                        )
+                    } else {
+                        2
+                    };
+                    if values != expected {
                         return false;
                     }
                     ancestor = self.entries[i].parent;
@@ -259,32 +473,80 @@ impl Expression {
             | "comparison_operator"
             | "not_operator"
             | "conditional_expression"
-            | "slice"
-                if self.core_mode() =>
-            {
-                (Class::Ignore, Shape::Ignore)
-            }
+            | "slice" => (Class::Ignore, Shape::Ignore),
             // Composite comparison operators have counted terminal children.
-            "not in" | "is not" if self.core_mode() => (Class::Ignore, Shape::Ignore),
+            "not in" | "is not" => (Class::Ignore, Shape::Ignore),
             "{" | "}" | ":" | "*" | "@" | "/" | "//" | "%" | "**" | "<<" | ">>" | "|" | "^"
             | "&" | "~" | "and" | "or" | "not" | "in" | "is" | "<" | "<=" | "==" | "!=" | ">="
             | ">" | "if" | "else"
-                if self.core_mode() && !node.is_named() =>
+                if !node.is_named() =>
             {
                 (Class::Ignore, Shape::Ignore)
             }
-            "=" if self.core_mode() && self.mode != Mode::Default && !node.is_named() => {
+            "=" if !node.is_named() => (Class::Ignore, Shape::Ignore),
+            "comment" => {
+                if type_comment(text, cancel) {
+                    // TYPE_IGNORE is skipped by pegen even inside replacement
+                    // expressions; TYPE_COMMENT is not an expression token.
+                    let mut at = 1;
+                    while matches!(text.get(at), Some(b' ' | b'\t')) {
+                        if cancel.at(Checkpoint::Collector) {
+                            return false;
+                        }
+                        at += 1;
+                    }
+                    at += 5; // type:
+                    while matches!(text.get(at), Some(b' ' | b'\t')) {
+                        if cancel.at(Checkpoint::Collector) {
+                            return false;
+                        }
+                        at += 1;
+                    }
+                    if field_depth == 0
+                        || !text[at..].starts_with(b"ignore")
+                        || text
+                            .get(at + 6)
+                            .is_some_and(|b| !b.is_ascii() || b.is_ascii_alphanumeric())
+                    {
+                        return false;
+                    }
+                }
                 (Class::Ignore, Shape::Ignore)
             }
-            "comment" if !type_comment(text, cancel) => (Class::Ignore, Shape::Ignore),
             "(" | ")" | "[" | "]" | "," | "." | "+" | "-" if !node.is_named() => {
                 (Class::Ignore, Shape::Ignore)
             }
             _ => return false,
         };
         let index = self.entries.len();
+        let role = self.current.map_or(self.role, |p| {
+            let parent = &self.entries[p];
+            match parent.kind {
+                "type" => parent.role,
+                "parenthesized_expression" => Role::Grouped,
+                "interpolation" | "format_expression" => Role::Yield,
+                "argument_list" | "list" | "tuple" | "set" | "type_parameter" => Role::Named,
+                "subscript" if parent.last_value.is_some() => Role::Named,
+                "list_comprehension" | "set_comprehension" | "generator_expression"
+                    if parent.last_value.is_none() =>
+                {
+                    Role::Named
+                }
+                _ => Role::Expression,
+            }
+        });
+        if kind == "named_expression"
+            && (node
+                .child_by_field_name("name")
+                .is_none_or(|n| n.kind() != "identifier")
+                || node.child_by_field_name("value").is_none())
+        {
+            return false;
+        }
         self.entries.push(Entry {
             kind,
+            named: node.is_named(),
+            role,
             parent: self.current,
             first: None,
             last: None,
@@ -297,6 +559,9 @@ impl Expression {
             end: node.end_byte(),
             line: node.start_position().row + 1,
             end_line: node.end_position().row + 1,
+            literal,
+            field_depth,
+            bracket_depth: self.bracket_depth,
         });
         if let Some(parent) = self.current {
             if let Some(last) = self.entries[parent].last {
@@ -319,6 +584,15 @@ impl Expression {
         let index = self.current.ok_or(())?;
         let entry = &self.entries[index];
         let kind = entry.kind;
+        if matches!(kind, "string_content" | "format_specifier") {
+            self.terminal_end_line = entry.end_line;
+        }
+        if entry.named
+            && ((kind == "named_expression" && !matches!(entry.role, Role::Named | Role::Grouped))
+                || (kind == "yield" && !matches!(entry.role, Role::Yield | Role::Grouped)))
+        {
+            return Err(());
+        }
         let mut child = entry.first;
         let mut first = None;
         let mut second = None;
@@ -340,9 +614,8 @@ impl Expression {
             }
             child = item.next;
         }
-        let annotation =
-            |class| matches!(class, Class::Reference | Class::Annotation | Class::Text);
         if matches!(kind, "list_splat" | "dictionary_splat")
+            && !(self.mode == Mode::Base && entry.parent.is_none())
             && !entry
                 .parent
                 .is_some_and(|p| matches!(self.entries[p].kind, "argument_list" | "subscript"))
@@ -364,7 +637,9 @@ impl Expression {
         // instead of its complete value: Call(Starred(f), args). Lift it to
         // Starred(Call(f, args)), reusing the splat entry rather than allocating.
         let raw_first = first;
-        let mut wide_star = false;
+        // A Base arena omits its enclosing class argument_list. Only its root
+        // and the same operator hoist path as call arguments inherit that role.
+        let mut wide_star = self.mode == Mode::Base && entry.parent.is_none();
         if first.is_some_and(|i| matches!(self.entries[i].shape, Shape::Starred(_))) {
             let mut parent = entry.parent;
             while let Some(i) = parent {
@@ -377,6 +652,10 @@ impl Expression {
                         break;
                     }
                     "boolean_operator" | "comparison_operator" | "conditional_expression" => {
+                        if self.mode == Mode::Base && self.entries[i].parent.is_none() {
+                            wide_star = true;
+                            break;
+                        }
                         parent = self.entries[i].parent;
                     }
                     _ => break,
@@ -399,6 +678,283 @@ impl Expression {
             first = Some(value);
         }
         let normalized = match kind {
+            "interpolation" | "format_expression" => {
+                let value = first.ok_or(())?;
+                if count != 1
+                    || (!self.body_value(value) && self.entries[value].class != Class::Starred)
+                    || matches!(self.entries[value].kind, "lambda" | "named_expression")
+                {
+                    // G4: := consumes the format colon in this CST, including
+                    // turning nested replacement fields into sets/dicts. Those
+                    // lost field boundaries need a grammar fix, not call guesses.
+                    // Ungrouped lambda has the same colon-role ambiguity.
+                    return Err(());
+                }
+                let mut phase = 0;
+                let mut child = entry.first;
+                while let Some(i) = child {
+                    if cancel.at(Checkpoint::Collector) {
+                        return Err(());
+                    }
+                    let e = &self.entries[i];
+                    match e.kind {
+                        "{" if phase == 0 => phase = 1,
+                        "comment" | "line_continuation" => {}
+                        "=" if phase == 2 => phase = 3,
+                        "type_conversion" if matches!(phase, 2 | 3) => phase = 4,
+                        "format_specifier" if matches!(phase, 2..=4) => phase = 5,
+                        "}" if matches!(phase, 2..=5) => phase = 6,
+                        _ if phase == 1 && i == value => phase = 2,
+                        _ => return Err(()),
+                    }
+                    child = e.next;
+                }
+                if phase != 6 {
+                    return Err(());
+                }
+                Some((Class::Ignore, Shape::Opaque("<FormattedValue>")))
+            }
+            "format_specifier" => {
+                let info = entry.literal.ok_or(())?;
+                let mut child = entry.first;
+                let mut end = entry.start;
+                while let Some(i) = child {
+                    if cancel.at(Checkpoint::Collector) {
+                        return Err(());
+                    }
+                    let e = &self.entries[i];
+                    if e.named && e.kind != "format_expression" {
+                        return Err(());
+                    }
+                    if !literal_segment(&bytes[end..e.start], info, true, cancel) {
+                        return Err(());
+                    }
+                    end = e.end;
+                    child = e.next;
+                }
+                if !literal_segment(&bytes[end..entry.end], info, true, cancel) {
+                    return Err(());
+                }
+                None
+            }
+            "named_expression" => {
+                if count != 2
+                    || self.entries[first.ok_or(())?].kind != "identifier"
+                    || !self.body_value(second.ok_or(())?)
+                {
+                    return Err(());
+                }
+                Some((Class::Core, Shape::Opaque("<NamedExpr>")))
+            }
+            "yield" if entry.named => {
+                let mut child = entry.first;
+                let mut from = false;
+                while let Some(i) = child {
+                    if cancel.at(Checkpoint::Collector) {
+                        return Err(());
+                    }
+                    from |= self.entries[i].kind == "from" && !self.entries[i].named;
+                    child = self.entries[i].next;
+                }
+                if count > 1
+                    || (from && count != 1)
+                    || first.is_some_and(|i| {
+                        !self.body_value(i) && (from || self.entries[i].class != Class::Starred)
+                    })
+                    || (from && first.is_some_and(|i| self.entries[i].kind == "expression_list"))
+                {
+                    return Err(());
+                }
+                Some((
+                    Class::Core,
+                    Shape::Opaque(if from { "<YieldFrom>" } else { "<Yield>" }),
+                ))
+            }
+            "await" if count == 1 => {
+                let operand = first.unwrap();
+                if self.entries[operand].kind == "binary_operator" {
+                    let Shape::Binary(left, "Pow", right) = self.entries[operand].shape else {
+                        return Err(());
+                    };
+                    if !self.primary(left) {
+                        return Err(());
+                    }
+                    // The pinned grammar puts power inside await. Python puts
+                    // await on its left primary; recycle the power descriptor.
+                    self.entries[operand].class = Class::Core;
+                    self.entries[operand].shape = Shape::Opaque("<Await>");
+                    Some((Class::Core, Shape::Binary(operand, "Pow", right)))
+                } else {
+                    if !self.primary(operand) {
+                        return Err(());
+                    }
+                    Some((Class::Core, Shape::Opaque("<Await>")))
+                }
+            }
+            "lambda_parameters" => {
+                // AST parsing allows duplicate names. Validate borrowed roles,
+                // not function signature/alias state or compiler constraints.
+                let mut child = entry.first;
+                let mut want_parameter = true;
+                let mut positional = false;
+                let mut slash = false;
+                let mut star = false;
+                let mut bare_star = false;
+                let mut keyword_only = false;
+                let mut kwarg = false;
+                let mut default_seen = false;
+                while let Some(i) = child {
+                    if cancel.at(Checkpoint::Collector) {
+                        return Err(());
+                    }
+                    let e = &self.entries[i];
+                    match e.kind {
+                        "comment" | "line_continuation" => {}
+                        "," if !want_parameter => want_parameter = true,
+                        _ if !want_parameter || kwarg => return Err(()),
+                        "positional_separator" if positional && !slash && !star => {
+                            slash = true;
+                            want_parameter = false;
+                        }
+                        "keyword_separator" | "list_splat_pattern" if !star => {
+                            star = true;
+                            bare_star = e.kind == "keyword_separator";
+                            want_parameter = false;
+                        }
+                        "dictionary_splat_pattern" => {
+                            kwarg = true;
+                            want_parameter = false;
+                        }
+                        "identifier" | "default_parameter" => {
+                            if star {
+                                keyword_only = true;
+                            } else {
+                                if default_seen && e.kind != "default_parameter" {
+                                    return Err(());
+                                }
+                                default_seen |= e.kind == "default_parameter";
+                                positional = true;
+                            }
+                            want_parameter = false;
+                        }
+                        _ => return Err(()),
+                    }
+                    child = e.next;
+                }
+                if (!positional && !star && !kwarg) || (bare_star && !keyword_only) {
+                    return Err(());
+                }
+                Some((Class::Structure, Shape::Ignore))
+            }
+            "default_parameter" => {
+                if count != 2
+                    || self.entries[first.ok_or(())?].kind != "identifier"
+                    || !self.body_value(second.ok_or(())?)
+                    || entry
+                        .parent
+                        .is_none_or(|p| self.entries[p].kind != "lambda_parameters")
+                {
+                    return Err(());
+                }
+                Some((Class::Structure, Shape::Ignore))
+            }
+            "positional_separator" | "keyword_separator" | "dictionary_splat_pattern" => {
+                if entry
+                    .parent
+                    .is_none_or(|p| self.entries[p].kind != "lambda_parameters")
+                    || (kind == "dictionary_splat_pattern"
+                        && (count != 1 || self.entries[first.ok_or(())?].kind != "identifier"))
+                {
+                    return Err(());
+                }
+                Some((Class::Structure, Shape::Ignore))
+            }
+            "list_splat_pattern"
+                if entry
+                    .parent
+                    .is_some_and(|p| self.entries[p].kind == "lambda_parameters") =>
+            {
+                if count != 1 || self.entries[first.ok_or(())?].kind != "identifier" {
+                    return Err(());
+                }
+                Some((Class::Structure, Shape::Ignore))
+            }
+            "lambda" if entry.first.is_some() => {
+                let body = if count == 1 {
+                    first.ok_or(())?
+                } else if count == 2 && self.entries[first.ok_or(())?].kind == "lambda_parameters" {
+                    second.ok_or(())?
+                } else {
+                    return Err(());
+                };
+                if !self.body_value(body) {
+                    return Err(());
+                }
+                Some((Class::Core, Shape::Opaque("<Lambda>")))
+            }
+            "for_in_clause" => {
+                let (target, iter) = (first.ok_or(())?, second.ok_or(())?);
+                // The pinned CST admits comma-separated iterables and wider
+                // expression roots than Python. Check wrappers before aliases.
+                if count != 2
+                    || comma
+                    || !self.valid_target(target, Mode::NeutralTarget, cancel)
+                    || !self.body_value(iter)
+                    || matches!(self.entries[iter].kind, "lambda" | "conditional_expression")
+                {
+                    return Err(());
+                }
+                Some((Class::Structure, Shape::Ignore))
+            }
+            "if_clause" => {
+                let value = first.ok_or(())?;
+                if count != 1
+                    || !self.body_value(value)
+                    || matches!(
+                        self.entries[value].kind,
+                        "lambda" | "conditional_expression"
+                    )
+                {
+                    return Err(());
+                }
+                Some((Class::Structure, Shape::Ignore))
+            }
+            "list_comprehension"
+            | "set_comprehension"
+            | "dictionary_comprehension"
+            | "generator_expression" => {
+                let result = first.ok_or(())?;
+                if (kind == "dictionary_comprehension" && self.entries[result].class != Class::Pair)
+                    || (kind != "dictionary_comprehension" && !self.body_value(result))
+                {
+                    return Err(());
+                }
+                let mut child = self.entries[result].next_value;
+                let mut fors = 0;
+                while let Some(i) = child {
+                    if cancel.at(Checkpoint::Collector) {
+                        return Err(());
+                    }
+                    match self.entries[i].kind {
+                        "for_in_clause" => fors += 1,
+                        "if_clause" if fors != 0 => {}
+                        _ => return Err(()),
+                    }
+                    child = self.entries[i].next_value;
+                }
+                if fors == 0 {
+                    return Err(());
+                }
+                Some((
+                    Class::Core,
+                    Shape::Opaque(match kind {
+                        "list_comprehension" => "<ListComp>",
+                        "set_comprehension" => "<SetComp>",
+                        "dictionary_comprehension" => "<DictComp>",
+                        _ => "<GeneratorExp>",
+                    }),
+                ))
+            }
             "as_pattern_target"
                 if self.mode == Mode::ExceptionType
                     && count == 1
@@ -423,7 +979,7 @@ impl Expression {
                         return Err(());
                     }
                     let e = &self.entries[i];
-                    if e.kind != "comment" {
+                    if !matches!(e.kind, "comment" | "line_continuation") {
                         if expected.get(at) != Some(&e.kind) {
                             return Err(());
                         }
@@ -436,10 +992,33 @@ impl Expression {
                 }
                 None
             }
-            "binary_operator" | "boolean_operator" if count == 2 => {
+            "binary_operator" | "boolean_operator" | "union_type" if count == 2 => {
                 let (a, b) = (first.unwrap(), second.unwrap());
+                if kind == "union_type"
+                    && [a, b].into_iter().any(|i| {
+                        let raw = if self.entries[i].kind == "type" {
+                            self.entries[i].last_value.unwrap()
+                        } else {
+                            i
+                        };
+                        matches!(
+                            self.entries[raw].kind,
+                            "lambda"
+                                | "conditional_expression"
+                                | "boolean_operator"
+                                | "comparison_operator"
+                                | "not_operator"
+                                | "named_expression"
+                                | "yield"
+                        )
+                    })
+                {
+                    // Type grammar operands are wider than bitwise-or operands.
+                    // Grouping must remain visible, just as for ordinary core ops.
+                    return Err(());
+                }
                 let mut op = self.entries[raw_first.unwrap()].next.ok_or(())?;
-                while self.entries[op].kind == "comment" {
+                while matches!(self.entries[op].kind, "comment" | "line_continuation") {
                     if cancel.at(Checkpoint::Collector) {
                         return Err(());
                     }
@@ -449,7 +1028,12 @@ impl Expression {
                     return Err(());
                 }
                 if kind == "boolean_operator" {
-                    if !matches!(self.entries[op].kind, "and" | "or") {
+                    // Boolean operands are disjunction/conjunction roles, not
+                    // arbitrary expressions. Grouping stays visible here.
+                    if matches!(self.entries[a].kind, "lambda")
+                        || matches!(self.entries[b].kind, "lambda")
+                        || !matches!(self.entries[op].kind, "and" | "or")
+                    {
                         return Err(());
                     }
                     Some((Class::Core, Shape::Opaque("<BoolOp>")))
@@ -481,14 +1065,14 @@ impl Expression {
                         return Err(());
                     }
                     let e = &self.entries[i];
-                    if e.kind != "comment" {
+                    if !matches!(e.kind, "comment" | "line_continuation") {
                         if operand {
                             let value = if Some(i) == raw_first {
                                 first.unwrap()
                             } else {
                                 i
                             };
-                            if !self.body_value(value) {
+                            if !self.body_value(value) || self.entries[value].kind == "lambda" {
                                 return Err(());
                             }
                         } else if !matches!(
@@ -515,13 +1099,19 @@ impl Expression {
                 Some((Class::Core, Shape::Opaque("<Compare>")))
             }
             "not_operator" if count == 1 && self.body_value(first.unwrap()) => {
+                if self.entries[first.unwrap()].kind == "lambda" {
+                    return Err(());
+                }
                 Some((Class::Core, Shape::Opaque("<UnaryOp>")))
             }
             "conditional_expression" if count == 3 => {
-                // The grammar accepts an unparenthesized conditional test;
+                // The grammar accepts bare conditional/lambda tests;
                 // Python requires grouping there. Inspect the CST wrapper,
                 // not its resolved alias, to preserve parenthesized tests.
-                if self.entries[second.unwrap()].kind == "conditional_expression" {
+                if matches!(
+                    self.entries[second.unwrap()].kind,
+                    "conditional_expression" | "lambda"
+                ) {
                     return Err(());
                 }
                 let mut child = raw_first;
@@ -557,7 +1147,7 @@ impl Expression {
                     if e.kind == ":" {
                         colons += 1;
                         bound = false;
-                    } else if e.kind != "comment" {
+                    } else if !matches!(e.kind, "comment" | "line_continuation") {
                         if bound || !self.body_value(i) {
                             return Err(());
                         }
@@ -568,7 +1158,35 @@ impl Expression {
                 if !(1..=2).contains(&colons) {
                     return Err(());
                 }
-                Some((Class::Slice, Shape::Opaque("<Slice>")))
+                Some((Class::Slice, Shape::Slice(colons)))
+            }
+            "constrained_type" if count == 2 => {
+                let (a, b) = (first.unwrap(), second.unwrap());
+                let colons = match self.entries[self.resolve(b)].shape {
+                    Shape::Slice(n) => n + 1,
+                    _ if self.body_value(b) => 1,
+                    _ => return Err(()),
+                };
+                if !self.body_value(a) || colons > 2 {
+                    return Err(());
+                }
+                Some((Class::Slice, Shape::Slice(colons)))
+            }
+            "splat_type" if count == 1 && self.body_value(first.unwrap()) => {
+                // ** is declaration syntax, never an expression index unpack.
+                let mut child = entry.first;
+                let mut star = false;
+                while let Some(i) = child {
+                    if cancel.at(Checkpoint::Collector) || self.entries[i].kind == "**" {
+                        return Err(());
+                    }
+                    star |= self.entries[i].kind == "*";
+                    child = self.entries[i].next;
+                }
+                if !star {
+                    return Err(());
+                }
+                Some((Class::Starred, Shape::Starred(first.unwrap())))
             }
             "list_splat" | "list_splat_pattern"
                 if count == 1 && self.body_value(first.unwrap()) =>
@@ -586,9 +1204,7 @@ impl Expression {
                 Some((self.entries[i].class, Shape::Alias(self.resolve(i))))
             }
             "list" | "set" | "dictionary" | "expression_list" | "tuple" | "list_pattern"
-            | "tuple_pattern" | "pattern_list"
-                if self.core_mode() =>
-            {
+            | "tuple_pattern" | "pattern_list" => {
                 let mut child = entry.first;
                 let mut want_value = true;
                 while let Some(i) = child {
@@ -597,7 +1213,7 @@ impl Expression {
                     }
                     let e = &self.entries[i];
                     match e.kind {
-                        "(" | ")" | "[" | "]" | "{" | "}" | "comment" => {}
+                        "(" | ")" | "[" | "]" | "{" | "}" | "comment" | "line_continuation" => {}
                         "," if !want_value => want_value = true,
                         _ => {
                             let valid = if kind == "dictionary" {
@@ -666,7 +1282,10 @@ impl Expression {
             }
             "call" if count == 2 => {
                 let (callee, args) = (first.unwrap(), second.unwrap());
-                if !self.body_value(callee) || self.entries[args].class != Class::Arguments {
+                if !self.body_value(callee)
+                    || !(self.entries[args].class == Class::Arguments
+                        || self.entries[args].kind == "generator_expression")
+                {
                     return Err(());
                 }
                 let callee = self.resolve(callee);
@@ -707,52 +1326,46 @@ impl Expression {
             }
             "attribute" | "member_type" if count == 2 => {
                 let (a, b) = (first.unwrap(), second.unwrap());
-                if !(self.entries[a].class == Class::Reference
-                    || (self.core_mode() && self.body_value(a)))
-                    || !matches!(self.entries[b].shape, Shape::Name)
-                {
+                if kind == "member_type" {
+                    let raw = if self.entries[a].kind == "type" {
+                        self.entries[a].last_value.unwrap()
+                    } else {
+                        a
+                    };
+                    if !self.primary(raw) {
+                        return Err(());
+                    }
+                }
+                if !self.body_value(a) || !matches!(self.entries[b].shape, Shape::Name) {
                     return Err(());
                 }
                 Some((Class::Reference, Shape::Attribute(a, b)))
             }
-            "tuple" | "type_parameter" => {
+            "type_parameter" => {
                 let mut child = first;
                 while let Some(i) = child {
                     if cancel.at(Checkpoint::Collector) {
                         return Err(());
                     }
                     let e = &self.entries[i];
-                    if e.class != Class::Ignore
-                        && !annotation(e.class)
-                        && !(self.mode == Mode::AssignmentAnnotation && e.class == Class::Tuple)
-                        && !(kind == "type_parameter"
-                            && count == 1
-                            && !comma
-                            && e.class == Class::Tuple)
-                    {
+                    if !self.body_value(i) && !matches!(e.class, Class::Slice | Class::Starred) {
                         return Err(());
                     }
-                    child = e.next;
+                    child = e.next_value;
                 }
-                if count == 0 && kind == "type_parameter" {
+                if count == 0 {
                     return Err(());
                 }
-                if kind == "type_parameter" && count == 1 && !comma {
+                if count == 1 && !comma && self.entries[first.unwrap()].class != Class::Starred {
                     let i = first.unwrap();
                     Some((self.entries[i].class, Shape::Alias(self.resolve(i))))
                 } else {
-                    Some((Class::Tuple, Shape::Tuple(first)))
+                    Some((Class::Core, Shape::Tuple(first)))
                 }
             }
             "generic_type" | "subscript" if count >= 2 => {
                 let (base, slice) = (first.unwrap(), second.unwrap());
-                let core = kind == "subscript" && self.core_mode();
-                let valid_base = if core {
-                    self.body_value(base)
-                } else {
-                    self.entries[base].class == Class::Reference
-                };
-                if !valid_base {
+                if !self.body_value(base) {
                     return Err(());
                 }
                 let mut child = Some(slice);
@@ -761,27 +1374,16 @@ impl Expression {
                         return Err(());
                     }
                     let e = &self.entries[i];
-                    if core {
-                        if e.class != Class::Ignore
-                            && !self.body_value(i)
-                            && e.class != Class::Slice
-                            && e.class != Class::Starred
-                        {
-                            return Err(());
-                        }
-                    } else if e.class != Class::Ignore
-                        && !annotation(e.class)
-                        && !(e.class == Class::Tuple && count == 2 && !comma)
-                    {
+                    if !self.body_value(i) && !matches!(e.class, Class::Slice | Class::Starred) {
                         return Err(());
                     }
-                    child = e.next;
+                    child = e.next_value;
                 }
                 if kind == "generic_type" && count != 2 {
                     return Err(());
                 }
                 Some((
-                    if core { Class::Core } else { Class::Annotation },
+                    Class::Core,
                     Shape::Subscript(
                         base,
                         slice,
@@ -791,8 +1393,8 @@ impl Expression {
                 ))
             }
             "concatenated_string" if count >= 2 => {
-                let category = self.entries[first.unwrap()].class;
-                if !matches!(category, Class::Text | Class::Bytes) {
+                let mut category = self.entries[first.unwrap()].class;
+                if !matches!(category, Class::Text | Class::Bytes | Class::Formatted) {
                     return Err(());
                 }
                 let mut child = first;
@@ -801,20 +1403,27 @@ impl Expression {
                         return Err(());
                     }
                     let e = &self.entries[i];
-                    if e.class != Class::Ignore && e.class != category {
+                    if e.class != Class::Ignore
+                        && (e.class == Class::Bytes) != (category == Class::Bytes)
+                    {
                         return Err(());
+                    }
+                    if e.class == Class::Formatted {
+                        category = Class::Formatted;
                     }
                     child = e.next;
                 }
-                Some((category, Shape::Literal))
+                Some((
+                    category,
+                    if category == Class::Formatted {
+                        Shape::Opaque("<JoinedStr>")
+                    } else {
+                        Shape::Literal
+                    },
+                ))
             }
             "unary_operator" if count == 1 => {
-                let valid = if self.core_mode() {
-                    self.body_value(first.unwrap())
-                } else {
-                    self.entries[first.unwrap()].class == Class::Number
-                };
-                if !valid {
+                if !self.body_value(first.unwrap()) {
                     return Err(());
                 }
                 Some((Class::Unary, Shape::Unary))
@@ -824,6 +1433,9 @@ impl Expression {
             | "attribute"
             | "member_type"
             | "generic_type"
+            | "union_type"
+            | "constrained_type"
+            | "splat_type"
             | "subscript"
             | "concatenated_string"
             | "unary_operator"
@@ -835,6 +1447,7 @@ impl Expression {
             | "pair" => {
                 return Err(());
             }
+            "await" if entry.named => return Err(()),
             _ => None,
         };
         if let Some((class, shape)) = normalized {
@@ -879,13 +1492,9 @@ impl Expression {
             }
             let class = self.entries[index].class;
             let valid = if self.target_mode() {
-                self.valid_target(index, cancel)
-            } else if self.mode == Mode::Base {
-                class == Class::Reference
-            } else if self.core_mode() {
-                self.body_value(index) || (self.star_expressions && class == Class::Starred)
+                self.valid_target(index, self.mode, cancel)
             } else {
-                annotation(class)
+                self.body_value(index) || (self.star_expressions && class == Class::Starred)
             };
             if !valid {
                 return Err(());
@@ -893,6 +1502,12 @@ impl Expression {
             return Ok(true);
         }
         Ok(false)
+    }
+
+    pub(super) fn root_starred(&self) -> bool {
+        self.entries
+            .first()
+            .is_some_and(|e| e.class == Class::Starred)
     }
 
     fn resolve(&self, mut i: usize) -> usize {
@@ -903,7 +1518,7 @@ impl Expression {
     }
 
     fn body_value(&self, index: usize) -> bool {
-        // Defaults share core values, but reject every call at admission.
+        // Headers and defaults share core values, but reject calls at admission.
         // Slices, pairs and splats are context-only, not general values.
         !matches!(
             self.entries[index].class,
@@ -922,11 +1537,49 @@ impl Expression {
         )
     }
 
-    fn core_mode(&self) -> bool {
-        matches!(
-            self.mode,
-            Mode::BodyValue | Mode::ExceptionType | Mode::Default
-        ) || self.target_mode()
+    fn primary(&self, index: usize) -> bool {
+        self.body_value(index)
+            && matches!(
+                self.entries[index].kind,
+                "identifier"
+                    | "none"
+                    | "ellipsis"
+                    | "true"
+                    | "false"
+                    | "integer"
+                    | "float"
+                    | "string"
+                    | "concatenated_string"
+                    | "parenthesized_expression"
+                    | "tuple"
+                    | "list"
+                    | "set"
+                    | "dictionary"
+                    | "call"
+                    | "attribute"
+                    | "member_type"
+                    | "generic_type"
+                    | "subscript"
+                    | "list_comprehension"
+                    | "set_comprehension"
+                    | "dictionary_comprehension"
+                    | "generator_expression"
+            )
+    }
+
+    fn type_slice(&self) -> bool {
+        let Some(mut parent) = self.current else {
+            return false;
+        };
+        if self.entries[parent].kind == "type" {
+            let Some(outer) = self.entries[parent].parent else {
+                return false;
+            };
+            parent = outer;
+        }
+        self.entries[parent].kind == "type_parameter"
+            || (self.entries[parent].kind == "constrained_type"
+                && self.entries[parent].last_value.is_some())
     }
 
     fn target_mode(&self) -> bool {
@@ -939,6 +1592,7 @@ impl Expression {
     fn valid_target<F: FnMut(Checkpoint) -> bool>(
         &self,
         index: usize,
+        mode: Mode,
         cancel: &Cancellation<F>,
     ) -> bool {
         if cancel.at(Checkpoint::Collector) {
@@ -947,16 +1601,14 @@ impl Expression {
         let index = self.resolve(index);
         match self.entries[index].shape {
             Shape::Name | Shape::Attribute(..) | Shape::Subscript(..) => true,
-            Shape::Starred(value)
-                if !matches!(self.mode, Mode::ScalarTarget | Mode::DeleteTarget) =>
-            {
-                self.valid_target(value, cancel)
+            Shape::Starred(value) if !matches!(mode, Mode::ScalarTarget | Mode::DeleteTarget) => {
+                self.valid_target(value, mode, cancel)
             }
             Shape::Tuple(mut child)
-                if self.mode != Mode::ScalarTarget && self.entries[index].kind != "set" =>
+                if mode != Mode::ScalarTarget && self.entries[index].kind != "set" =>
             {
                 while let Some(i) = child {
-                    if !self.valid_target(i, cancel) {
+                    if !self.valid_target(i, mode, cancel) {
                         return false;
                     }
                     child = self.entries[i].next_value;
@@ -1176,6 +1828,7 @@ impl Expression {
             Shape::Literal => append(&mut result, "<literal>"),
             Shape::Unary => append(&mut result, "<UnaryOp>"),
             Shape::Opaque(label) => append(&mut result, label),
+            Shape::Slice(_) => append(&mut result, "<Slice>"),
             Shape::Starred(value) => {
                 append(&mut result, "*");
                 append(
@@ -1232,8 +1885,12 @@ impl Expression {
                     &self.render_node(callee, depth + 1, budget, bytes, cancel),
                 );
                 append(&mut result, "(");
-                let Shape::Arguments(first) = self.entries[arguments].shape else {
-                    unreachable!("validated arguments")
+                let first = match self.entries[arguments].shape {
+                    Shape::Arguments(first) => first,
+                    // A direct generator is the sole positional argument. Keep
+                    // its own opaque shape; no synthetic descriptor is needed.
+                    Shape::Opaque("<GeneratorExp>") => Some(arguments),
+                    _ => unreachable!("validated arguments"),
                 };
                 let mut positional = 0;
                 let mut keyword = 0;
@@ -1359,124 +2016,254 @@ fn append(output: &mut String, text: &str) {
     output.push_str(&text[..end]);
 }
 
-fn string<F: FnMut(Checkpoint) -> bool>(text: &[u8], cancel: &Cancellation<F>) -> Option<bool> {
-    let quote = text
-        .iter()
-        .take(3)
-        .position(|b| matches!(b, b'\'' | b'"'))?;
-    let prefix = &text[..quote];
-    let bytes = match prefix {
-        b"" | b"r" | b"R" | b"u" | b"U" => false,
-        b"b" | b"B" => true,
-        [a, b]
-            if (a.eq_ignore_ascii_case(&b'b') && b.eq_ignore_ascii_case(&b'r'))
-                || (a.eq_ignore_ascii_case(&b'r') && b.eq_ignore_ascii_case(&b'b')) =>
-        {
-            true
-        }
-        _ => return None,
-    };
-    let q = text[quote];
-    let width = if text.get(quote..quote + 3) == Some(&[q, q, q]) {
-        3
-    } else {
-        1
-    };
-    if text.len() < quote + 2 * width || text[text.len() - width..].iter().any(|&b| b != q) {
-        return None;
-    }
-    let body = &text[quote + width..text.len() - width];
-    for chunk in body.chunks(4096) {
-        if cancel.at(Checkpoint::Collector)
-            || chunk.iter().any(|&b| {
-                b == b'\\'
-                    || b == 0
-                    || (bytes && !b.is_ascii())
-                    || (width == 1 && matches!(b, b'\n' | b'\r'))
-            })
-        {
-            return None;
-        }
-    }
-    Some(bytes)
-}
-
-// Validate lexical forms, never values. In particular, no Python-2 suffixes or
-// octal spelling and no decimal conversion subject to interpreter digit limits.
-fn number<F: FnMut(Checkpoint) -> bool>(text: &[u8], cancel: &Cancellation<F>) -> bool {
-    if text.len() > 1024 || cancel.at(Checkpoint::Collector) {
+// The scanner's format-spec token accepts outer quotes as text. Check lexical
+// boundaries on literal-only segments, never on a whole interpolated span.
+fn literal_segment<F: FnMut(Checkpoint) -> bool>(
+    text: &[u8],
+    info: literals::Start,
+    format: bool,
+    cancel: &Cancellation<F>,
+) -> bool {
+    if literals::segment(text, info, format, cancel).is_err() {
         return false;
     }
-    fn digits(text: &[u8], radix: u8, prefix_underscore: bool) -> bool {
-        let mut previous = prefix_underscore;
-        let mut any = false;
-        for &b in text {
-            if b == b'_' {
-                if !previous {
-                    return false;
-                }
-                previous = false;
-            } else {
-                let valid = match radix {
-                    2 => matches!(b, b'0'..=b'1'),
-                    8 => matches!(b, b'0'..=b'7'),
-                    16 => b.is_ascii_hexdigit(),
-                    _ => b.is_ascii_digit(),
-                };
-                if !valid {
-                    return false;
-                }
-                previous = true;
-                any = true;
-            }
-        }
-        any && previous
-    }
-    if text.len() >= 2 && text[0] == b'0' {
-        let radix = match text[1] {
-            b'x' | b'X' => 16,
-            b'o' | b'O' => 8,
-            b'b' | b'B' => 2,
-            _ => 0,
-        };
-        if radix != 0 {
-            return digits(&text[2..], radix, true);
-        }
-    }
-    if text.iter().filter(|b| b.is_ascii_digit()).count() > 512 {
-        return false;
-    }
-    let imaginary = matches!(text.last(), Some(b'j' | b'J'));
-    let text = if imaginary {
-        &text[..text.len() - 1]
-    } else {
-        text
-    };
-    let exponent = text.iter().position(|b| matches!(b, b'e' | b'E'));
-    let mantissa = if let Some(i) = exponent {
-        let exp = &text[i + 1..];
-        let exp = if matches!(exp.first(), Some(b'+' | b'-')) {
-            &exp[1..]
-        } else {
-            exp
-        };
-        if !digits(exp, 10, false) {
+    let mut at = 0;
+    let width = if info.triple { 3 } else { 1 };
+    while at < text.len() {
+        if cancel.at(Checkpoint::Collector) {
             return false;
         }
-        &text[..i]
-    } else {
-        text
-    };
-    if let Some(dot) = mantissa.iter().position(|&b| b == b'.') {
-        let (left, right) = (&mantissa[..dot], &mantissa[dot + 1..]);
-        (!left.is_empty() || !right.is_empty())
-            && (left.is_empty() || digits(left, 10, false))
-            && (right.is_empty() || digits(right, 10, false))
-    } else {
-        digits(mantissa, 10, false)
-            && (exponent.is_some()
-                || imaginary
-                || mantissa[0] != b'0'
-                || mantissa.iter().all(|b| matches!(b, b'0' | b'_')))
+        let b = text[at];
+        if matches!(b, b'\n' | b'\r') && !info.triple {
+            return false;
+        }
+        if b == b'\\' && text.get(at + 1).is_some_and(|b| !matches!(b, b'{' | b'}')) {
+            at += if text.get(at + 1..at + 3) == Some(b"\r\n") {
+                3
+            } else {
+                2
+            };
+            continue;
+        }
+        if b == info.quote && text.get(at..at + width) == Some(&[b, b, b][..width]) {
+            return false;
+        }
+        if matches!(b, b'{' | b'}') {
+            if format || text.get(at + 1) != Some(&b) {
+                return false;
+            }
+            at += 1;
+        }
+        at += 1;
+    }
+    true
+}
+
+pub(super) fn string<F: FnMut(Checkpoint) -> bool>(
+    text: &[u8],
+    cancel: &Cancellation<F>,
+) -> Option<bool> {
+    match literals::string(text, cancel).ok()? {
+        literals::Flavor::Text => Some(false),
+        literals::Flavor::Bytes => Some(true),
+        literals::Flavor::Formatted => None,
+    }
+}
+
+// Keep the pattern consumer's boolean seam; numeric categories and Python's
+// default decimal-integer digit policy belong to the shared lexical validator.
+pub(super) fn number<F: FnMut(Checkpoint) -> bool>(text: &[u8], cancel: &Cancellation<F>) -> bool {
+    literals::number(text, cancel).is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn source(text: impl AsRef<[u8]>) -> Source {
+        Source {
+            path: "headers.py".into(),
+            module: "headers".into(),
+            bytes: text.as_ref().to_vec(),
+            hex: "invalid transport".into(),
+        }
+    }
+
+    fn facts(text: impl AsRef<[u8]>, status: CandidateStatus) -> Vec<CandidateFact> {
+        let sources = [source(text)];
+        let report = extract_fact_candidates(&sources).unwrap();
+        assert_eq!(
+            report.files[0].status,
+            status,
+            "{report:?}\nsource: {:?}",
+            String::from_utf8_lossy(&sources[0].bytes)
+        );
+        report.facts
+    }
+
+    #[test]
+    fn policy14_broad_call_free_headers() {
+        // G4: this Python 3.12 AST-positive spelling hits a pinned-grammar
+        // ERROR in annotations; grouping below preserves the semantic control.
+        let ungrouped = facts(
+            "class C(Box[A | B][start:stop].member):\n field: Box[A | B][start:stop].member\ndef f(x: Box[A | B][start:stop].member) -> Box[A | B][start:stop].member: pass\n",
+            CandidateStatus::SyntaxError,
+        );
+        assert_eq!(ungrouped.len(), 1);
+        for (value, rendered) in [
+            ("A | B", "A BitOr B"),
+            ("[A, {B: C}]", "[A, <Dict>]"),
+            ("lambda x=A: x", "<Lambda>"),
+            ("[x for x in items if ready]", "<ListComp>"),
+            (
+                "(Box[A | B][start:stop].member)",
+                "Box[A BitOr B][<Slice>].member",
+            ),
+            ("(await item ** power)", "<Await> Pow power"),
+        ] {
+            let result = facts(
+                format!("class C({value}):\n field: {value}\ndef f(x: {value}) -> {value}: pass\n"),
+                CandidateStatus::AcceptedFacts,
+            );
+            for kind in ["base", "parameter_annotation", "return_annotation"] {
+                assert!(result.iter().any(|f| f.kind == kind && f.value == rendered));
+            }
+            assert!(result.iter().all(|f| f.kind != "call"));
+        }
+    }
+
+    #[test]
+    fn policy14_headers_reject_calls_even_under_opaque_values() {
+        for value in [
+            "A | hidden()",
+            "[hidden()]",
+            "lambda x=hidden(): x",
+            "lambda: hidden()",
+            "[x for x in hidden()]",
+            "{x: hidden() for x in items}",
+            "Box[hidden():stop]",
+            "(await hidden())",
+            "(yield hidden())",
+            "(named := hidden())",
+        ] {
+            for text in [
+                format!("class C({value}): pass\n"),
+                format!("class C(metaclass={value}): pass\n"),
+                format!("def f(x: {value}): pass\n"),
+                format!("def f() -> {value}: pass\n"),
+                format!("item: {value}\n"),
+                format!("def f(x={value}): pass\n"),
+                format!("def f[T: {value}](): pass\n"),
+            ] {
+                let result = facts(text, CandidateStatus::UnsupportedSyntax);
+                assert_eq!(result.len(), 1);
+                assert_eq!(result[0].kind, "module");
+            }
+        }
+    }
+
+    #[test]
+    fn policy14_class_starred_bases_and_neutral_header_values() {
+        let result = facts(
+            concat!(
+                "class C[T: A | B](*bases, Box[A | B], metaclass=[Meta], **options): pass\n",
+                "def f[T:\n A | B](x: Box[*Ts]) -> Box[A:B:C]: pass\n",
+            ),
+            CandidateStatus::AcceptedFacts,
+        );
+        let bases: Vec<_> = result
+            .iter()
+            .filter(|f| f.kind == "base")
+            .map(|f| f.value.as_str())
+            .collect();
+        assert_eq!(bases, ["*bases", "Box[A BitOr B]"]);
+        assert!(result
+            .iter()
+            .any(|f| f.kind == "parameter_annotation" && f.value == "Box[[*Ts]]"));
+        assert!(result
+            .iter()
+            .any(|f| f.kind == "return_annotation" && f.value == "Box[<Slice>]"));
+        assert!(result.iter().all(|f| f.kind != "call"));
+        for text in [
+            "def f(x: *Ts): pass\n",
+            "item: *Ts\n",
+            "def f() -> *Ts: pass\n",
+        ] {
+            let result = facts(text, CandidateStatus::UnsupportedSyntax);
+            assert_eq!(result.len(), 1);
+        }
+    }
+
+    #[test]
+    fn policy14_observed_continuations_tabs_and_semantic_spans() {
+        for newline in ["\n", "\r\n"] {
+            let text =
+                format!("def f(x:\tA \\{newline}\t| B) -> A \\{newline}\t| B: pass{newline}");
+            let result = facts(text, CandidateStatus::AcceptedFacts);
+            for (kind, span) in [
+                ("parameter_annotation", (1, 2)),
+                ("return_annotation", (2, 3)),
+            ] {
+                let fact = result.iter().find(|f| f.kind == kind).unwrap();
+                assert_eq!(fact.value, "A BitOr B");
+                assert_eq!((fact.line, fact.end_line), span);
+            }
+        }
+        let result = facts("def f(x: A \\\n): pass\n", CandidateStatus::AcceptedFacts);
+        let annotation = result
+            .iter()
+            .find(|f| f.kind == "parameter_annotation")
+            .unwrap();
+        assert_eq!((annotation.line, annotation.end_line), (1, 1));
+    }
+
+    #[test]
+    fn policy14_invalid_join_payloads_and_unbracketed_newlines() {
+        for text in [
+            "def f() -> A \\\0 | B: pass\n",
+            "def f() -> A \\ \n | B: pass\n",
+            "def f() -> A\n | B: pass\n",
+            "item: A\n | B\n",
+        ] {
+            let sources = [source(text)];
+            let report = extract_fact_candidates(&sources).unwrap();
+            assert!(
+                matches!(
+                    report.files[0].status,
+                    CandidateStatus::UnsupportedSyntax | CandidateStatus::SyntaxError
+                ),
+                "{report:?}"
+            );
+            assert_eq!(report.facts.len(), 1);
+        }
+    }
+
+    #[test]
+    fn policy14_header_rendering_and_work_are_bounded() {
+        let value = std::iter::repeat_n("Member", 48)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let text = format!("def f(x: {value}): pass\n");
+        let result = facts(&text, CandidateStatus::AcceptedFacts);
+        let annotation = result
+            .iter()
+            .find(|f| f.kind == "parameter_annotation")
+            .unwrap();
+        assert!(annotation.value.len() <= 512);
+        assert!(annotation.value.contains("..."));
+        assert_eq!((annotation.line, annotation.end_line), (1, 1));
+        let sources = [source(text)];
+        let report = extract(
+            &sources,
+            Limits::default(),
+            FactLimits {
+                working: 1024,
+                ..FactLimits::default()
+            },
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(report.files[0].status, CandidateStatus::ResourceLimit);
+        assert_eq!(report.facts.len(), 1);
     }
 }

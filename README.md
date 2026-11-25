@@ -43,8 +43,14 @@ The [Python completion ledger](docs/python-analysis.md#completion-contract-and-r
 defines six completion gates. Its first broad milestone adds core containers,
 operators/indexing, call-free defaults and ordinary conditional/loop/context-manager
 suites; that bounded coverage is not full Python compatibility or cutover approval.
-G2 work adds exception paths, generalized targets, unpacking and call forms, while
+G2 work adds exception paths, generalized targets, unpacking/call forms and
+lambda/comprehension/generator-expression and await/yield/walrus traversal, while
 the remaining generic inventory and production migration gates stay open.
+An integrated larger batch adds structural matching, Python 3.12 generic declarations
+and type aliases, broad call-free headers, and reviewed import/layout forms together.
+A further lexical batch adds redacted escaped strings/bytes, numeric-boundary
+validation and f-string descendant traversal. Parser feasibility remains a separate
+explicit blocker; no grammar fork or replacement has been adopted.
 See the [Python parity gates](docs/python-analysis.md#native-migration-parity-foundation).
 Release/history review remains separate—not a reason to add codebase-specific
 rules to the engine or claim complete application understanding.

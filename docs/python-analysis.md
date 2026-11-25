@@ -73,9 +73,9 @@ The finite completion ledger is:
 | Gate | Outcome and required acceptance | State |
 | --- | --- | --- |
 | P1-G1 | Generic expression and ordinary-body coverage: containers/operators/indexing, call-free defaults, conditions, loops and context managers; hidden calls/warnings, owner restoration, spans and one counted walk remain exact. | Implemented and locally validated for the bounded G1 subset below |
-| P1-G2 | Close the generic visitor inventory: remaining statements, targets/writes/imports, arbitrary callees/splats, comprehensions/lambdas/generators, await/yield/walrus, all headers and literal/identifier forms. Every target-version node has a normalization/traversal rule and cross-family oracle cases. | In progress: exceptions, generalized targets/unpacking/calls locally validated; remaining inventory open |
+| P1-G2 | Close the generic visitor inventory: remaining statements, targets/writes/imports, arbitrary callees/splats, comprehensions/lambdas/generators, await/yield/walrus, all headers and literal/identifier forms. Every target-version node has a normalization/traversal rule and cross-family oracle cases. | In progress: broad traversal and ordinary-literal/f-string subset locally validated; remaining header/identifier and AST-only pattern inventory open |
 | P1-G3 | Preserve every existing discovery/framework side output: decorators, CLI/job/API entry facts, route diagnostics and FastAPI host/prefix/include/mutation metadata, including aliases and literal-retention limits. | Pending |
-| P1-G4 | Close grammar/version/encoding/failure differences: original-byte digests, decoding/cookies, physical layout and exact observable parse diagnostics. No unexplained valid-file rejection or invalid-file acceptance in the approved compatibility suite. | Open compatibility blockers |
+| P1-G4 | Close grammar/version/encoding/failure differences: original-byte digests, decoding/cookies, physical layout and exact observable parse diagnostics. No unexplained valid-file rejection or invalid-file acceptance in the approved compatibility suite. | Blocked: grammar correction and bounded Ruff policy/adapter experiment did not establish a compatible native replacement; retain the production helper and close this experiment |
 | P1-G5 | Integrate distinct native identity, evidence/snapshots, CLI/library dispatch, workflow revalidation and capabilities. Preserve old-save reading/rendering; rediscovery invalidates stale claims. Native operation must not probe Python. | Pending; public migration design required |
 | P1-G6 | Existing-engine usefulness and operational/cutover acceptance: class/callable/API/network/services views, adapter proofs, saved-source reuse, supported platforms/toolchain/package/resource checks, then explicit replacement approval. | Pending |
 
@@ -104,6 +104,11 @@ unknown grammar nodes must not be silently ignored. The one counted CST walk may
 build bounded semantic events for later processing, but must not be replaced by
 an uncounted traversal or source rescan.
 
+Implementation and handoff use larger, cross-family batches. Within a batch,
+disjoint implementation ownership and focused tests remain incremental, but shared
+Cargo work is serial and the broader gates/cache cleanup happen at one integrated
+checkpoint. Adding one more syntax node is not itself a delivery milestone.
+
 Source order is sufficient only where proven equivalent to helper visitation.
 Header/decorator calls require explicit AST-order scheduling before admission:
 body imports can affect later-visited return/decorator calls in the helper. Do not
@@ -119,6 +124,10 @@ enable these calls merely because their shapes can be rendered.
   A further AST-only discrepancy is the standalone starred conditional root
   `*(a if ready() else b)`: the Python oracle constructs an AST, while the pinned
   grammar rejects it. That explicit module-only rejection is not counted as parity.
+  Ungrouped chained-subscript/member annotation spellings such as
+  `def f(x: T[A][B]) -> T[A][B]: pass` are another explicit AST-positive/native
+  syntax-error case. Grouped equivalents are separately tested as accepted. These
+  differences remain parser-feasibility work, not permission to ignore ERROR nodes.
 - Decide encoding coverage explicitly. The private candidate currently rejects all
   effective cookies, even UTF-8, while the production byte parser supports more.
   A narrower production contract needs an explicit decision, not a silent migration.
@@ -137,6 +146,295 @@ Implementation proceeds through G1, G2 and G3; grammar feasibility
 is tracked from the start, not postponed until cutover. G4 must close before G5 can
 be accepted as a replacement, and G6 is the final stopping gate. New analysis
 features or later Python-version lanes are separate work after these gates.
+
+#### Parser-feasibility checkpoint and stop decision
+
+A bounded isolated prototype used the installed Tree-sitter CLI **0.26.11**, native
+JavaScript runtime and ABI **15**, cached Python grammar **0.25.0** at revision
+`293fdc02038ee2bf0e2e206711b69c90ac0d413f`, and runtime **0.25.10**. Generated C
+compiled with the existing C compiler, and language installation/controlled parsing
+worked against that pinned runtime. The shipped parser's generator provenance was
+0.25.9: regenerated parser-C bytes changed, even though grammar/node-types JSON and
+the 20 tested CST structures/acceptance results were unchanged. This is bounded
+compatibility evidence, not general generator equivalence or fact parity.
+Recorded SHA-256 provenance: upstream grammar
+`48bb681fdcc51784077b7d2cbc138a1994309400d32e4ac74fcd304d9fe8ad81`, shipped parser C
+`a895f10b3cf7b2608f3283b43cd5cfed70971c7ee4a0136abbaaccbc4a7a25e0`, and regenerated parser C
+`543ece58a3968522f2515f6c9a5bd7086cc25fac747e5ed209c3be5a0813f2f9`.
+
+The correction attempt did **not** establish a suitable patched parser:
+
+| Family | Observed prototype outcome |
+| --- | --- |
+| Nested import layout | Simple variants parsed; an AST-positive comment-containing nested variant rejected. A scanner-only dedent guard produced no improvement. |
+| Standalone starred conditional/lambda roots | AST-positive forms still rejected; simple standalone stars and call-argument controls parsed. |
+| Ungrouped chained annotations/alias RHS | Chained-subscript/member forms still rejected; grouped/simple/generic declaration controls parsed. |
+| Python-2 statements | Python 3 AST rejected while the grammar accepted; collector/failure mapping still needs explicit closure. |
+
+The combined grammar proposal stopped after three successive generation conflicts
+(splat/collection, splat/as-pattern, primary/generic-type). It was never compiled or
+tested as a corrected parser. The separately compiled scanner-only patch changed
+none of the tested results and must not be integrated on this evidence. No registry,
+workspace dependency, parser source, global configuration or production default
+was changed. All copied/generated sources and test libraries were deleted after
+their processes stopped.
+
+**Decision at that checkpoint:** stop unbounded correction-fork investment and do
+not begin substantial G3 integration against an assumed-correct frontend. The next
+architectural checkpoint was a separately approved native AST-parser evaluation,
+now recorded below. Reusable token-local literal validation may proceed; source
+rewriting, inserted grouping, recovery reparses and ignored ERROR nodes are not
+substitutes for compatible parsing.
+
+Read-only candidate screening identified Ruff **0.12.0**, revision
+`87f0feb21a1af67195bebf94d811770393f9f447`, as a possible Rust-1.89-compatible
+evaluation lane (declared workspace MSRV 1.85). Its parser is an unpublished
+workspace crate. The subsequent isolated evaluation is recorded below; it does not
+establish full AST/fact compatibility. Current Ruff main exceeds the project's
+compiler baseline.
+RustPython Parser **0.4.0** is separately packaged and declares an older MSRV, but
+source screening found pending PEP 701 handling and surrogate-value replacement;
+it is not an unqualified full-3.12 solution. Its default bigint backend also requires
+license review rather than an MIT-only assumption.
+
+The lexical batch performed read-only screening, not candidate builds. Subsequent
+explicit approval covered one isolated, exactly pinned Ruff source/dependency
+retrieval, license/MSRV/feature review, locked offline build and compatibility
+matrix using existing tools. That evaluation did not authorize toolchain
+installation, repository adoption, public request/schema changes or a production
+switch. No candidate dependency or parser source was added to the product.
+
+#### Isolated Ruff evaluation and next decision
+
+The approved evaluation used upstream tag **0.12.0**, verified at revision
+`87f0feb21a1af67195bebf94d811770393f9f447`. Provenance SHA-256 values were:
+
+| Input or inventory | SHA-256 |
+| --- | --- |
+| Source archive | `c92776b2ecf7f212777a23f165d49f8950fcc40da38b48f770577a8a24788b81` |
+| Upstream lockfile | `ccc843838d16f203d18a3410dd120e72e750a89ee42164145ae9cbf181fb6f47` |
+| Pruned probe lockfile | `9c9807c1e45cb16fb8626fe59a5b90d516190cb47851be15512649bfcc700fb0` |
+| Selected version/feature inventory | `aa9ea3a106f337c043ab95787896cf2c28383a9233d1471e20c46b0a25cb8f26` |
+
+Archive paths and entry types were checked before extraction; one validated
+in-tree corpus symlink was omitted. The temporary probe used path dependencies on
+`ruff_python_parser`, `ruff_python_ast` and `ruff_text_size`, plus
+`serde_json = "=1.0.140"`. Its closure contained **53 upstream packages plus the
+probe**. Retained upstream lock entries matched versions, sources and checksums;
+selected missing packages were fetched without substituting newer versions. The
+Ruff crates had no enabled features; serde_json used default/std features.
+
+The probe built with **Rust 1.89.0 on macOS arm64**, `RUSTUP_AUTO_INSTALL=0`,
+locked/offline resolution, two jobs, line-table-only debug information and no
+incremental compilation. It used the existing project target directory, not a
+second build cache. Ruff declared workspace MSRV **1.85**, but 17 dependency
+manifests lacked an MSRV declaration. A successful 1.89 build is not proof of the
+declared lower MSRV or of other supported platforms. License metadata review found
+no declared copyleft in the retained closure; Unicode notices and upstream
+RustPython notices still require preservation/review before redistribution. This
+was not full source, binary or legal clearance.
+
+The comparison oracle was **Python 3.12.11**, with Unicode data **15.0.0** and
+integer digit limit **4300**. Ruff was explicitly targeted at **PY312**. Candidate
+acceptance required both parse success and an empty separate unsupported-version
+diagnostic channel: no recovered or errored tree counted as accepted.
+
+Of **114 independently synthetic cases, 105 matched and nine differed** under the
+probe's selected comparisons:
+
+| Category | Differences |
+| --- | --- |
+| Acceptance (3) | Python AST accepts duplicate call keywords (`f(x=1, x=2)`), while Ruff rejects with `DuplicateKeywordArgument`; Python rejects a nonzero 4301-digit decimal integer, while Ruff accepts; Ruff accepts Unicode-16 identifier U+1C89, outside this oracle's Unicode-15 repertoire. |
+| Ranges (3) | Ruff's function range includes decorators rather than beginning at `def`; its direct generator-argument range omits the parentheses; its typed-assignment range omits an ending type comment included by the comparison AST. |
+| Literal/value API (3) | Escaped lone surrogates `\ud800` and `\udfff` become replacement U+FFFD; the large-hex case exposes raw spelling rather than a decoded big integer. The last difference is an API representation mismatch, not a demonstrated numeric-value error. |
+
+The tested Tree-sitter rejection families and PEP 701/`:=` f-string call
+distinctions worked in Ruff. The compared AST inventory had no differences, but
+excluded f-string wrapper/constant representation; neither that result nor the
+105 matching cases establishes full AST, fact, diagnostic or Python-version
+parity. The probe imposed a 1 MiB input gate, not a hard memory/resource sandbox.
+Original-byte decoding/cookies and the complete product resource contract remain
+separate work.
+
+**Decision: do not adopt unmodified Ruff 0.12.0 as a drop-in replacement.** Its
+syntax coverage makes it a credible candidate for one further bounded experiment,
+not permission to relax the AST contract or proceed with G3 integration. The
+duplicate-keyword check is a post-argument-construction validator; a dedicated
+AST-only parser policy or reviewed upstream patch may be a finite correction.
+Blindly suppressing errors or consuming recovered trees is not that policy.
+
+The recommended next checkpoint was one isolated AST-only-policy plus
+compatibility-adapter experiment at this same pin. It was subsequently approved
+and completed as recorded in the next section, with these intended gates:
+
+1. Prove duplicate-keyword AST acceptance without weakening genuine syntax/version
+   rejection or accepting recovery output.
+2. Prove bounded source-backed literal handling, including lone surrogates and
+   large integers, plus Python-3.12 Unicode/digit admission gates.
+3. Prove explicit token/range projections for the three observed span differences
+   and test the corrections together against the full probe matrix and focused
+   adversarial controls.
+
+Stop if those corrections require broad grammar changes, unsound diagnostic
+waivers or an unbounded compatibility layer. Even a successful experiment only
+justifies a separate parser-adoption design; G2–G6 and explicit production cutover
+approval remain necessary. No public backend/default, product manifest or product
+lockfile changed in this evaluation.
+
+Temporary source, archive, probe and reports were removed after processes stopped.
+The hashes and aggregate findings above are retained as the evaluation record,
+not as a checked-in reproducible harness. Downloaded Cargo registry dependencies
+remain in the normal reusable cache, outside project-cache cleanup scope.
+
+#### Bounded AST-only-policy and adapter experiment: completed, not adoption-ready
+
+The separately approved experiment retained the same Ruff **0.12.0** commit,
+Python **3.12.11** / Unicode **15.0.0** / decimal limit **4300**, and explicit
+**PY312** parser target. No product source, dependency, manifest, schema, backend
+identity or default changed. Scratch-only code and generated tables were removed
+after the probe processes stopped. This record describes selected synthetic
+comparisons, not a retained executable harness or complete fact parity.
+
+**Policy result.** Two scratch parser files, `parser/options.rs` and
+`parser/expression.rs`, added a default-false `ast_only` option and guarded the
+existing duplicate-keyword check at `validate_arguments`:
+
+```rust
+if !self.options.ast_only && !all_arg_names.insert(arg_name) {
+    self.add_error(
+        ParseErrorType::DuplicateKeywordArgumentError(arg_name.to_string()),
+        range,
+    );
+}
+```
+
+This selects a validation policy before emitting the diagnostic; it does not
+filter diagnostics after parsing. The default policy retained rejection. Both
+ordinary parse errors and the separate unsupported-version errors still had to
+be empty before any AST traversal. Repeated keywords around unpacking,
+normalization-equivalent names and repeated class-header keywords were admitted
+under the experimental policy. Malformed arguments, positional-after-keyword,
+invalid generator arguments and later-version syntax controls remained rejected.
+This establishes only a narrow duplicate-keyword correction, not comprehensive
+AST-only semantics or an upstream-supported API.
+
+**Adapter result.** A Python prototype consumed Ruff AST/token ranges; it did not
+use Python AST reparsing or `literal_eval` to obtain candidate values. It proved
+finite corrections, not an implemented native Rust compatibility layer:
+
+- Source-backed ordinary/raw/bytes/adjacent literal decoding represented strings
+  as integer code-point sequences, preserving lone surrogates separately from
+  U+FFFD. Tested escapes included octal, hex, Unicode, unknown escapes, physical
+  newline normalization and escaped joins. Named escapes used only three entries:
+  `LATIN CAPITAL LETTER A`, `LATIN SMALL LETTER SHARP S` and `NULL`.
+- Integer reconstruction selected the source radix and accumulated digits. The
+  decimal admission gate counted non-underscore digits and rejected nonzero
+  decimal integers beyond 4300 digits; all-zero/base-prefixed forms were separate.
+  A deliberate 10000-digit reconstruction cap was not Python compatibility.
+- Oracle-generated Unicode-15 raw identifier admission tables had 136323 start
+  and 139463 continuation code points. Ruff supplied whole-name normalization;
+  semantic-name comparisons covered normalization-sensitive cases. An auxiliary
+  3630-entry per-code-point NFKC map was not a whole-string normalizer. Generated
+  tables are experiment evidence, not an approved distributable data strategy.
+- Balanced token projections corrected definition starts past decorators while
+  retaining `async`, selected generator parentheses, and extended applicable
+  assignment type-comment ends. Controls included multiline syntax, nested
+  grouping, comments, semicolons, UTF-8 and CRLF. These AST byte-range comparisons
+  are not all observable product differences: the helper emits line/end-line
+  evidence, and has no standalone generator-span fact.
+
+The reconstructed matrix was **169 cases**, not a rerun of the deleted 114-case
+suite. Counts below compare uncorrected and combined-policy/adapter behavior on
+this new matrix only; they are not a general compatibility percentage.
+
+| Category | Cases | Before: matching / differing | Combined: matching / differing |
+| --- | --- | --- | --- |
+| Keywords and malformed arguments | 20 | 13 / 7 | 20 / 0 |
+| Grammar and version controls | 26 | 26 / 0 | 26 / 0 |
+| AST-only versus compile controls | 12 | 11 / 1 | 12 / 0 |
+| Integer and digit controls | 17 | 9 / 8 | 15 / 2 |
+| Identifier controls | 24 | 19 / 5 | 24 / 0 |
+| String/bytes literals | 36 | 27 / 9 | 34 / 2 |
+| F-strings | 8 | 8 / 0 | 8 / 0 |
+| Ranges/type comments | 26 | 4 / 22 | 24 / 2 |
+| **Total** | **169** | **117 / 52** | **163 / 6** |
+
+All cases compared acceptance. Further checks were category-specific: decoded
+string/integer values, normalized names, selected statement/generator ranges, or
+call/name/named-expression inventories. F-string checks did **not** compare
+decoded literal segments, debug-text synthesis, wrapper representation or
+constant merging. No synthetic source was executed; compile controls only
+distinguished AST acceptance from compilation.
+
+The complete six remaining differences in those selected comparisons were:
+
+| Synthetic case | Python oracle | Combined prototype | Interpretation |
+| --- | --- | --- | --- |
+| `x='\N{SNOWMAN}'` | Accepts and decodes | Unsupported named escape | Deliberate finite-table omission |
+| `x='\N{BOM}'` | Accepts name alias | Unsupported named escape | Deliberate finite-table omission |
+| `x=0x` followed by 10001 `f` digits | Accepts | Reconstruction limit | Deliberate prototype cap |
+| `x=` followed by 10001 zeros | Accepts | Reconstruction limit | Deliberate prototype cap |
+| `# type: int` followed by newline and `x=1` | Rejects | Accepts | Genuine acceptance gap |
+| `pass # type: int` | Rejects | Accepts | Genuine acceptance gap |
+
+The type-comment comparison is required: production calls
+`ast.parse(..., type_comments=True)`, not the default mode. Extending assignment
+end ranges does not enforce valid type-comment placement. The first four cases
+show incomplete prototype domains, **not inherent Ruff infeasibility**.
+
+**Unproved obligations.** Rust `String`/`char` cannot preserve lone surrogate code
+points. A code-point or explicitly specified alternate representation is feasible,
+but the Python prototype does not establish its Rust integration, escaping,
+equality, limits or identity serialization. Replacing surrogates with U+FFFD is
+lossy, and storing literal backslash escape text is not an equivalent semantic
+representation. Full named Unicode data/aliases, native f-string values,
+original-byte decoding/cookies, complete diagnostics and fact parity remain
+unproved. The prototype's 1 MiB check happened after parsing: it is not a preparse
+resource gate or hard memory sandbox. Platform, supported-interpreter and product
+resource acceptance remain separate.
+
+**Build and provenance.** The existing Rust **1.89.0** compiler built the isolated
+53-upstream-package closure plus probe with `RUSTUP_AUTO_INSTALL=0`,
+`--locked --offline --jobs 2`, low-disk profiles and the existing project target.
+There were no tool installations, dependency downloads, substitutions or unlocked
+Cargo invocations. Initial locked attempts rejected incomplete isolation/lock
+reconstruction before compilation. Scratch manifests omitted dev/unused optional
+dependencies while preserving selected upstream versions/checksums. The upstream
+lock hash matched the preceding evaluation. Only macOS arm64/Rust 1.89 was built;
+the declared 1.85 MSRV and other platforms were not verified.
+
+The commit-addressed codeload archive had a different hash from the prior archive;
+the initial strict comparison failed and that attempt was cleaned. A subsequent
+attempt explicitly recorded the new archive hash and verified the upstream tag
+commit and lockfile. The old archive was not retained, so no byte-for-byte archive
+equivalence is claimed. Paths/types were checked and symlinks omitted. Recorded
+SHA-256 values for the completed experiment were:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Commit-addressed source archive | `e4613ad9fe6f7293510586649aab788e10610ab80fe9dd509ba7ac2364413631` |
+| Reconstructed probe lockfile | `9e2eb5608266cd32bae6eaef87aea0e41e2c01b82d98ed63e0f5a2c6fcb6cd25` |
+| Two-file policy diff | `d21e3afc1871fc478ddcebe04b9bf58c62cea38342cad0ee67a7b7ee8f0c2cdc` |
+| Generated Unicode table blob | `4c23e0acc9a15d573a67dd6c29067c70c857b8b3f3e8fd50a27949137528cd62` |
+| Canonical 169-case matrix tuples | `fe028289d3cc15e4d3c5de45297dd4aaf814c57163316cf769a98adb6b3ed06a` |
+| Adapter | `4ceb82aa7beaa0ff60b726e6ff9fc40072edf65ba9c0e86feef22f908bdcd6fd` |
+| Final probe | `cb0a2553908992dcfd823a1c8b147a75bb52ecbe722b63b37f03d6fc5da6a9e5` |
+| Final comparison script | `582c080ef4e20b137f3ae7016ee9503e5185966611c9a48d31d0b74dc7be090b` |
+| License/MSRV inventory | `b4462af77ed45fb31f9c61807d0640243911dbe0f6dd37a3d5c07a447b9edd23` |
+
+Selected manifest licenses again showed no declared copyleft, not redistribution
+clearance. Unicode/RustPython notices, generated-data provenance, unpublished
+workspace-crate isolation and policy-patch maintenance remain adoption obligations.
+Seventeen selected dependency manifests lacked declared MSRV.
+
+**Stop decision:** retain the production Python helper and close this experiment.
+The bounded investigation demonstrated localized corrections but did not establish
+a complete native adapter or product parity; do not proceed to parser adoption on
+this evidence. An independent read-only architecture review agreed with this
+scope. This is neither approval for another parser-shopping/probe loop nor proof
+that native compatibility is impossible. Reopening native replacement requires an
+explicit product/architecture decision about remaining compatibility and
+maintenance costs, not another syntax-slice milestone. G2–G6 remain open.
 
 P1 has a **private captured-source AST parity harness**, a native parse-only
 front-end and bounded class/function/header/body/import candidates, not a production native Python
@@ -207,8 +505,21 @@ alias order, malformed grammar, hidden calls, metadata guards, isolation and rep
 Ten generalized-target cases add chained/destructuring assignments, AST-root write
 eligibility, grouped annotations, neutral target traversal, shallow metadata guards,
 arbitrary callees/receivers, argument grouping/unpacks, malformed forms and replay.
+Ten closure-expression cases add lambda parameter roles and defaults, list/set/dict
+comprehensions, generator expressions and direct generator arguments, neutral
+binders/aliases, opaque budgets, hidden descendants, malformed operand roles,
+exception aliases, resource isolation and replay.
+Ten suspension/named-expression cases add exact Await/Yield/YieldFrom/NamedExpr
+shapes, syntax roles versus grouping, AST-only contexts, await/power precedence,
+nonwrites and alias neutrality, opaque budgets, defaults, guards and replay.
+Twenty-two larger-batch cases compare matching/pattern families and guards, generic
+declarations/type aliases, call-free broad headers, star/future imports, semicolons,
+continuations, reviewed tabs, combined ownership/aliases, grammar boundaries and replay.
+Twenty-two lexical cases compare ordinary/numeric spellings and f-string structure,
+PEP 701 fields/specifications, decoded-payload redaction, decimal conversion limits,
+pattern boundaries, malformed inputs, hidden calls, resource rollback and replay.
 
-All ninety-eight oracle cases are **ignored in the ordinary suite**. Run the gate explicitly
+All one hundred and sixty-two oracle cases are **ignored in the ordinary suite**. Run the gate explicitly
 with an absolute path to an installed, trusted Python >=3.12:
 
 ```sh
@@ -290,7 +601,7 @@ The accepted file subset is deliberately small:
   with bodies containing supported statements. Async declarations do not imply
   support for `await` or asynchronous execution analysis.
 - Plain undecorated classes with single-line `class Name:` or explicitly empty
-  `class Name():` headers, plus bounded named-reference bases, ordinary methods,
+  `class Name():` headers, plus reviewed multiline/generic call-free headers, ordinary methods,
   and mixed nested class/function declarations. Admitted statements use their
   innermost lexical definition as owner. Supported annotated assignments use
   the bounded annotation grammar without inferring types or new runtime bindings.
@@ -300,16 +611,17 @@ The accepted file subset is deliberately small:
   names/order/kinds only.
 - ASCII class/function/parameter names. Unicode paths and supplied module metadata are
   preserved exactly; identifier normalization is not approximated.
-- Space-based indentation, LF/CRLF and an optional leading UTF-8 BOM. Parameters
-  may span lines, but a multiline header with an inline body is not supported.
+- Space-only or pure-tab indentation lanes, LF/CRLF, token-separator tabs, reviewed
+  explicit continuations and an optional UTF-8 BOM. Simple semicolon lists and
+  multiline declaration headers with inline simple bodies are admitted.
 
-Decorators, type parameters/comments, unreviewed base expressions, metaclass
-keywords, unreviewed annotation/assignment/import and compound-statement forms, and
+Decorators, call-bearing declaration headers/bounds, type comments, later-version
+type-parameter defaults, unreviewed lexical/layout and other syntax forms, and
 all other unmodeled forms reject the **whole file**. Calls/writes/returns are
 accepted only through the documented body slice; calls in declaration headers
 remain unsupported. Calls in admitted statement conditions/iterables/contexts are supported.
 So do non-ASCII identifiers,
-semicolons, explicit line continuations, NUL, bare CR formatting and unsupported
+NUL, bare CR formatting, mixed indentation styles and unsupported
 whitespace outside comments. Some rejected forms are valid Python; rejection means
 this candidate policy cannot prove whole-file fact parity, not that the AST helper
 must reject them. Later syntax/resource errors are not hidden by an earlier
@@ -362,31 +674,38 @@ introduced `python-native-private-facts-5`; alias-aware warnings advance it to
 `python-native-private-facts-8`. G1 core expressions and ordinary suites advance it
 to `python-native-private-facts-9`; the G2 exception/neutral-statement slice advances
 it to `python-native-private-facts-10`. Generalized targets/unpacking/calls advance
-it to `python-native-private-facts-11`, with the expression
-implementation included in its fingerprint. Production identity is unchanged.
+it to `python-native-private-facts-11`; lambda/comprehension/generator-expression
+traversal advances it to `python-native-private-facts-12`; await/yield/named-expression
+traversal advances it to `python-native-private-facts-13`. The larger match/generic/
+import-layout batch advances it to `python-native-private-facts-14`; ordinary-literal
+and f-string traversal advances it to `python-native-private-facts-15`. Expressions,
+patterns and `literals.rs` participate in its fingerprint. Production identity is unchanged.
 
-Supported annotations are ASCII names/dotted names, safe quoted text, `None`,
+The initial annotation subset used ASCII names/dotted names, safe quoted text, `None`,
 ellipsis, and reference-based generics with nested annotations or tuple slices.
 For example, `list[Item]`, `dict[str, list[Item]]` and `tuple[Item, ...]` describe
 syntax only, not resolved types or runtime identities. Grouping is normalized:
 `T[A,]` renders `T[[A]]`, whereas `T[(A)]` renders `T[A]`. Standalone tuples,
-unions, slices, starred arguments, list/set/dict expressions, subscripted callees
-such as `T[A][B]`, and arbitrary expression nodes remain unsupported.
+unions, slices, starred arguments and other core expressions were initially
+excluded. Policy 14 broadens call-free header/annotation normalization below;
+raw grammar discrepancies and lexical restrictions remain explicit.
 
 The original literal-default slice admitted only reviewed constants and one numeric
 sign. G1 now admits call-free versions of the core expressions below, including
 names such as `DEFAULT`, references, containers, operators and indexing. Constants
 still render `<literal>`; unary expressions render `<UnaryOp>`, not their values.
-Numeric tokens remain limited to 1,024 bytes; decimal spellings are
-limited to 512 digits and checked lexically for Python-compatible bases, underscores
-and exponents, without converting values.
+Policy 15 removes the earlier 1,024-byte/512-digit subset limits. Borrowed scans
+check Python-compatible bases, underscores and exponents without converting values.
+The isolated Python 3.12 baseline's 4,300-digit conversion limit applies only to
+nonzero decimal integers; all-zero integers and base-prefixed/float/imaginary forms
+take their separately tested lanes. Existing source, traversal and working limits
+still apply, and long scans are cancellable.
 
-Strings use no backslashes, including raw strings. Reviewed prefixes are absent,
-`r`, `u`, `b`, `br` or `rb`, case-insensitively; bytes bodies must be ASCII.
-Adjacent tokens must all be text or all bytes. Ordinary/triple-quoted forms are
-supported, but single-delimiter strings cannot contain physical LF/CR. Formatted
-strings, template strings, mixed text/bytes and unreviewed escapes/prefixes reject
-the whole file. No new literal-retention exception is introduced.
+Policy 15 broadens strings/bytes to reviewed escaped and raw spellings, ordinary
+and triple delimiters, physical joins, and f-strings described below. Bytes source
+payloads remain ASCII; text/bytes mixing and later-version template strings reject.
+Named Unicode escapes still need separately approved versioned name data. No new
+literal-retention exception or runtime decoding/evaluation is introduced.
 
 Each shape invocation uses the helper's shared 80-node expression allowance,
 depth 12, first 16 tuple elements and 512-byte UTF-8 clipping at every rendered
@@ -433,8 +752,9 @@ does not reset extraction's shared deadline, traversal, output or working limits
 Grouping preserves AST expression spans separately from complete statement spans:
 an assignment can end after its nested call's closing parenthesis.
 
-Unreviewed target/augmented/delete forms, assignment expressions, `await`,
-yield/generators, lambdas and comprehensions remain unsupported. Calls in annotations/defaults still reject
+Unreviewed target/augmented/delete and other syntax forms remain unsupported.
+Await/yield/named expressions follow the role-sensitive policy below, not a blanket
+expression allowance. Calls in annotations/defaults still reject
 the file. Whole-file rollback and later syntax/resource-error precedence remain.
 Annotated assignments are admitted only through the bounded policy below, not as
 an exception to target, expression or special-metadata guards.
@@ -499,9 +819,9 @@ to them. Existing raw/fresh-rendered special-callee guards still apply everywher
 
 This conservative subset permits supported imports and calls together while
 keeping constructor/framework side outputs outside the admitted boundary.
-Star imports, unparenthesized trailing commas, `__future__` statements,
-inline import suites, non-ASCII identifiers, explicit continuations and unsupported
-whitespace remain excluded. Token descriptors come from the same counted observer
+Policy 14 adds star/future imports, inline suites, semicolons and reviewed explicit
+continuations. Unparenthesized import trailing commas, non-ASCII identifiers and
+other unreviewed forms remain excluded. Token descriptors come from the same counted observer
 walk; there is no second parse, source read, module import or source tokenizer.
 Descriptor capacity, canonical text, name lists and JSON/ID temporaries are charged
 before allocation, with shared cancellation and transactional limits unchanged.
@@ -581,7 +901,8 @@ allocate the function-signature buffer or bypass the counted traversal/deadline.
 
 The initial class slice excluded bases and annotated assignments; the next slice
 below admits only named-reference bases and supported annotations. Metaclass
-keywords, decorators, type parameters and class-header calls still reject the entire
+keywords and type parameters are generalized by policy 14 below. Decorators and
+class-header calls still reject the entire
 file. Returns require an immediately enclosing function; a class nested in a
 function does not inherit return permission. This is the candidate's deliberately
 narrow policy, not a claim that `ast.parse` performs compilation validation.
@@ -623,9 +944,9 @@ and assignment annotations use separate implicit-continuation depths; assignment
 newlines require actual brackets, not the presence of a colon. Every descendant
 is validated even if rendering clips or exhausts its shape budget.
 
-Generic/subscripted, starred, keyword/metaclass, literal and call-valued bases;
-multiline class headers; unions/unreviewed annotation
-expressions; and calls anywhere inside annotations remain excluded. Constructor,
+Policy 14 generalizes call-free bases/keywords and annotation forms, including
+reviewed multiline headers. Call-valued bases and calls anywhere inside annotations
+remain excluded. Constructor,
 include-router and router-mutation guards apply to annotated statements too:
 annotation-only `self.router: T` or `self.prefix: T` cannot silently lose the helper's
 extra metadata. Unsupported syntax, later errors and resource exhaustion roll back
@@ -652,7 +973,8 @@ eligible targets instead of being promoted to bindings by their rendered appeara
 Ordinary `if/elif/else`, `while/else`, `for`/`async for`/`else`, and
 `with`/`async with` suites traverse headers and bodies in helper-equivalent order.
 Multiple context items are supported. Loop targets and `with as` binders are
-currently direct ASCII names only; parenthesized context-item lists remain excluded.
+initially direct ASCII names only and are generalized by policy 11 below;
+parenthesized context-item lists remain excluded.
 These constructs create neither definition scopes nor binding/invalidation facts
 for their binders. Branches and loop-else bodies all contribute observed syntax;
 none is claimed to execute. Imports keep the helper's persistent alias behavior.
@@ -664,11 +986,10 @@ comments. New frame high-water storage is charged before allocation and reset pe
 file. Physical keyword/colon placement and clause attachment remain checked rather
 than assumed from grammar acceptance; implicit continuation requires actual brackets.
 
-G1 does not close G2: starred displays/dictionary unpacking, broader call targets
-and splats, complex assignment/loop/context targets, comprehensions/lambdas,
-await/yield/walrus, remaining statements/import forms, full strings/identifiers and
-declaration-header calls remain. G3 metadata and G4 compatibility blockers are also
-unchanged. Grammar-only invalid forms such as comma-only dictionaries and ungrouped
+G1 alone did not close G2; the sections below track the later target, unpacking,
+closure and suspension-expression expansions. Remaining statements/import forms,
+full strings/identifiers and declaration-header calls are still open, as are G3
+metadata and G4 compatibility. Grammar-only invalid forms such as comma-only dictionaries and ungrouped
 conditionals in a conditional's test reject transactionally. Bare tuple statements
 are validated as complete value/comma sequences, not by silently ignoring punctuation.
 
@@ -711,9 +1032,9 @@ last syntax statement, not trailing comments. Exception paths retain existing
 function-only return and loop-body jump boundaries. New progress/normalization
 state is charged through the counted frame/descriptor arenas; cancellation, fact/
 warning/output limits, per-file rollback and later-error precedence remain shared.
-This closed one cohesive part of G2; targets/callees/splats are expanded by policy 11
-below. The remaining inventory includes `match`, comprehensions/lambdas/generators,
-await/yield/walrus, imports, declaration headers and literal/identifier compatibility.
+This closed one cohesive part of G2; subsequent policies expand targets/callees,
+closures and suspension/named expressions. The remaining inventory includes `match`,
+imports, declaration headers and literal/identifier compatibility.
 
 ### G2 generalized targets, unpacking and call forms
 
@@ -770,6 +1091,217 @@ argument grouping reuses descriptor links instead of allocating group vectors.
 One parse/one counted walk, deadlines, per-file facts/warnings rollback and source-
 deleted replay remain unchanged. G2 is still open for the remaining expression,
 statement, declaration-header, import and lexical inventory; production is unchanged.
+
+### G2 lambdas, comprehensions and generator expressions
+
+Policy 12 adds `Lambda`, `ListComp`, `SetComp`, `DictComp` and `GeneratorExp`.
+Each uses the helper's exact opaque `<ASTClass>` shape and consumes just its own
+render node, not its descendants' shape budget. All descendant syntax is still
+validated; every call/warning in lambda defaults/body and comprehension result,
+key/value, target receiver/index, iterable and filters is collected independently.
+An opaque root produces invalidation for an eligible assignment target, while
+calling it or selecting an attribute preserves the existing Call/Attribute-root
+binding rule. No closure is evaluated or inferred to run.
+
+Lambda arguments have their own parameter-role validator: no annotations or tuple
+parameters, direct ASCII names for variadics, valid `/`/`*`/`**` phase ordering and
+positional-default suffixes. Duplicate argument names remain AST-parse-compatible
+rather than being rejected by a compiler-only check. No function, signature,
+parameter/default fact, `<lambda>` owner or alias scope is manufactured. Nested
+defaults stay inside the active expression arena instead of entering the enclosing
+declaration's parameter collector. A surrounding Default mode remains recursively
+call-free, including through every new opaque subtree.
+
+Comprehension targets reuse neutral Store validation and add no binding,
+invalidation or router-mutation hook. Multiple generators, filters and `async for`
+clauses are admitted without runtime async-scope validation. Lambda parameters
+and comprehension binders do not shadow/invalidate the helper's persistent import
+aliases. Their calls retain the enclosing module/class/function owner. This
+preserves helper behavior, not Python runtime closure/comprehension name resolution.
+
+Raw CST wrappers distinguish grouping before aliases are collapsed: unparenthesized
+lambda/conditional iterables or filters, comma-list iterables, bare-star results,
+and unpacking dict-comprehension results remain invalid. Bare lambda operands also
+require grouping in boolean/not operand roles and conditional tests. Legal lambda
+bodies/final-else expressions and explicitly grouped alternatives stay admitted.
+
+A direct generator argument, `sink(item for item in source())`, normalizes to one
+positional `<GeneratorExp>` argument without an ordinary argument-list wrapper or
+extra allocation. It must be the sole unparenthesized argument, with no trailing
+comma. Explicitly grouped generators permit ordinary sibling arguments. Outer
+call spans include the closing delimiter; nested calls retain their own AST spans.
+Conditional/lambda trailing exception-type aliases are normalized without treating
+the handler's name as an expression or visiting aliases inside explicit grouping.
+
+Helper lambda-default/comprehension field order is not runtime order. For the
+currently admitted expression families it cannot change import aliases; independent
+calls and warnings are globally sorted. Source-order descriptor enumeration is
+therefore observationally equivalent here, not approval to enable call-bearing
+declaration headers without their separate scheduling work.
+
+Structural parameter/clause state uses the existing precharged descriptor arena;
+no per-lambda scope, subtree CST traversal, parser invocation or literal copying is
+added. Shared deadlines, rendering/working/output limits, hidden metadata guards,
+whole-file rollback and captured-source replay remain. The following slice adds
+await/yield/walrus; `match`, remaining headers/imports and lexical coverage still
+belong to G2, while G3–G6 are open.
+
+### G2 await, yield and named expressions
+
+Policy 13 adds exact opaque `<Await>`, `<Yield>`, `<YieldFrom>` and `<NamedExpr>`
+shapes. Each consumes one rendering node, without rendering its operands, but all
+descendant calls/warnings remain independently validated and retained. Opaque RHS
+roots invalidate eligible ordinary assignment targets; enclosing Call/Attribute
+roots retain their existing binding rule. No generator, asynchronous execution,
+resumption, or new runtime responsibility is inferred.
+
+The collector supplies finite syntax roles, and descriptors validate raw CST
+wrappers before grouping aliases are resolved. A bare named expression is admitted
+in named-expression roles such as if/while tests, positional arguments, display
+elements, selected comprehension results and subscript items. Ordinary expression
+roles—assignment RHS, return/assert/raise/default/lambda operands, keyword values,
+dict pairs, comprehension iterables/filters, operator operands and slice bounds—
+require grouping. The walrus target is one unparenthesized ASCII name, never a
+general Store target. Its AST traversal adds **no binding, invalidation, attribute,
+router-mutation fact, alias update or lexical scope**; even an imported alias
+rebound by walrus keeps the helper's later diagnostic behavior.
+
+Bare yield is admitted for expression statements and ordinary/annotated/augmented
+assignment RHS. Other expression positions require grouping. Yield has an optional
+star-expression value; yield-from requires one ordinary expression, and its `from`
+is recognized as syntax rather than literal text. These roles do not impose
+compiler/runtime context checks: selected module/synchronous/lambda/comprehension
+and call-free default forms can construct ASTs even if they cannot compile or run.
+Existing private return/loop-jump restrictions remain unchanged.
+
+Await takes a primary operand; bare await/unary/starred and other wider operands
+need grouping where Python requires it. The pinned grammar associates power inside
+await, unlike Python. Bounded descriptor rotation normalizes
+`await left ** right` as `<Await> Pow right`, while `await (left ** right)` stays
+`<Await>`. Right-associative chains, signed exponents, nested await and multiline
+call spans retain the oracle's depth/node-budget behavior. Rotation reuses a charged
+descriptor without another CST walk, synthetic call duplication or reparse.
+
+Defaults stay recursively call-free through all new opaque nodes; bases and
+annotations retain their narrower policies. Hidden constructor/include-router and
+ordinary write-mutation guards remain active. Syntax-role errors roll back the
+file's facts and warnings; admission, counters, shared deadlines, pending/output
+limits, cancellation and captured-source replay remain unchanged. G2 still needs
+`match`, remaining declaration/header/import forms and lexical coverage. G3–G6,
+including the documented parser/encoding blockers and production migration, are open.
+
+### Integrated G2 matching, declarations, imports and layout batch
+
+Policy 14 integrates several coverage families in one validation/handoff batch.
+Structural matching admits all eight pattern AST classes—MatchValue, MatchSingleton,
+MatchSequence, MatchMapping, MatchClass, MatchStar, MatchAs and MatchOr—and their
+reviewed composition. The separately fingerprinted `python_native/patterns.rs`
+validator consumes the same counted events and borrowed spans. Patterns emit no
+facts, bindings, alias changes or scopes. A class pattern is not a call. Subject
+and guard descendants retain ordinary calls/warnings, and case bodies keep the
+current explicit definition owner. Earlier case-body imports affect later guards
+in helper visitation order; captures do not shadow those aliases.
+
+Pattern grammar validation is distinct from Store targets and compiler checks.
+Open sequences require their comma structure, mapping rest and class keyword
+patterns obey their syntactic roles, and signed/complex/string literals retain the
+reviewed lexical policy. A starred match subject must form a comma-bearing tuple;
+named-expression subjects/guards keep their appropriate raw syntax permissions.
+The existing function-only return and definition-bounded loop-jump subset remains.
+
+Python 3.12 `type` aliases and declaration type parameters are now admitted.
+TypeAlias emits no declaration, binding, invalidation, class attribute or alias-table
+update; its RHS uses ordinary body traversal and may contain admitted calls.
+Generic functions/classes retain their usual declaration/signature/header facts,
+with no extra type-parameter facts or scopes. TypeVar bounds/constraints and
+TypeVarTuple/ParamSpec names are validated separately from subscription slices;
+later-version type-parameter defaults remain excluded. Bounds remain recursively
+call-free because function/class bound calls require deferred-header scheduling.
+
+Parameter/return/assignment annotations, class bases and class keyword values use
+broader normalization over the already admitted expression and literal families,
+while rejecting every call descendant. Keyword/metaclass/double-star values emit
+no base facts; only positional bases, including Starred, do. Positional class
+arguments preserve NamedExpr and argument-specific unpacking permissions without
+relaxing keyword values or display unpacking. Multiline headers and inline simple
+bodies preserve exact argument, expression and declaration spans. Grouping is not
+a repair applied to target source: passing grouped annotation fixtures and native-
+rejected ungrouped grammar discrepancies are recorded as different inputs.
+
+Star imports and `__future__` imports emit the existing exact import JSON, including
+literal `*` entries and ordinary absolute spelling-based alias entries. They neither
+expand imported bindings nor stringify future annotations. Inline simple imports,
+parenthesized/continued import lists, simple semicolon lists and a trailing semicolon
+are supported; empty/leading/double semicolons and inline compounds still reject.
+Observed continuation tokens must be exactly backslash-LF or backslash-CRLF. They
+bridge logical syntax rows without extending AST spans or authorizing unrelated
+newlines; the grammar's NUL continuation alternative is never admitted.
+
+Token-separator tabs and pure-tab indentation join the existing pure-space lane.
+Mixed indentation/style files remain explicit subset rejections: the pinned
+scanner's tab handling is not claimed to equal CPython tab-stop/ambiguity behavior.
+Non-ASCII identifiers and encoding changes remain outside this batch. F-strings
+were not admitted by policy 14 merely because a renderer could describe them;
+the following lexical batch adds explicit structural validation and traversal.
+
+Patterns, declaration progress and layout state are charged before allocation,
+share cancellation/deadline/node limits, and reset per file. Unknown nodes still
+fail closed; later syntax/resource errors retain precedence and failed files lose
+facts and warnings together. New oracle modules are independent synthetic source,
+not consumer fixtures. Header calls, decorators/G3 side outputs, remaining lexical
+coverage, parser/encoding decisions and production integration are still open.
+
+### G2/G4 ordinary literals and f-string traversal
+
+Policy 15 shares a borrowed-token lexical validator between expressions and
+pattern literals. Numeric categories are checked without allocating numeric values.
+Ordinary text/bytes validate prefixes, quote/backslash parity, raw/triple forms,
+hex/Unicode widths, physical joins and implicit concatenation. Escaped surrogate
+code points are accepted without converting them to Rust `char`. Unknown escapes
+and oversized octal spellings follow AST acceptance rather than being promoted
+from warnings to errors. Nonraw text `\N{...}` requiring name lookup remains an
+explicit unsupported-data boundary; balanced braces never imply a valid name.
+Raw text and bytes have distinct, tested `\N` behavior. No decoded literal bodies
+enter facts, warnings, identifiers or owned pending payload storage.
+
+Formatted prefixes are classified from validated starts, so `f''` and plain f-string
+text remain `JoinedStr`. Adjacent text/f-string literals promote to `<JoinedStr>`;
+bytes mixing rejects. The renderer consumes one opaque node without visiting its
+children for shape budget, while counted traversal retains every call/warning in
+replacement values, nested f-strings and `format_expression` specification fields.
+Conversions admit only `!s`, `!r`, `!a`; debug/conversion/specification progress is
+validated independently of the grammar's broader token choices.
+
+PEP 701 quote reuse, comments and multiline replacement expressions are covered
+without treating the entire f-string span as an ordinary literal. Short literal
+segments retain their newline rules. Format text is not parsed as code, whitespace
+or delimiters, and field braces are separate from the global expression delimiter
+allowance. Literal segments are validated once through the observed events. A
+lambda colon at raw field lexical depth rejects even when hidden under an implicit
+tuple/conditional; actual expression delimiters preserve valid grouped lambdas.
+
+Call-free headers/defaults remain recursively call-free across every value and
+format specification. JoinedStr RHS roots invalidate eligible ordinary targets;
+enclosing Call/Attribute roots preserve their usual binding eligibility. No f-string
+scope, alias update or literal-retention permission is introduced. Hidden G3
+constructor/include/mutation guards, shared counters/budgets, per-file rollback
+and deleted-source replay remain intact.
+
+Two further boundaries stay explicit rather than being counted as accepted parity:
+
+- For `f'{x:=eval()}'`, Python treats `=eval()` as format text, but the pinned CST
+  constructs a NamedExpr with a spurious call. `f'{x:={eval()}}'` also loses field
+  boundaries. Native rejects these transactionally; it never emits the wrong calls.
+  Correctly structured control `f'{x: ={eval()}}'` is separately tested as accepted.
+- `ast.parse` can construct formatted-string MatchValue patterns that compilation
+  rejects. Native formatted-pattern expression traversal is still a G2 subset gap;
+  its rejection is not described as an AST syntax failure.
+
+Unicode identifier/NFKC coverage requires consistent versioned normalization across
+names, shapes, scopes, aliases, guards and embedded JSON—not an ASCII-predicate
+relaxation. Neither it, Unicode-name tables, source decoding nor existing parser
+compatibility blockers are closed by this lexical batch. The production helper,
+public requests, schemas, saved evidence and default selection are unchanged.
 
 ## Current extraction boundary
 

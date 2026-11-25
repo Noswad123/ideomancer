@@ -5,10 +5,15 @@ use tree_sitter::Node;
 
 #[path = "expressions.rs"]
 mod expressions;
-use expressions::{Expression, Mode};
+use expressions::{Expression, Mode, Role};
+#[path = "patterns.rs"]
+mod patterns;
+use patterns::Pattern;
+#[path = "literals.rs"]
+mod literals;
 
 // Private Python 3.12 target, not the grammar's broader Python-2/3 acceptance.
-const FACT_POLICY: &str = "python-native-private-facts-11";
+const FACT_POLICY: &str = "python-native-private-facts-15";
 const MAX_FACTS: usize = 100_000;
 const SIGNATURE_WORK: usize = 2 * 16384 + 17;
 
@@ -226,6 +231,8 @@ fn extract<F: FnMut(Checkpoint) -> bool>(
         FACT_POLICY.as_bytes(),
         include_bytes!("facts.rs").as_slice(),
         include_bytes!("expressions.rs").as_slice(),
+        include_bytes!("patterns.rs").as_slice(),
+        include_bytes!("literals.rs").as_slice(),
     ] {
         hash.update((part.len() as u64).to_le_bytes());
         for chunk in part.chunks(4096) {
@@ -282,11 +289,15 @@ fn extract<F: FnMut(Checkpoint) -> bool>(
         limits: fact_limits,
         pending: 0,
         expression: None,
+        pattern: None,
         parameter: None,
         body: None,
         import: None,
         terminal_line: 0,
         delimiter_depth: 0,
+        continuation_row: None,
+        semicolon_row: None,
+        indent_style: None,
     };
     let parsed = run_admitted(sources, limits, &cancel, &mut collector)?;
     result.files = std::mem::take(&mut collector.files);
@@ -430,6 +441,12 @@ struct Frame {
     // Context-specific direct-child sequence, never an execution/scope state.
     progress: u8,
     try_state: FrameTryState,
+    // Match subjects have separate CST roots; stars require an outer tuple comma.
+    subject_starred: bool,
+    subject_comma: bool,
+    // Declaration-only grammar lanes: alias LHS, generic LHS, parameter list,
+    // parameter wrapper, bound pair, splat parameter, and bound-name wrapper.
+    declaration: u8,
 }
 
 // Updated only by direct-child events in the shared counted walk. Family is
@@ -444,7 +461,12 @@ struct FrameTryState {
 fn ordinary_compound(kind: &str) -> bool {
     matches!(
         kind,
-        "if_statement" | "while_statement" | "for_statement" | "with_statement" | "try_statement"
+        "if_statement"
+            | "while_statement"
+            | "for_statement"
+            | "with_statement"
+            | "try_statement"
+            | "match_statement"
     )
 }
 
@@ -469,6 +491,8 @@ fn suite_parent(parent: &str, field: Option<&str>) -> bool {
             Some("body")
         ) | ("if_statement" | "elif_clause", Some("consequence"))
             | ("except_clause" | "finally_clause", None)
+            | ("match_statement", Some("body"))
+            | ("case_clause", Some("consequence"))
     )
 }
 
@@ -485,15 +509,21 @@ fn body_header_value(parent: &str, field: Option<&str>, kind: &str) -> bool {
         || (parent == "as_pattern" && field != Some("alias") && kind != "comment" && kind != "as")
 }
 
-fn ordinary_header_token(anchor: &Frame, node: Node<'_>, previous_line: usize) -> bool {
+fn ordinary_header_token(
+    anchor: &Frame,
+    node: Node<'_>,
+    previous_line: usize,
+    bridge: Option<usize>,
+) -> bool {
     let kind = node.kind();
     let placed = if kind == ":"
+        || (anchor.kind == "match_statement" && kind == ",")
         || (anchor.kind == "except_clause" && matches!(kind, "as" | "*"))
         || (anchor.kind == "for_statement" && kind == "in")
     {
-        node.start_position().row + 1 == previous_line
+        logical_same(previous_line, node.start_position().row + 1, bridge)
     } else {
-        node.start_position().row == anchor.row
+        logical_same(anchor.row + 1, node.start_position().row + 1, bridge)
     };
     placed
         && matches!(
@@ -507,6 +537,7 @@ fn ordinary_header_token(anchor: &Frame, node: Node<'_>, previous_line: usize) -
                 | ("try_statement", "try" | ":")
                 | ("finally_clause", "finally" | ":")
                 | ("except_clause", "except" | "*" | "as" | ":")
+                | ("match_statement", "match" | "," | ":")
         )
 }
 
@@ -531,7 +562,6 @@ struct Definition {
     vararg: Option<String>,
     kwarg: Option<String>,
     signature: String,
-    header_end: usize,
     positional_default: bool,
 }
 
@@ -738,11 +768,39 @@ struct Collector<'a, 'b> {
     limits: FactLimits,
     pending: usize,
     expression: Option<Expression>,
+    pattern: Option<Pattern>,
     parameter: Option<Parameter>,
     body: Option<BodyStatement>,
     import: Option<ImportStatement>,
     terminal_line: usize,
     delimiter_depth: usize,
+    continuation_row: Option<usize>,
+    semicolon_row: Option<usize>,
+    indent_style: Option<u8>,
+}
+
+fn logical_same(previous: usize, next: usize, bridge: Option<usize>) -> bool {
+    previous == next || bridge == Some(next)
+}
+
+fn simple_statement(kind: &str) -> bool {
+    matches!(
+        kind,
+        "pass_statement"
+            | "expression_statement"
+            | "return_statement"
+            | "break_statement"
+            | "continue_statement"
+            | "assert_statement"
+            | "raise_statement"
+            | "global_statement"
+            | "nonlocal_statement"
+            | "delete_statement"
+            | "import_statement"
+            | "import_from_statement"
+            | "future_import_statement"
+            | "type_alias_statement"
+    )
 }
 
 fn identifier<F: FnMut(Checkpoint) -> bool>(name: &str, cancel: &Cancellation<F>) -> bool {
@@ -1044,7 +1102,7 @@ impl Collector<'_, '_> {
             if cancel.at(Checkpoint::Collector) {
                 return;
             }
-            if matches!(token.kind, "identifier" | ".") {
+            if matches!(token.kind, "identifier" | "." | "*") {
                 text_size += token.span.len();
             }
             names += usize::from(token.kind == ",");
@@ -1149,7 +1207,21 @@ impl Collector<'_, '_> {
                 return;
             }
             let name_start = at;
-            let Some(name) = import.name(&mut at, !import.from, bytes, cancel) else {
+            let name = if import.tokens.get(at).is_some_and(|t| t.kind == "*") {
+                if !import.from
+                    || import.parenthesized
+                    || at + 1 != names_end
+                    || !metadata.names.is_empty()
+                {
+                    self.unsupported = true;
+                    return;
+                }
+                at += 1;
+                Some(String::from("*"))
+            } else {
+                import.name(&mut at, !import.from, bytes, cancel)
+            };
+            let Some(name) = name else {
                 self.unsupported = true;
                 return;
             };
@@ -1308,6 +1380,19 @@ impl Collector<'_, '_> {
 
     fn finish_expression<F: FnMut(Checkpoint) -> bool>(&mut self, cancel: &Cancellation<F>) {
         let expression = self.expression.take().unwrap();
+        if expression.mode == Mode::BodyValue {
+            if let Some(frame) = self
+                .frames
+                .last_mut()
+                .filter(|f| f.kind == "match_statement")
+            {
+                frame.subject_starred |= expression.root_starred();
+            }
+        }
+        if expression.mode == Mode::HeaderValue {
+            self.pending -= expression.working;
+            return;
+        }
         if expression.mode == Mode::ExceptionType && expression.handler_alias {
             self.frames.last_mut().unwrap().progress = 5;
         }
@@ -1378,7 +1463,6 @@ impl Collector<'_, '_> {
             }
             Mode::Return => {
                 let f = self.definitions.last_mut().unwrap();
-                f.header_end = expression.terminal_end_line - 1;
                 let symbol = f.symbol.clone();
                 self.add("return_annotation", line, end, symbol, value, cancel);
                 self.pending -= temporary;
@@ -1398,6 +1482,7 @@ impl Collector<'_, '_> {
                 self.pending -= temporary;
             }
             Mode::Base
+            | Mode::HeaderValue
             | Mode::AssignmentAnnotation
             | Mode::BodyValue
             | Mode::ExceptionType
@@ -1461,9 +1546,10 @@ impl Collector<'_, '_> {
             }
         }
         {
-            // Aliases are constant inside admitted expressions, so source-order
-            // call collection (including Dict keys/values and argument groups)
-            // is equivalent after global sorting. This does not admit header calls.
+            // Aliases are constant inside admitted expressions; lambda parameters
+            // and comprehension binders do not change the helper's owner/scope.
+            // Source-order calls are equivalent after sorting, even where AST
+            // default/argument groups differ. This does not admit header calls.
             for index in expression.calls(cancel) {
                 if cancel.at(Checkpoint::Collector) || self.limited.is_some() {
                     break;
@@ -1649,7 +1735,12 @@ impl Collector<'_, '_> {
         self.facts.push(fact);
     }
 
-    fn statement(&mut self, node: Node<'_>, bytes: &[u8]) {
+    fn statement<F: FnMut(Checkpoint) -> bool>(
+        &mut self,
+        node: Node<'_>,
+        bytes: &[u8],
+        cancel: &Cancellation<F>,
+    ) {
         let Some(suite) = self.frames.last_mut() else {
             self.unsupported = true;
             return;
@@ -1659,34 +1750,35 @@ impl Collector<'_, '_> {
             self.unsupported = true;
             return;
         }
-        if suite.last_end.is_some_and(|row| point.row <= row) {
+        let separated = self
+            .semicolon_row
+            .is_some_and(|row| logical_same(row, point.row + 1, self.continuation_row))
+            && simple_statement(node.kind());
+        self.semicolon_row = None;
+        if suite.last_end.is_some_and(|row| point.row <= row) && !separated {
             self.unsupported = true;
         }
-        let inline = suite.kind == "block" && point.row == suite.row;
+        let inline = suite.kind == "block"
+            && logical_same(suite.row + 1, point.row + 1, self.continuation_row);
         if inline {
-            if !matches!(
-                node.kind(),
-                "pass_statement"
-                    | "expression_statement"
-                    | "return_statement"
-                    | "break_statement"
-                    | "continue_statement"
-                    | "assert_statement"
-                    | "raise_statement"
-                    | "global_statement"
-                    | "nonlocal_statement"
-                    | "delete_statement"
-            ) || suite.last_end.is_some()
-            {
+            if !simple_statement(node.kind()) || (suite.last_end.is_some() && !separated) {
                 self.unsupported = true;
             }
-        } else {
+        } else if !separated {
             let line_start = node.start_byte().saturating_sub(point.column);
-            if !bytes[line_start..node.start_byte()]
-                .iter()
-                .all(|&b| b == b' ')
-            {
-                self.unsupported = true;
+            let prefix = &bytes[line_start..node.start_byte()];
+            for chunk in prefix.chunks(256) {
+                if cancel.at(Checkpoint::Collector) {
+                    return;
+                }
+                for &b in chunk {
+                    if !matches!(b, b' ' | b'\t')
+                        || self.indent_style.is_some_and(|style| style != b)
+                    {
+                        self.unsupported = true;
+                    }
+                    self.indent_style = Some(b);
+                }
             }
             if suite.kind == "module" {
                 if point.column != 0 {
@@ -1722,11 +1814,15 @@ impl Observer for Collector<'_, '_> {
             self.warning_text + self.warning_slots * 4 * std::mem::size_of::<CandidateWarning>();
         self.scopes = Vec::new();
         self.expression = None;
+        self.pattern = None;
         self.parameter = None;
         self.body = None;
         self.import = None;
         self.terminal_line = 0;
         self.delimiter_depth = 0;
+        self.continuation_row = None;
+        self.semicolon_row = None;
+        self.indent_style = None;
     }
 
     fn enter<F: FnMut(Checkpoint) -> bool>(
@@ -1742,7 +1838,13 @@ impl Observer for Collector<'_, '_> {
         let kind = node.kind();
         // CPython's delimiter limit spans enclosing headers and arguments too.
         // Only punctuation events count, never string/comment payload bytes.
-        if !node.is_named() {
+        let parent = self.frames.last().map(|f| f.kind).unwrap_or("");
+        if !node.is_named()
+            && !matches!(
+                parent,
+                "interpolation" | "format_expression" | "format_specifier" | "string_content"
+            )
+        {
             match kind {
                 "(" | "[" | "{" => {
                     self.delimiter_depth += 1;
@@ -1761,14 +1863,259 @@ impl Observer for Collector<'_, '_> {
                 _ => {}
             }
         }
-        let parent = self.frames.last().map(|f| f.kind).unwrap_or("");
-        if self.expression.is_none() && kind != "comment" {
-            let same_line = node.start_position().row + 1 == self.terminal_line;
+        let bridge = self.continuation_row;
+        let same_line = logical_same(self.terminal_line, node.start_position().row + 1, bridge);
+        let ignored = matches!(kind, "comment" | "line_continuation");
+        if self.pattern.is_some()
+            && parent == "case_clause"
+            && ((kind == "if_clause" && field == Some("guard")) || kind == ":")
+        {
+            let mut pattern = self.pattern.take().unwrap();
+            if !pattern.finish(bytes, cancel) {
+                self.unsupported = true;
+                return;
+            }
+            self.pending -= pattern.working;
+        }
+        let mut declaration = 0;
+        let mut bound = false;
+        if self.expression.is_none() && self.pattern.is_none() && !ignored {
+            let anchor = self.frames.last_mut();
+            if let Some(anchor) = anchor {
+                let p = &mut anchor.progress;
+                let valid = match anchor.declaration {
+                    1 | 7 => match (kind, *p) {
+                        ("identifier", 0) => {
+                            *p = 1;
+                            true
+                        }
+                        ("generic_type", 0) if anchor.declaration == 1 => {
+                            *p = 1;
+                            declaration = 2;
+                            true
+                        }
+                        _ => false,
+                    },
+                    2 => match (kind, *p) {
+                        ("identifier", 0) => {
+                            *p = 1;
+                            true
+                        }
+                        ("type_parameter", 1) if same_line => {
+                            *p = 2;
+                            declaration = 3;
+                            true
+                        }
+                        _ => false,
+                    },
+                    3 => match (kind, *p) {
+                        ("[", 0) => {
+                            *p = 1;
+                            true
+                        }
+                        ("type", 1 | 3) => {
+                            *p = 2;
+                            declaration = 4;
+                            true
+                        }
+                        (",", 2) => {
+                            *p = 3;
+                            true
+                        }
+                        ("]", 2 | 3) => {
+                            *p = 4;
+                            true
+                        }
+                        _ => false,
+                    },
+                    4 => match (kind, *p) {
+                        ("identifier", 0) => {
+                            *p = 1;
+                            true
+                        }
+                        ("constrained_type", 0) => {
+                            *p = 1;
+                            declaration = 5;
+                            true
+                        }
+                        ("splat_type", 0) => {
+                            *p = 1;
+                            declaration = 6;
+                            true
+                        }
+                        _ => false,
+                    },
+                    5 => match (kind, *p) {
+                        ("type", 0) => {
+                            *p = 1;
+                            declaration = 7;
+                            true
+                        }
+                        (":", 1) => {
+                            *p = 2;
+                            true
+                        }
+                        ("type", 2) => {
+                            *p = 3;
+                            bound = true;
+                            true
+                        }
+                        _ => false,
+                    },
+                    6 => match (kind, *p) {
+                        ("*" | "**", 0) => {
+                            *p = 1;
+                            true
+                        }
+                        ("identifier", 1) => {
+                            *p = 2;
+                            true
+                        }
+                        _ => false,
+                    },
+                    _ => true,
+                };
+                if !valid {
+                    self.unsupported = true;
+                    return;
+                }
+            }
+            if kind == "type_parameter"
+                && matches!(parent, "function_definition" | "class_definition")
+                && field == Some("type_parameters")
+            {
+                if !same_line {
+                    self.unsupported = true;
+                    return;
+                }
+                declaration = 3;
+            }
+            if parent == "type_alias_statement" && field == Some("left") {
+                if kind != "type" || !same_line {
+                    self.unsupported = true;
+                    return;
+                }
+                declaration = 1;
+            }
+        }
+        if self.expression.is_none()
+            && self.pattern.is_none()
+            && !ignored
+            && declaration == 0
+            && !bound
+        {
             let named = node.is_named();
+            let case_guard = parent == "if_clause"
+                && self
+                    .frames
+                    .iter()
+                    .rev()
+                    .nth(1)
+                    .is_some_and(|f| f.kind == "case_clause");
             let anchor = self.frames.last_mut();
             let valid = if let Some(anchor) = anchor {
                 let p = &mut anchor.progress;
                 match parent {
+                    "if_clause" if case_guard => match (kind, *p) {
+                        ("if", 0) if !named && same_line => {
+                            *p = 1;
+                            true
+                        }
+                        (_, 1) if named && same_line => {
+                            *p = 2;
+                            true
+                        }
+                        _ => false,
+                    },
+                    "match_statement" => match (kind, *p) {
+                        ("match", 0) => {
+                            *p = 1;
+                            true
+                        }
+                        (_, 1 | 3) if named && field == Some("subject") && same_line => {
+                            *p = 2;
+                            true
+                        }
+                        (",", 2) if same_line => {
+                            anchor.subject_comma = true;
+                            *p = 3;
+                            true
+                        }
+                        (":", 2 | 3)
+                            if same_line && (!anchor.subject_starred || anchor.subject_comma) =>
+                        {
+                            *p = 4;
+                            true
+                        }
+                        ("block", 4) if field == Some("body") => {
+                            *p = 5;
+                            true
+                        }
+                        _ => false,
+                    },
+                    "case_clause" => match (kind, *p) {
+                        ("if_clause", 0) if field == Some("guard") && same_line => {
+                            *p = 1;
+                            true
+                        }
+                        (":", 0 | 1) if same_line => {
+                            *p = 2;
+                            true
+                        }
+                        ("block", 2) if field == Some("consequence") => {
+                            *p = 3;
+                            true
+                        }
+                        _ => false,
+                    },
+                    "type_alias_statement" => match (kind, *p) {
+                        ("type", 0) if !named => {
+                            *p = 1;
+                            true
+                        }
+                        ("=", 1) if same_line => {
+                            *p = 2;
+                            true
+                        }
+                        ("type", 2) if field == Some("right") && same_line => {
+                            *p = 3;
+                            true
+                        }
+                        _ => false,
+                    },
+                    "argument_list" => match (kind, *p) {
+                        ("(", 0) => {
+                            *p = 1;
+                            true
+                        }
+                        (")", 1..=3) if *p != 3 || anchor.try_state.handlers != 0 => {
+                            *p = 4;
+                            true
+                        }
+                        (",", 2) => {
+                            *p = 3;
+                            true
+                        }
+                        (_, 1 | 3) if named => {
+                            let family = anchor.try_state.family;
+                            let valid = match kind {
+                                "keyword_argument" => {
+                                    anchor.try_state.family = family.max(1);
+                                    true
+                                }
+                                "dictionary_splat" => {
+                                    anchor.try_state.family = 2;
+                                    true
+                                }
+                                "list_splat" => family != 2,
+                                _ => family == 0,
+                            };
+                            *p = 2;
+                            anchor.try_state.handlers += 1;
+                            valid
+                        }
+                        _ => false,
+                    },
                     "try_statement" => match (kind, *p) {
                         ("try", 0) if !named => {
                             *p = 1;
@@ -1964,18 +2311,19 @@ impl Observer for Collector<'_, '_> {
                 return;
             }
         }
-        if parent == "expression_statement" && kind != "comment" {
+        if parent == "expression_statement" && !ignored {
             // Bare tuple expression statements have separate direct CST roots,
             // unlike expression_list RHS/return values. Validate the sequence
             // without suppressing root validation or permitting line joining.
             let body = self.body.as_mut().unwrap();
-            let same_line = node.start_position().row + 1 == self.terminal_line;
             body.sequence = match (body.sequence, kind, node.is_named()) {
                 (BodySequence::Empty, "assignment" | "augmented_assignment", true) => {
                     BodySequence::Assignment
                 }
                 (BodySequence::Value, ",", false) if same_line => BodySequence::Comma,
-                (BodySequence::Empty, _, true) if node.start_position().row + 1 == body.line => {
+                (BodySequence::Empty, _, true)
+                    if logical_same(body.line, node.start_position().row + 1, bridge) =>
+                {
                     BodySequence::Value
                 }
                 (BodySequence::Comma, _, true)
@@ -1989,8 +2337,26 @@ impl Observer for Collector<'_, '_> {
                 }
             };
         }
-        let header_value = self.expression.is_none() && body_header_value(parent, field, kind);
+        let header_value =
+            self.expression.is_none() && !ignored && body_header_value(parent, field, kind);
         let mode = match (parent, field) {
+            // Nested lambda defaults belong to the active arena, including its
+            // recursive call prohibition, not declaration parameter state.
+            _ if self.expression.is_some() || self.pattern.is_some() || ignored => None,
+            _ if bound => Some(Mode::HeaderValue),
+            ("match_statement", Some("subject")) => Some(Mode::BodyValue),
+            ("if_clause", _)
+                if node.is_named()
+                    && self
+                        .frames
+                        .iter()
+                        .rev()
+                        .nth(1)
+                        .is_some_and(|f| f.kind == "case_clause") =>
+            {
+                Some(Mode::BodyValue)
+            }
+            ("type_alias_statement", Some("right")) => Some(Mode::BodyValue),
             _ if header_value && parent == "except_clause" && node.is_named() => {
                 Some(Mode::ExceptionType)
             }
@@ -2000,9 +2366,30 @@ impl Observer for Collector<'_, '_> {
                     && self.body.is_none()
                     && self.definitions.last().is_some_and(|f| f.class)
                     && node.is_named()
-                    && kind != "comment" =>
+                    && !matches!(kind, "comment" | "keyword_argument" | "dictionary_splat") =>
             {
                 Some(Mode::Base)
+            }
+            ("keyword_argument", Some("value"))
+                if self
+                    .frames
+                    .iter()
+                    .rev()
+                    .nth(1)
+                    .is_some_and(|f| f.kind == "argument_list") =>
+            {
+                Some(Mode::HeaderValue)
+            }
+            ("dictionary_splat", _)
+                if node.is_named()
+                    && self
+                        .frames
+                        .iter()
+                        .rev()
+                        .nth(1)
+                        .is_some_and(|f| f.kind == "argument_list") =>
+            {
+                Some(Mode::HeaderValue)
             }
             ("typed_parameter" | "typed_default_parameter", Some("type")) => Some(Mode::Annotation),
             ("default_parameter" | "typed_default_parameter", Some("value")) => Some(Mode::Default),
@@ -2053,50 +2440,76 @@ impl Observer for Collector<'_, '_> {
                 self.unsupported = true;
                 return;
             }
-            if mode == Mode::Return
-                && node.start_position().row != self.definitions.last().unwrap().header_end
-            {
+            if mode == Mode::Return && !same_line {
                 self.unsupported = true;
                 return;
             }
             // A root expression does not see the gap before its own start.
-            if mode == Mode::NeutralTarget && node.start_position().row + 1 != self.terminal_line {
+            if mode == Mode::NeutralTarget && !same_line {
                 self.unsupported = true;
                 return;
             }
             // Enclosing expression delimiters, not CST acceptance, authorize
             // implicit continuation after this first physical header token.
-            if header_value
-                && (self.body.is_some() || node.start_position().row + 1 != self.terminal_line)
-            {
+            if header_value && (self.body.is_some() || !same_line) {
                 self.unsupported = true;
                 return;
             }
             if ((mode == Mode::BodyValue && matches!(parent, "assignment" | "return_statement"))
                 || mode == Mode::AssignmentAnnotation)
-                && node.start_position().row + 1 != self.terminal_line
+                && !same_line
             {
                 self.unsupported = true;
                 return;
             }
             let mut expression = Expression::new(mode, node.start_byte());
-            // These grammar roles accept star_expressions, including a lone
-            // Load Starred that ast.parse accepts but compilation may reject.
-            expression.star_expressions = mode == Mode::BodyValue
-                && matches!(
-                    (parent, field),
-                    (
-                        "assignment" | "augmented_assignment" | "for_statement",
-                        Some("right")
-                    ) | ("expression_statement" | "return_statement", _)
-                );
+            expression.role = if mode == Mode::BodyValue {
+                match (parent, field) {
+                    ("if_statement" | "elif_clause" | "while_statement", Some("condition"))
+                    | ("if_clause", _)
+                    | ("match_statement", Some("subject")) => Role::Named,
+                    ("expression_statement", _)
+                    | ("assignment" | "augmented_assignment", Some("right")) => Role::Yield,
+                    _ => Role::Expression,
+                }
+            } else if mode == Mode::Base {
+                Role::Named
+            } else {
+                Role::Expression
+            };
+            // These grammar roles accept star_expressions. Match additionally
+            // requires an outer comma when a subject root normalizes to Starred.
+            expression.star_expressions = mode == Mode::Base
+                || (mode == Mode::BodyValue
+                    && matches!(
+                        (parent, field),
+                        (
+                            "assignment" | "augmented_assignment" | "for_statement",
+                            Some("right")
+                        ) | ("expression_statement" | "return_statement", _)
+                            | ("match_statement", Some("subject"))
+                    ));
+            if mode == Mode::HeaderValue || mode == Mode::Base {
+                expression.set_base_depth(self.delimiter_depth);
+            }
             self.expression = Some(expression);
         }
         let previous_terminal_end = self.terminal_end;
         let previous_terminal_line = self.terminal_line;
+        if self.expression.is_some() && parent == "format_specifier" && kind == "format_expression"
+        {
+            // Hidden format text belongs to the spec's segment validation on
+            // exit, not to the upcoming replacement expression's trivia.
+            self.terminal_end = node.start_byte();
+        }
         if node.child_count() == 0 && kind != "module" {
             let gap = &bytes[self.terminal_end..node.start_byte()];
-            if !trivia(gap, cancel)
+            if (!self
+                .expression
+                .as_ref()
+                .is_some_and(Expression::literal_payload)
+                && !self.pattern.as_ref().is_some_and(Pattern::literal_payload)
+                && !trivia(gap, cancel))
                 || self.expression.as_mut().is_some_and(|e| {
                     !e.terminal(
                         node,
@@ -2104,12 +2517,35 @@ impl Observer for Collector<'_, '_> {
                         cancel,
                     )
                 })
+                || self.pattern.as_mut().is_some_and(|p| {
+                    let start = if kind == "case" && parent == "case_clause" {
+                        node.start_byte()
+                    } else {
+                        self.terminal_end
+                    };
+                    !p.terminal(node, &bytes[start..node.start_byte()], cancel)
+                })
             {
                 self.unsupported = true;
             }
             self.terminal_end = node.end_byte();
-            if kind != "comment" {
+            if kind == "line_continuation" {
+                if !matches!(
+                    &bytes[node.start_byte()..node.end_byte()],
+                    b"\\\n" | b"\\\r\n"
+                ) {
+                    self.unsupported = true;
+                }
+                self.continuation_row = Some(node.end_position().row + 1);
+            } else if kind != "comment" {
                 self.terminal_line = node.end_position().row + 1;
+                self.continuation_row = None;
+                if self
+                    .semicolon_row
+                    .is_some_and(|row| !logical_same(row, node.start_position().row + 1, bridge))
+                {
+                    self.semicolon_row = None;
+                }
             }
         }
         if self.import.is_some() {
@@ -2120,37 +2556,46 @@ impl Observer for Collector<'_, '_> {
                 // a comment's payload cannot be mistaken for inter-token trivia.
                 let previous = previous_terminal_end.max(import.start);
                 let in_list = import.parenthesized && !import.closed;
-                let word = |kind| matches!(kind, "identifier" | "import" | "from" | "as");
-                // Only the single enclosing from-import pair grants implicit
-                // continuation; prefix tokens and '(' stay on the first line.
-                if import.closed
-                    || (!in_list
-                        && (!bytes[previous..node.start_byte()].chunks(256).all(|chunk| {
-                            !cancel.at(Checkpoint::Collector) && chunk.iter().all(|&b| b == b' ')
-                        }) || node.start_position().row + 1 != import.line
-                            || node.end_position().row + 1 != import.line))
-                    || (previous == node.start_byte()
-                        && word(kind)
-                        && import.tokens.last().is_some_and(|t| word(t.kind)))
-                    || !matches!(
-                        kind,
-                        "identifier"
-                            | "import"
-                            | "from"
-                            | "as"
-                            | "."
-                            | "..."
-                            | ","
-                            | "("
-                            | ")"
-                            | "comment"
-                    )
-                    || (kind == "identifier"
-                        && !identifier(
-                            std::str::from_utf8(&bytes[node.start_byte()..node.end_byte()])
-                                .unwrap_or(""),
-                            cancel,
-                        ))
+                let word =
+                    |kind| matches!(kind, "identifier" | "__future__" | "import" | "from" | "as");
+                // Outside the from-import pair, only an observed explicit join
+                // grants continuation. Gaps cannot manufacture that permission.
+                if !ignored
+                    && (import.closed
+                        || (!in_list
+                            && (!bytes[previous..node.start_byte()].chunks(256).all(|chunk| {
+                                !cancel.at(Checkpoint::Collector)
+                                    && chunk.iter().all(|&b| {
+                                        matches!(b, b' ' | b'\t')
+                                            || (bridge == Some(node.start_position().row + 1)
+                                                && matches!(b, b'\r' | b'\n'))
+                                    })
+                            }) || (!same_line && node.start_byte() != import.start)
+                                || node.end_position().row != node.start_position().row))
+                        || (previous == node.start_byte()
+                            && word(kind)
+                            && import.tokens.last().is_some_and(|t| word(t.kind)))
+                        || !matches!(
+                            kind,
+                            "identifier"
+                                | "import"
+                                | "from"
+                                | "as"
+                                | "."
+                                | "..."
+                                | ","
+                                | "("
+                                | ")"
+                                | "comment"
+                                | "__future__"
+                                | "*"
+                        )
+                        || (kind == "identifier"
+                            && !identifier(
+                                std::str::from_utf8(&bytes[node.start_byte()..node.end_byte()])
+                                    .unwrap_or(""),
+                                cancel,
+                            )))
                 {
                     self.unsupported = true;
                     return;
@@ -2180,9 +2625,10 @@ impl Observer for Collector<'_, '_> {
                         }
                         self.import.as_mut().unwrap().closed = true;
                     }
+                    "line_continuation" => {}
                     _ => {}
                 }
-                if kind != "comment" {
+                if !ignored {
                     let charge = 4 * std::mem::size_of::<ImportToken>();
                     if !self.reserve_work(charge, cancel) {
                         return;
@@ -2190,14 +2636,35 @@ impl Observer for Collector<'_, '_> {
                     let import = self.import.as_mut().unwrap();
                     import.working += charge;
                     import.tokens.push(ImportToken {
-                        kind,
+                        kind: if kind == "__future__" {
+                            "identifier"
+                        } else {
+                            kind
+                        },
                         span: node.start_byte()..node.end_byte(),
                     });
                 }
             } else if !matches!(
                 kind,
-                "dotted_name" | "aliased_import" | "relative_import" | "import_prefix"
+                "dotted_name"
+                    | "aliased_import"
+                    | "relative_import"
+                    | "import_prefix"
+                    | "wildcard_import"
             ) {
+                self.unsupported = true;
+                return;
+            }
+        } else if self.pattern.is_some() {
+            if !self.reserve_work(Pattern::ENTRY_WORK, cancel) {
+                return;
+            }
+            if !self
+                .pattern
+                .as_mut()
+                .unwrap()
+                .enter(node, field, bytes, cancel)
+            {
                 self.unsupported = true;
                 return;
             }
@@ -2208,6 +2675,19 @@ impl Observer for Collector<'_, '_> {
             if !self.expression.as_mut().unwrap().enter(node, bytes, cancel) {
                 self.unsupported = true;
                 return;
+            }
+        } else if declaration != 0 || self.frames.last().is_some_and(|f| f.declaration != 0) {
+            if kind == "comment" && type_comment(&bytes[node.start_byte()..node.end_byte()], cancel)
+            {
+                self.unsupported = true;
+            }
+            if kind == "identifier"
+                && !identifier(
+                    std::str::from_utf8(&bytes[node.start_byte()..node.end_byte()]).unwrap_or(""),
+                    cancel,
+                )
+            {
+                self.unsupported = true;
             }
         } else {
             match kind {
@@ -2236,28 +2716,7 @@ impl Observer for Collector<'_, '_> {
                     }
                 }
                 "function_definition" | "class_definition" => {
-                    // Known header exclusions precede owned declaration state.
-                    if kind == "class_definition"
-                        && (node.child_by_field_name("type_parameters").is_some()
-                            || node
-                                .child_by_field_name("superclasses")
-                                .is_some_and(|bases| {
-                                    bases.start_position().row != node.start_position().row
-                                        || bases.end_position().row != node.start_position().row
-                                        || bases.named_child(0).is_some_and(|base| {
-                                            !matches!(
-                                                base.kind(),
-                                                "identifier"
-                                                    | "attribute"
-                                                    | "parenthesized_expression"
-                                            )
-                                        })
-                                }))
-                    {
-                        self.unsupported = true;
-                        return;
-                    }
-                    self.statement(node, bytes);
+                    self.statement(node, bytes, cancel);
                     // Keep the vector's high-water capacity charged even after
                     // nested definitions unwind. Drop that capacity between files.
                     if self.definitions.len() == self.definition_frames {
@@ -2273,7 +2732,70 @@ impl Observer for Collector<'_, '_> {
                         ..Definition::default()
                     });
                 }
-                _ if ordinary_compound(kind) => self.statement(node, bytes),
+                _ if ordinary_compound(kind) => self.statement(node, bytes, cancel),
+                "case_clause"
+                    if parent == "block"
+                        && field == Some("alternative")
+                        && self
+                            .frames
+                            .iter()
+                            .rev()
+                            .nth(1)
+                            .is_some_and(|f| f.kind == "match_statement") =>
+                {
+                    if node.start_position().row <= self.frames.last().unwrap().row
+                        || logical_same(
+                            self.frames.last().unwrap().row + 1,
+                            node.start_position().row + 1,
+                            bridge,
+                        )
+                    {
+                        self.unsupported = true;
+                        return;
+                    }
+                    self.statement(node, bytes, cancel);
+                    if !self.reserve_work(Pattern::ENTRY_WORK, cancel) {
+                        return;
+                    }
+                    let mut pattern = Pattern::new(node.start_byte());
+                    if !pattern.enter(node, field, bytes, cancel) {
+                        self.unsupported = true;
+                        return;
+                    }
+                    self.pattern = Some(pattern);
+                }
+                "if_clause" if parent == "case_clause" && field == Some("guard") => {
+                    if !same_line {
+                        self.unsupported = true;
+                    }
+                }
+                "if" if parent == "if_clause" && !node.is_named() => {
+                    if !same_line {
+                        self.unsupported = true;
+                    }
+                }
+                ":" if parent == "case_clause" && !node.is_named() => {
+                    if !same_line {
+                        self.unsupported = true;
+                    }
+                }
+                "type_alias_statement" => self.statement(node, bytes, cancel),
+                "type" | "=" if parent == "type_alias_statement" && !node.is_named() => {
+                    if kind == "=" && !same_line {
+                        self.unsupported = true;
+                    }
+                }
+                "line_continuation" => {}
+                ";" if matches!(parent, "module" | "block") && !node.is_named() => {
+                    let suite = self.frames.last().unwrap();
+                    if !simple_statement(suite.last_child)
+                        || !same_line
+                        || self.semicolon_row.is_some()
+                    {
+                        self.unsupported = true;
+                    }
+                    self.semicolon_row = Some(node.end_position().row + 1);
+                }
                 _ if ordinary_clause(kind) => {
                     let anchor = self.frames.last().unwrap();
                     let point = node.start_position();
@@ -2292,20 +2814,27 @@ impl Observer for Collector<'_, '_> {
                         || (!try_clause && anchor.last_child == "else_clause")
                         || point.column != anchor.column
                         || !bytes[line_start..node.start_byte()]
-                            .iter()
-                            .all(|&b| b == b' ')
+                            .chunks(256)
+                            .all(|chunk| {
+                                !cancel.at(Checkpoint::Collector)
+                                    && chunk.iter().all(|&b| Some(b) == self.indent_style)
+                            })
                     {
                         self.unsupported = true;
                     }
                 }
                 "block" if suite_parent(parent, field) => {}
                 "with_clause" if parent == "with_statement" => {
-                    if node.start_position().row != self.frames.last().unwrap().row {
+                    if !same_line {
                         self.unsupported = true;
                     }
                 }
                 "with_item" if parent == "with_clause" => {
-                    if node.start_position().row + 1 != previous_terminal_line {
+                    if !logical_same(
+                        previous_terminal_line,
+                        node.start_position().row + 1,
+                        bridge,
+                    ) {
                         self.unsupported = true;
                     }
                 }
@@ -2320,18 +2849,30 @@ impl Observer for Collector<'_, '_> {
                         || node
                             .child(0)
                             .is_none_or(|child| child.kind() != "identifier")
-                        || node.start_position().row + 1 != previous_terminal_line
+                        || !logical_same(
+                            previous_terminal_line,
+                            node.start_position().row + 1,
+                            bridge,
+                        )
                     {
                         self.unsupported = true;
                     }
                 }
                 "as" if parent == "as_pattern" && !node.is_named() => {
-                    if node.start_position().row + 1 != previous_terminal_line {
+                    if !logical_same(
+                        previous_terminal_line,
+                        node.start_position().row + 1,
+                        bridge,
+                    ) {
                         self.unsupported = true;
                     }
                 }
                 "," if parent == "with_clause" && !node.is_named() => {
-                    if node.start_position().row + 1 != previous_terminal_line {
+                    if !logical_same(
+                        previous_terminal_line,
+                        node.start_position().row + 1,
+                        bridge,
+                    ) {
                         self.unsupported = true;
                     }
                 }
@@ -2340,31 +2881,28 @@ impl Observer for Collector<'_, '_> {
                         self.frames.last().unwrap(),
                         node,
                         previous_terminal_line,
+                        bridge,
                     ) {
                         self.unsupported = true;
                     }
                 }
                 "argument_list" if parent == "class_definition" => {
-                    let line = self.definitions.last().unwrap().line;
-                    // The pinned grammar admits `(,)` as an argument list.
-                    // A class list with no named base must be exactly `()`;
-                    // named-child and child counts are cached CST metadata.
-                    if (node.named_child_count() == 0 && node.child_count() != 2)
-                        || node.start_position().row + 1 != line
-                        || node.end_position().row + 1 != line
-                    {
+                    if !same_line {
                         self.unsupported = true;
                     }
                 }
                 "class" | ":" if parent == "class_definition" && !node.is_named() => {
-                    if node.start_position().row + 1 != self.definitions.last().unwrap().line {
+                    if kind == ":" && !same_line {
                         self.unsupported = true;
                     }
                 }
                 "(" | ")" | "," if parent == "argument_list" && !node.is_named() => {}
-                "pass_statement" => self.statement(node, bytes),
+                "keyword_argument" | "dictionary_splat" if parent == "argument_list" => {}
+                "=" if parent == "keyword_argument" && !node.is_named() => {}
+                "**" if parent == "dictionary_splat" && !node.is_named() => {}
+                "pass_statement" => self.statement(node, bytes, cancel),
                 "assert_statement" | "raise_statement" | "global_statement"
-                | "nonlocal_statement" | "delete_statement" => self.statement(node, bytes),
+                | "nonlocal_statement" | "delete_statement" => self.statement(node, bytes, cancel),
                 "assert" | "raise" | "global" | "nonlocal" | "del" | "from" | ","
                     if matches!(
                         parent,
@@ -2375,7 +2913,7 @@ impl Observer for Collector<'_, '_> {
                             | "delete_statement"
                     ) && !node.is_named() => {}
                 "break_statement" | "continue_statement" => {
-                    self.statement(node, bytes);
+                    self.statement(node, bytes, cancel);
                     // A loop's else suite is outside that loop's jump context;
                     // an outer loop can still supply one. Definitions cut it off.
                     let in_loop = self
@@ -2394,8 +2932,8 @@ impl Observer for Collector<'_, '_> {
                         self.unsupported = true;
                     }
                 }
-                "import_statement" | "import_from_statement" => {
-                    self.statement(node, bytes);
+                "import_statement" | "import_from_statement" | "future_import_statement" => {
+                    self.statement(node, bytes, cancel);
                     if self.facts.len() >= self.limits.count {
                         self.limited = Some(CandidateDiagnostic::FactLimit);
                         return;
@@ -2403,7 +2941,7 @@ impl Observer for Collector<'_, '_> {
                     self.import = Some(ImportStatement {
                         start: node.start_byte(),
                         line: node.start_position().row + 1,
-                        from: kind == "import_from_statement",
+                        from: kind != "import_statement",
                         tokens: Vec::new(),
                         working: 0,
                         parenthesized: false,
@@ -2411,7 +2949,7 @@ impl Observer for Collector<'_, '_> {
                     });
                 }
                 "expression_statement" | "return_statement" => {
-                    self.statement(node, bytes);
+                    self.statement(node, bytes, cancel);
                     if self.body.is_some()
                         || (kind == "return_statement"
                             && self.definitions.last().is_none_or(|f| f.class))
@@ -2446,11 +2984,7 @@ impl Observer for Collector<'_, '_> {
                     // Recursive CST assignments do not start BodyValue, so
                     // enforce the RHS entry-line gate here too. A grouped
                     // target may continue after its opening delimiter.
-                    if nested
-                        && (body.annotated
-                            || annotated
-                            || node.start_position().row + 1 != self.terminal_line)
-                    {
+                    if nested && (body.annotated || annotated || !same_line) {
                         self.unsupported = true;
                         return;
                     }
@@ -2470,13 +3004,17 @@ impl Observer for Collector<'_, '_> {
                     && !node.is_named() => {}
                 "," if parent == "expression_statement" && !node.is_named() => {}
                 ":" | "=" if parent == "assignment" && !node.is_named() => {
-                    if node.start_position().row + 1 != previous_terminal_line {
+                    if !logical_same(
+                        previous_terminal_line,
+                        node.start_position().row + 1,
+                        bridge,
+                    ) {
                         self.unsupported = true;
                     }
                 }
                 "return" if parent == "return_statement" && !node.is_named() => {}
                 "parameters" if parent == "function_definition" && field == Some("parameters") => {
-                    if node.start_position().row + 1 != self.definitions.last().unwrap().line {
+                    if !same_line {
                         self.unsupported = true;
                     }
                 }
@@ -2505,17 +3043,18 @@ impl Observer for Collector<'_, '_> {
                     if (parent == "for_statement" && field == Some("left"))
                         || parent == "as_pattern_target"
                     {
-                        if node.start_position().row != self.frames.last().unwrap().row {
+                        if !same_line {
                             self.unsupported = true;
                         }
-                    } else if matches!(parent, "global_statement" | "nonlocal_statement")
+                    } else if (parent == "keyword_argument" && field == Some("name"))
+                        || matches!(parent, "global_statement" | "nonlocal_statement")
                         || (parent == "except_clause" && field == Some("alias"))
                     {
                         // These names are AST strings, not bindings or expressions.
                     } else if matches!(parent, "function_definition" | "class_definition")
                         && field == Some("name")
                     {
-                        if node.start_position().row + 1 != self.definitions.last().unwrap().line {
+                        if !same_line {
                             self.unsupported = true;
                         }
                         self.enter_scope(name, cancel);
@@ -2653,7 +3192,7 @@ impl Observer for Collector<'_, '_> {
                 }
                 "async" | "def" if parent == "function_definition" && !node.is_named() => {
                     let f = self.definitions.last_mut().unwrap();
-                    if node.start_position().row + 1 != f.line {
+                    if kind == "def" && f.asynchronous && !same_line {
                         self.unsupported = true;
                     }
                     if kind == "async" {
@@ -2661,7 +3200,7 @@ impl Observer for Collector<'_, '_> {
                     }
                 }
                 ":" if parent == "function_definition" && !node.is_named() => {
-                    if node.start_position().row != self.definitions.last().unwrap().header_end {
+                    if !same_line {
                         self.unsupported = true;
                     }
                 }
@@ -2672,7 +3211,7 @@ impl Observer for Collector<'_, '_> {
                         "typed_parameter" | "typed_default_parameter" | "default_parameter"
                     ) && !node.is_named() => {}
                 "->" if parent == "function_definition" && !node.is_named() => {
-                    if node.start_position().row != self.definitions.last().unwrap().header_end {
+                    if !same_line {
                         self.unsupported = true;
                     }
                 }
@@ -2691,11 +3230,7 @@ impl Observer for Collector<'_, '_> {
             let parent = self.frames.last().unwrap();
             // Compound indentation belongs to its keyword; inline suite rows
             // belong to the colon, including a grouped multiline header.
-            let row = if ordinary_compound(parent.kind) || ordinary_clause(parent.kind) {
-                self.terminal_line - 1
-            } else {
-                parent.row
-            };
+            let row = self.terminal_line.saturating_sub(1);
             (row, parent.column)
         } else {
             (point.row, point.column)
@@ -2717,6 +3252,9 @@ impl Observer for Collector<'_, '_> {
             last_child: "",
             progress: 0,
             try_state: FrameTryState::default(),
+            subject_starred: false,
+            subject_comma: false,
+            declaration,
         });
     }
 
@@ -2725,7 +3263,47 @@ impl Observer for Collector<'_, '_> {
             return;
         }
         let frame = self.frames.pop().unwrap();
+        if self.pattern.is_some() {
+            if node.kind() == "string_content" {
+                // The ordinary whole-token validator already checked hidden
+                // payload following the last counted escape child.
+                self.terminal_end = node.end_byte();
+                self.terminal_line = node.end_position().row + 1;
+                self.continuation_row = None;
+            }
+            let bytes = self.sources[self.index]
+                .bytes
+                .strip_prefix(b"\xef\xbb\xbf")
+                .unwrap_or(&self.sources[self.index].bytes);
+            if self.pattern.as_mut().unwrap().exit(bytes, cancel).is_err() {
+                self.unsupported = true;
+            }
+            return;
+        }
+        if frame.declaration != 0 {
+            let valid = match frame.declaration {
+                1 | 4 | 7 => frame.progress == 1,
+                2 | 6 => frame.progress == 2,
+                3 => frame.progress == 4,
+                5 => frame.progress == 3,
+                _ => false,
+            };
+            if !valid {
+                self.unsupported = true;
+            }
+            return;
+        }
         let valid = match node.kind() {
+            "if_clause"
+                if self.expression.is_none()
+                    && self.frames.last().is_some_and(|f| f.kind == "case_clause") =>
+            {
+                frame.progress == 2
+            }
+            "match_statement" => frame.progress == 5,
+            "case_clause" => frame.progress == 3,
+            "type_alias_statement" => frame.progress == 3,
+            "argument_list" if self.expression.is_none() => frame.progress == 4,
             "try_statement" => {
                 frame.progress == 3 && (frame.try_state.handlers != 0 || frame.try_state.phase == 3)
             }
@@ -2747,13 +3325,16 @@ impl Observer for Collector<'_, '_> {
             self.unsupported = true;
             return;
         }
-        if node.kind() != "comment" {
+        if !matches!(node.kind(), "comment" | "line_continuation") {
             if let Some(parent) = self.frames.last_mut() {
                 parent.last_child = node.kind();
             }
         }
         if self.import.is_some() {
-            if matches!(node.kind(), "import_statement" | "import_from_statement") {
+            if matches!(
+                node.kind(),
+                "import_statement" | "import_from_statement" | "future_import_statement"
+            ) {
                 let end = self.terminal_line;
                 self.finish_import(cancel);
                 if let Some(f) = self.definitions.last_mut() {
@@ -2766,6 +3347,13 @@ impl Observer for Collector<'_, '_> {
             return;
         }
         if self.expression.is_some() {
+            if matches!(node.kind(), "string_content" | "format_specifier") {
+                // Hidden scanner text after the final counted escape child is
+                // already validated as part of this literal segment, not trivia.
+                self.terminal_end = node.end_byte();
+                self.terminal_line = node.end_position().row + 1;
+                self.continuation_row = None;
+            }
             let scratch = if node.kind() == "call" {
                 Expression::RENDER_WORK
             } else {
@@ -2800,7 +3388,21 @@ impl Observer for Collector<'_, '_> {
                     self.unsupported = true;
                 }
             }
-            kind if kind == "block" || ordinary_compound(kind) || ordinary_clause(kind) => {
+            kind if kind == "block"
+                || kind == "case_clause"
+                || ordinary_compound(kind)
+                || ordinary_clause(kind) =>
+            {
+                if kind == "block"
+                    && self
+                        .frames
+                        .last()
+                        .is_some_and(|f| f.kind == "match_statement")
+                    && frame.last_child != "case_clause"
+                {
+                    self.unsupported = true;
+                    return;
+                }
                 let Some(end) = frame.last_end else {
                     self.unsupported = true;
                     return;
@@ -2834,7 +3436,6 @@ impl Observer for Collector<'_, '_> {
                     self.unsupported = true;
                 }
                 f.signature = signature(f, cancel);
-                f.header_end = node.end_position().row;
             }
             "typed_parameter" | "typed_default_parameter" | "default_parameter" => {
                 let parameter = self.parameter.take().unwrap();
@@ -2897,6 +3498,15 @@ impl Observer for Collector<'_, '_> {
                 }
                 if let Some(f) = self.definitions.last_mut() {
                     f.end = end;
+                }
+                if let Some(suite) = self.frames.last_mut() {
+                    suite.last_end = Some(end - 1);
+                }
+            }
+            "type_alias_statement" => {
+                let end = self.terminal_line;
+                if let Some(owner) = self.definitions.last_mut() {
+                    owner.end = end;
                 }
                 if let Some(suite) = self.frames.last_mut() {
                     suite.last_end = Some(end - 1);
@@ -2989,7 +3599,10 @@ fn trivia<F: FnMut(Checkpoint) -> bool>(bytes: &[u8], cancel: &Cancellation<F>) 
         if cancel.at(Checkpoint::Collector) {
             return false;
         }
-        if !chunk.iter().all(|b| matches!(b, b' ' | b'\n' | b'\r')) {
+        if !chunk
+            .iter()
+            .all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+        {
             return false;
         }
     }
@@ -3142,13 +3755,2216 @@ mod tests {
     }
 
     fn accepted(text: impl AsRef<[u8]>) -> CandidateReport<'static> {
-        let result = candidates(text);
+        let result = candidates(text.as_ref());
         assert_eq!(
             result.files[0].status,
             CandidateStatus::AcceptedFacts,
-            "{result:?}"
+            "{result:?}\nsource: {:?}",
+            String::from_utf8_lossy(text.as_ref())
         );
         result
+    }
+
+    #[test]
+    fn policy15_field_lambdas_require_lexical_delimiters() {
+        for expression in [
+            "sink(f'{lambda: eval(), value}')",
+            "sink(f'{value if ready else lambda: eval()}')",
+            "sink(f'{item:{lambda: eval(), value}}')",
+            r#"sink(f'{(f"{lambda: eval(), value}")}')"#,
+        ] {
+            let sources = [
+                source("bad.py", "bad", format!("exec()\n{expression}\n")),
+                source("good.py", "good", "sink(f'{(lambda: eval()), value}')\n"),
+            ];
+            let result = extract_fact_candidates(&sources).unwrap();
+            assert_eq!(
+                result.files[0].status,
+                CandidateStatus::UnsupportedSyntax,
+                "{expression}: {result:?}"
+            );
+            assert_eq!(result.files[1].status, CandidateStatus::AcceptedFacts);
+            assert_eq!(
+                result.facts.iter().filter(|f| f.path == "bad.py").count(),
+                1
+            );
+            assert_eq!(result.diagnostics.len(), 1);
+            assert_eq!(result.diagnostics[0].path, "good.py");
+        }
+        for expression in [
+            "sink(f'{(lambda: eval()), value}')",
+            "sink(f'{value if ready else (lambda: eval())}')",
+            "sink(f'{[lambda: eval()]}')",
+            "sink(f'{item:{(lambda: eval()), value}}')",
+            "sink(f'{call(lambda: eval())}')",
+            "sink(f'{(lambda: eval(), value)}')",
+            "sink(f'{ {lambda: eval()} }')",
+            r#"sink(f'{ {"key": lambda: eval()} }')"#,
+            "sink(f'{items[lambda: eval()]}')",
+            r#"sink(f'{(f"{(lambda: eval()), value}")}')"#,
+        ] {
+            let result = accepted(format!("{expression}\n"));
+            assert_eq!(result.diagnostics.len(), 1, "{expression}");
+            assert!(result
+                .facts
+                .iter()
+                .any(|f| f.kind == "call" && f.value == "eval()"));
+        }
+        accepted("def f(x=f'{(lambda: value), other}') -> f'{[lambda: value]}': pass\n");
+        let result = candidates("exec()\ndef f(x=f'{(lambda: eval()), value}'): pass\n");
+        assert_eq!(result.files[0].status, CandidateStatus::UnsupportedSyntax);
+        assert_eq!(result.facts.len(), 1);
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn policy15_hidden_literal_segments_regression() {
+        accepted("match subject:\n    case '\\q\\777': sink('OPAQUE_CASE_BODY')\n");
+        for value in [
+            "f'{value=!r:>12}'",
+            "f'{value():{width()}.{precision()}}'",
+            "f'{x: ={eval()}}'",
+        ] {
+            accepted(format!("sink({value})\n"));
+        }
+        // G4: the pinned grammar produces NamedExpr(x, Call(eval)) and
+        // NamedExpr(x, Set(Call(eval))), not format text / format_expression.
+        // Do not guess field boundaries or emit calls from these wrong trees.
+        for value in ["f'{x:=eval()}'", "f'{x:={eval()}}'"] {
+            let result = candidates(format!("eval()\nsink({value})\n"));
+            assert_eq!(result.files[0].status, CandidateStatus::UnsupportedSyntax);
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+        let result = accepted("sink(f'{x: ={eval()}}', f'{(x:=eval())}')\n");
+        assert_eq!(result.diagnostics.len(), 2);
+    }
+
+    #[test]
+    fn policy15_string_constant_and_joined_str_prefixes() {
+        for prefix in [
+            "", "r", "R", "u", "U", "b", "B", "br", "bR", "Br", "BR", "rb", "rB", "Rb", "RB",
+        ] {
+            let result = accepted(format!("sink({prefix}'private_payload\\ntail')\n"));
+            assert!(result
+                .facts
+                .iter()
+                .any(|f| f.kind == "call" && f.value == "sink(<literal>)"));
+            assert!(!serde_json::to_string(&result)
+                .unwrap()
+                .contains("private_payload"));
+        }
+        for prefix in ["f", "F", "fr", "fR", "Fr", "FR", "rf", "rF", "Rf", "RF"] {
+            for body in [
+                "",
+                "private_payload",
+                "{{private_payload}}",
+                "{value!s}",
+                "{value=!r}",
+            ] {
+                let result = accepted(format!("sink({prefix}'{body}')\n"));
+                assert!(result
+                    .facts
+                    .iter()
+                    .any(|f| f.kind == "call" && f.value == "sink(<JoinedStr>)"));
+                assert!(!serde_json::to_string(&result)
+                    .unwrap()
+                    .contains("private_payload"));
+            }
+            let result = accepted(format!("sink({prefix}'\\{{probe()}}')\n"));
+            assert!(result
+                .facts
+                .iter()
+                .any(|f| f.kind == "call" && f.value == "probe()"));
+        }
+    }
+
+    #[test]
+    fn policy15_header_shapes_and_root_binding_contract() {
+        let result = accepted("def f(x=f'plain') -> f'{value}': pass\nitem=f'{value}'\nother=f'{value}'.member\nthird=f'{value}'()\n");
+        for kind in ["parameter_default", "return_annotation"] {
+            assert!(result
+                .facts
+                .iter()
+                .any(|f| f.kind == kind && f.value == "<JoinedStr>"));
+        }
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "binding_invalidation" && f.value == "{\"target\":\"item\"}"));
+        for shape in ["<JoinedStr>.member", "<JoinedStr>()"] {
+            assert!(result
+                .facts
+                .iter()
+                .any(|f| f.kind == "binding" && f.value.contains(shape)));
+        }
+    }
+
+    #[test]
+    fn policy15_concatenation_promotes_text_but_never_bytes() {
+        for value in ["'a' f'b'", "f'a' 'b'", "f'' f''", "'a' f'{value}' 'c'"] {
+            let result = accepted(format!("sink({value})\n"));
+            assert!(result
+                .facts
+                .iter()
+                .any(|f| f.kind == "call" && f.value == "sink(<JoinedStr>)"));
+        }
+        for value in ["b'a' f'b'", "f'a' b'b'", "'a' b'b'", "b'a' 'b'"] {
+            let result = candidates(format!("eval()\nsink({value})\n"));
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{value}: {result:?}"
+            );
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn policy15_pep701_nested_values_and_byte_spans() {
+        for newline in ["\n", "\r\n"] {
+            let text = format!("def f():{newline} return sink(f'{{{newline} eval(\"same\"){newline} :{{width()}}}}', f'{{f'{{inner()}}'}}'){newline}");
+            let result = accepted(text);
+            for (value, line) in [("eval(<literal>)", 3), ("width()", 4), ("inner()", 4)] {
+                assert!(
+                    result.facts.iter().any(|f| f.kind == "call"
+                        && f.value == value
+                        && f.line == line
+                        && f.end_line == line),
+                    "{result:?}"
+                );
+            }
+            assert!(result.facts.iter().any(|f| f.kind == "call"
+                && f.value == "sink(<JoinedStr>, <JoinedStr>)"
+                && f.line == 2
+                && f.end_line == 4));
+        }
+    }
+
+    #[test]
+    fn policy15_all_dynamic_terminals_inside_replacements() {
+        let names = [
+            "__import__",
+            "import_module",
+            "iter_modules",
+            "walk_packages",
+            "entry_points",
+            "load_entry_point",
+            "find_spec",
+            "exec",
+            "eval",
+        ];
+        let fields = names
+            .iter()
+            .map(|name| format!("{{{name}()}}"))
+            .collect::<String>();
+        let result = accepted(format!("sink(f'{fields}')\n"));
+        assert_eq!(result.diagnostics.len(), 9);
+        for name in names {
+            assert!(result
+                .facts
+                .iter()
+                .any(|f| f.kind == "call" && f.value == format!("{name}()")));
+        }
+        assert!(!result.facts.iter().any(|f| f.kind.starts_with("binding")));
+    }
+
+    #[test]
+    fn policy15_hidden_constructor_include_and_header_guards() {
+        for value in [
+            "f'{FastAPI()}'",
+            "f'{x:{APIRouter()}}'",
+            "f'{f\"{app.include_router()}\"}'",
+        ] {
+            let result = candidates(format!("eval()\nsink({value})\n"));
+            assert_ne!(result.files[0].status, CandidateStatus::AcceptedFacts);
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+        for value in [
+            "f'{hidden()}'",
+            "f'{value:{hidden()}}'",
+            "f'{f\"{hidden()}\"}'",
+        ] {
+            for text in [
+                format!("def f(x={value}): pass\n"),
+                format!("def f() -> {value}: pass\n"),
+                format!("class C({value}): pass\n"),
+                format!("item: {value}\n"),
+            ] {
+                let result = candidates(format!("eval()\n{text}"));
+                assert_ne!(result.files[0].status, CandidateStatus::AcceptedFacts);
+                assert_eq!(result.facts.len(), 1);
+                assert!(result.diagnostics.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn policy15_invalid_prefix_conversion_escape_and_source_quotes() {
+        for value in [
+            "t'text'",
+            "ff'text'",
+            "bf'text'",
+            "ur'text'",
+            "`text`",
+            "f'{x!q}'",
+            "f'{}'",
+            "f'{x!rr}'",
+            "f'\\xQ0{x}'",
+            "f'\\u123{x}'",
+            "f'\\U00110000{x}'",
+            "f'{x:broken'quote}'",
+            "f'line\nbreak{x}'",
+            "f'\\N{LATIN CAPITAL LETTER A}{x}'",
+        ] {
+            let result = candidates(format!("eval()\nsink({value})\n"));
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{value}: {result:?}"
+            );
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn policy15_field_roles_format_text_and_nesting_limit() {
+        for value in ["f'{x:=eval()}'", "f'{x:()[] + eval()}'"] {
+            // G4: := may hit the pinned CST's NamedExpr discrepancy.
+            // It must never manufacture a call out of format text.
+            let result = candidates(format!("sink({value})\n"));
+            assert!(!result
+                .facts
+                .iter()
+                .any(|f| f.kind == "call" && f.value == "eval()"));
+            assert!(result.diagnostics.is_empty());
+        }
+        for value in [
+            "f'{(x:=eval())}'",
+            "f'{yield eval()}'",
+            "f'{eval(), value}'",
+            "f'{x:{y:{eval()}}}'",
+        ] {
+            let result = accepted(format!("sink({value})\n"));
+            assert!(result
+                .facts
+                .iter()
+                .any(|f| f.kind == "call" && f.value == "eval()"));
+        }
+        for value in ["f'{lambda: eval()}'", "f'{x:{y:{z:{eval()}}}}'"] {
+            let result = candidates(format!("eval()\nsink({value})\n"));
+            assert_ne!(result.files[0].status, CandidateStatus::AcceptedFacts);
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn policy15_replacement_comment_context() {
+        for comment in ["# ordinary", "# type: ignore", "# type: ignore[attr]"] {
+            let result = accepted(format!("sink(f'{{\n eval() {comment}\n}}')\n"));
+            assert_eq!(result.diagnostics.len(), 1);
+        }
+        for comment in ["# type: int", "# type: ignoreExtra"] {
+            let result = candidates(format!("eval()\nsink(f'{{\n value {comment}\n}}')\n"));
+            assert_ne!(result.files[0].status, CandidateStatus::AcceptedFacts);
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn policy15_numeric_policy_integration() {
+        for value in [
+            "7".repeat(513),
+            "7".repeat(4300),
+            format!("{}.0", "7".repeat(5000)),
+            format!("{}j", "7".repeat(5000)),
+            format!("0x{}", "f".repeat(5000)),
+        ] {
+            let result = accepted(format!("def f(x={value}): pass\n"));
+            assert!(result
+                .facts
+                .iter()
+                .any(|f| f.kind == "parameter_default" && f.value == "<literal>"));
+        }
+        let result = candidates(format!("eval()\nvalue={}\n", "7".repeat(4301)));
+        assert_ne!(result.files[0].status, CandidateStatus::AcceptedFacts);
+        assert_eq!(result.facts.len(), 1);
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn policy15_opaque_rendering_never_caps_descendant_calls() {
+        let fields = (0..96)
+            .map(|i| format!("{{probe{i}()}}"))
+            .collect::<String>();
+        let result = accepted(format!("sink(f'{fields}{{value:{{eval()}}}}')\n"));
+        assert_eq!(result.facts.iter().filter(|f| f.kind == "call").count(), 98);
+        assert_eq!(result.diagnostics.len(), 1);
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "call" && f.value == "sink(<JoinedStr>)"));
+        let wide = std::iter::repeat_n("value", 20)
+            .collect::<Vec<_>>()
+            .join(",");
+        let result = accepted(format!("sink({wide}, f'{{eval()}}')\n"));
+        assert_eq!(result.diagnostics.len(), 1);
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "call" && f.value == "eval()"));
+        let deep = format!("{}f'{{eval()}}'{}", "[".repeat(16), "]".repeat(16));
+        let result = accepted(format!("sink({deep})\n"));
+        assert_eq!(result.diagnostics.len(), 1);
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "call" && f.value == "eval()"));
+    }
+
+    #[test]
+    fn policy15_walk_resources_replay_and_file_isolation() {
+        let sources = [source("a.py", "a", "sink(f'{eval():{width()}}')\n")];
+        let mut parses = 0;
+        let result = extract(
+            &sources,
+            Limits::default(),
+            FactLimits::default(),
+            |phase| {
+                parses += usize::from(phase == Checkpoint::PostParse);
+                false
+            },
+        )
+        .unwrap();
+        assert_eq!(parses, 1);
+        let parsed = parse_batch(&sources).unwrap();
+        assert_eq!(result.files[0].nodes_visited, parsed.files[0].nodes_visited);
+        assert_eq!(result.files[0].max_depth, parsed.files[0].max_depth);
+        assert_eq!(
+            serde_json::to_vec(&result).unwrap(),
+            serde_json::to_vec(&extract_fact_candidates(&sources).unwrap()).unwrap()
+        );
+        for limits in [
+            FactLimits {
+                working: 1024,
+                ..FactLimits::default()
+            },
+            FactLimits {
+                warnings: 0,
+                ..FactLimits::default()
+            },
+            FactLimits {
+                count: 1,
+                ..FactLimits::default()
+            },
+        ] {
+            let limited = extract(&sources, Limits::default(), limits, |_| false).unwrap();
+            assert_eq!(limited.files[0].status, CandidateStatus::ResourceLimit);
+            assert_eq!(limited.facts.len(), 1);
+            assert!(limited.diagnostics.is_empty());
+        }
+        let limited = extract(
+            &sources,
+            Limits {
+                nodes: parsed.files[0].nodes_visited - 1,
+                ..Limits::default()
+            },
+            FactLimits::default(),
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(limited.files[0].status, CandidateStatus::ResourceLimit);
+        assert_eq!(limited.facts.len(), 1);
+        let cancelled = extract(
+            &sources,
+            Limits::default(),
+            FactLimits::default(),
+            |phase| phase == Checkpoint::Collector,
+        )
+        .unwrap();
+        assert_eq!(cancelled.files[0].status, CandidateStatus::ResourceLimit);
+        assert_eq!(
+            cancelled.files[0].diagnostic,
+            Some(CandidateDiagnostic::Parse(DiagnosticCode::Deadline))
+        );
+        assert_eq!(cancelled.facts.len(), 1);
+        assert!(cancelled.diagnostics.is_empty());
+        let isolated = [
+            source("bad.py", "bad", "eval()\nsink(f'{x!q}')\n"),
+            source("good.py", "good", "sink(f'{eval()}')\n"),
+        ];
+        let result = extract_fact_candidates(&isolated).unwrap();
+        assert_ne!(result.files[0].status, CandidateStatus::AcceptedFacts);
+        assert_eq!(result.files[1].status, CandidateStatus::AcceptedFacts);
+        assert_eq!(
+            result.facts.iter().filter(|f| f.path == "bad.py").count(),
+            1
+        );
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].path, "good.py");
+    }
+
+    #[test]
+    fn policy14_match_starred_subject_requires_a_tuple_comma() {
+        for subject in ["*items", "*factory()", "*items.member", "*items[index]"] {
+            let sources = [
+                source(
+                    "bad.py",
+                    "bad",
+                    format!("eval()\nmatch {subject}:\n    case _: exec()\n"),
+                ),
+                source("good.py", "good", "eval()\n"),
+            ];
+            let result = extract_fact_candidates(&sources).unwrap();
+            assert_eq!(
+                result.files[0].status,
+                CandidateStatus::UnsupportedSyntax,
+                "{subject}: {result:?}"
+            );
+            assert_eq!(result.files[1].status, CandidateStatus::AcceptedFacts);
+            assert_eq!(
+                result.facts.iter().filter(|f| f.path == "bad.py").count(),
+                1
+            );
+            assert_eq!(result.diagnostics.len(), 1);
+            assert_eq!(result.diagnostics[0].path, "good.py");
+        }
+        for (subject, calls) in [
+            ("*items,", 0),
+            ("first(), *items", 1),
+            ("(*items,)", 0),
+            ("*factory(),", 1),
+        ] {
+            let result = accepted(format!("match {subject}:\n    case _: pass\n"));
+            assert_eq!(
+                result.facts.iter().filter(|f| f.kind == "call").count(),
+                calls
+            );
+            assert!(result
+                .facts
+                .iter()
+                .all(|f| matches!(f.kind.as_str(), "module" | "call")));
+        }
+    }
+
+    #[test]
+    fn policy14_class_positional_arguments_keep_named_and_splat_roles() {
+        for (base, rendered) in [
+            ("chosen := Base", "<NamedExpr>"),
+            ("*left if ready else right", "*<IfExp>"),
+            ("*left.member if ready else right", "*<IfExp>"),
+            ("*left[index] if ready else right", "*<IfExp>"),
+            ("*(left if ready else right)", "*<IfExp>"),
+            ("*left or right", "*<BoolOp>"),
+            ("*left < right", "*<Compare>"),
+            ("[(chosen := Base)]", "[<NamedExpr>]"),
+        ] {
+            let result = accepted(format!("class C({base}): pass\n"));
+            let bases: Vec<_> = result
+                .facts
+                .iter()
+                .filter(|f| f.kind == "base")
+                .map(|f| (f.line, f.end_line, f.symbol.as_str(), f.value.as_str()))
+                .collect();
+            assert_eq!(bases, [(1, 1, "sample.C", rendered)], "{base}");
+            assert!(result
+                .facts
+                .iter()
+                .all(|f| matches!(f.kind.as_str(), "module" | "class" | "base")));
+        }
+        for base in [
+            "k=chosen := Base",
+            "[*left if ready else right]",
+            "[*left or right]",
+            "chosen := hidden()",
+            "*left if hidden() else right",
+            "*factory().member if ready else right",
+            "[chosen := hidden()]",
+        ] {
+            let result = candidates(format!("eval()\nclass C({base}): pass\n"));
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{base}: {result:?}"
+            );
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+        let result = accepted("sink(chosen := pick(), *left() if ready() else right())\n");
+        let calls: Vec<_> = result
+            .facts
+            .iter()
+            .filter(|f| f.kind == "call")
+            .map(|f| f.value.as_str())
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                "left()",
+                "pick()",
+                "ready()",
+                "right()",
+                "sink(<NamedExpr>, *<IfExp>)"
+            ]
+        );
+        assert!(result
+            .facts
+            .iter()
+            .all(|f| matches!(f.kind.as_str(), "module" | "call")));
+    }
+
+    #[test]
+    fn policy14_match_calls_alias_order_and_explicit_owners() {
+        let result = accepted(concat!(
+            "from outer import eval as go\n",
+            "def owner():\n",
+            "    match subject(), other():\n",
+            "        case FastAPI(value, prefix=capture) if go():\n",
+            "            from inner import exec as go\n",
+            "            go()\n",
+            "        case APIRouter() if go(): pass\n",
+            "    after()\n",
+            "go()\n",
+        ));
+        assert_eq!(
+            warning_messages(&result),
+            [
+                warning(4, "outer.eval"),
+                warning(6, "inner.exec"),
+                warning(7, "inner.exec"),
+                warning(9, "outer.eval")
+            ]
+        );
+        let calls: Vec<_> = result
+            .facts
+            .iter()
+            .filter(|f| f.kind == "call")
+            .map(|f| (f.line, f.symbol.as_str(), f.value.as_str()))
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                (3, "sample.owner", "other()"),
+                (3, "sample.owner", "subject()"),
+                (4, "sample.owner", "go()"),
+                (6, "sample.owner", "go()"),
+                (7, "sample.owner", "go()"),
+                (8, "sample.owner", "after()"),
+                (9, "sample", "go()"),
+            ]
+        );
+        assert!(!result.facts.iter().any(|f| matches!(
+            f.kind.as_str(),
+            "binding" | "binding_invalidation" | "parameter"
+        )));
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "function" && f.line == 2 && f.end_line == 8));
+        let result =
+            accepted("match written := subject():\n    case _ if other := ready(): pass\n");
+        let calls: Vec<_> = result
+            .facts
+            .iter()
+            .filter(|f| f.kind == "call")
+            .map(|f| (f.line, f.value.as_str()))
+            .collect();
+        assert_eq!(calls, [(1, "subject()"), (2, "ready()")]);
+        assert!(result
+            .facts
+            .iter()
+            .all(|f| matches!(f.kind.as_str(), "module" | "call")));
+        // Preserve the existing compound-statement return-context boundary.
+        let result = candidates("match subject:\n    case _: return work()\n");
+        assert_eq!(result.files[0].status, CandidateStatus::UnsupportedSyntax);
+        assert_eq!(result.facts.len(), 1);
+        accepted("def owner():\n    match subject:\n        case _: return work()\n");
+    }
+
+    #[test]
+    fn policy14_pattern_families_are_neutral_not_calls_or_bindings() {
+        for pattern in [
+            "None",
+            "True",
+            "-2",
+            "1+2j",
+            "'private'",
+            "capture",
+            "pkg.VALUE",
+            "[head, *tail]",
+            "{'private': value, **rest}",
+            "FastAPI(item, prefix=name)",
+            "1 | 2",
+            "(1 | 2) as selected",
+            "head, tail,",
+        ] {
+            let result = accepted(format!(
+                "match subject():\n    case {pattern} if check(): use()\n"
+            ));
+            assert_eq!(
+                result.facts.iter().filter(|f| f.kind == "call").count(),
+                3,
+                "{pattern}"
+            );
+            assert!(
+                result
+                    .facts
+                    .iter()
+                    .all(|f| matches!(f.kind.as_str(), "module" | "call")),
+                "{pattern}"
+            );
+            assert!(!serde_json::to_string(&result.facts)
+                .unwrap()
+                .contains("private"));
+        }
+        accepted("match first(), second(),:\n    case [x, *xs]:\n        while ready():\n            match x:\n                case _: break\n");
+    }
+
+    #[test]
+    fn policy14_match_grammar_and_case_header_layout_fail_closed() {
+        for text in [
+            "match x:\n",
+            "match x: case _: pass",
+            "match x:\n    pass",
+            "match x:\n    case : pass",
+            "match x:\n    case {**_}: pass",
+            "match x:\n    case [**a]: pass",
+            "match x:\n    case C(x=1, y): pass",
+            "match x\n:\n    case _: pass",
+            "match\nx:\n    case _: pass",
+            "match x:\n    case _\n    : pass",
+            "match x:\n    case _ if\n    ready(): pass",
+            "match x:\n    case _ if ready() # comment\n    : pass",
+            "match x:\n    case _: def nested(): pass",
+        ] {
+            let result = candidates(format!("eval()\n{text}\n"));
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{text}: {result:?}"
+            );
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn policy14_generic_declarations_do_not_invent_scope_or_parameter_facts() {
+        let result = accepted(concat!(
+            "from origin import eval as go\n",
+            "type go[T: (Bound, Other), *Ts, **P] = go()\n",
+            "class Box[T: Bound, *Ts, **P](Base[T]):\n",
+            "    type Item[U: (Left | Right)] = go()\n",
+            "    def method[V: Bound](self, item: V) -> V: return go()\n",
+            "go()\n",
+        ));
+        assert_eq!(
+            warning_messages(&result),
+            [
+                warning(2, "origin.eval"),
+                warning(4, "origin.eval"),
+                warning(5, "origin.eval"),
+                warning(6, "origin.eval")
+            ]
+        );
+        let parameters: Vec<_> = result
+            .facts
+            .iter()
+            .filter(|f| f.kind == "parameter")
+            .map(|f| f.value.as_str())
+            .collect();
+        assert_eq!(parameters, ["item", "self"]);
+        assert!(!result.facts.iter().any(|f| matches!(
+            f.kind.as_str(),
+            "binding" | "binding_invalidation" | "attribute_annotation"
+        )));
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "call" && f.line == 4 && f.symbol == "sample.Box"));
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "call" && f.line == 5 && f.symbol == "sample.Box.method"));
+    }
+
+    #[test]
+    fn policy14_type_declarations_reject_non_names_defaults_and_hidden_calls() {
+        for text in [
+            "type obj.member = T",
+            "type A | B = T",
+            "type (A) = T",
+            "type A[B.C] = T",
+            "type A[] = T",
+            "type A[T,,U] = T",
+            "type A[T=U] = T",
+            "def f[T=U](): pass",
+            "class C[T=U]: pass",
+            "def f[T.attr](): pass",
+            "class C[*Ts: Bound]: pass",
+            "type A[**P: Bound] = T",
+            "type A[T: hidden()] = T",
+            "def f[T: (lambda: hidden())](): pass",
+            "class C[T: [x for x in hidden()]]: pass",
+            "type A[T: T[hidden()]] = T",
+            "@decorate\ndef f[T](): pass",
+            "type A = FastAPI()",
+        ] {
+            let result = candidates(format!("eval()\n{text}\n"));
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{text}: {result:?}"
+            );
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn policy14_broad_class_headers_emit_only_positional_bases() {
+        let result = accepted(concat!(
+            "class Box[T](\n",
+            "    Base[T], # base\n",
+            "    *bases,\n",
+            "    left + right,\n",
+            "    metaclass=(lambda: Meta),\n",
+            "    metaclass=Other,\n",
+            "    **options,\n",
+            "): pass\n",
+        ));
+        let bases: Vec<_> = result
+            .facts
+            .iter()
+            .filter(|f| f.kind == "base")
+            .map(|f| (f.line, f.end_line, f.value.as_str()))
+            .collect();
+        assert_eq!(
+            bases,
+            [
+                (2, 2, "Base[T]"),
+                (3, 3, "*bases"),
+                (4, 4, "left Add right")
+            ]
+        );
+        assert!(!result.facts.iter().any(|f| f.kind == "call"));
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "class" && f.end_line == 8));
+        for args in [
+            "",
+            "# comment\n",
+            "\\\n",
+            "Base,",
+            "metaclass=Meta, *bases",
+            "**one, key=Value, **two",
+        ] {
+            accepted(format!("class C({args}): pass\n"));
+        }
+        for args in [
+            ",",
+            "# comment\n,",
+            "Base,,",
+            "key=Meta, Base",
+            "**options, *bases",
+            "T[hidden()]",
+            "metaclass=(lambda: hidden())",
+            "**{key: hidden()}",
+        ] {
+            let result = candidates(format!("eval()\nclass C({args}): pass\n"));
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{args}"
+            );
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn policy14_broad_annotations_multiline_inline_suites_and_raw_symbols() {
+        // G4: Python 3.12 ast.parse accepts this exact ungrouped spelling,
+        // but the pinned grammar reports ERROR. Keep parser failures intact.
+        let ungrouped = candidates("def f(x: T[A][B]) -> T[A][B]: pass\n");
+        assert_eq!(ungrouped.files[0].status, CandidateStatus::SyntaxError);
+        assert_eq!(
+            ungrouped.files[0].diagnostic,
+            Some(CandidateDiagnostic::Parse(DiagnosticCode::SyntaxError))
+        );
+        assert_eq!(ungrouped.facts.len(), 1);
+        let name = "field".repeat(150);
+        let result = accepted(format!("class C:\n    {name}: T[A | B] = value\n    def f(\n        self, x: (lambda: T) = None,\n    ) -> (A | B): pass; use()\n"));
+        assert!(result.facts.iter().any(|f| f.kind == "attribute_annotation"
+            && f.symbol == format!("sample.C.{name}")
+            && f.line == 2
+            && f.end_line == 2));
+        assert!(result.facts.iter().any(|f| f.kind == "parameter_annotation"
+            && f.symbol == "sample.C.f.x"
+            && f.line == 4
+            && f.end_line == 4
+            && f.value == "<Lambda>"));
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "function" && f.line == 3 && f.end_line == 5));
+        for annotation in [
+            "A | B",
+            "(T[A][B])",
+            "T[A:B]",
+            "[x for x in xs]",
+            "lambda: T",
+            "(yield T)",
+            "await T",
+            "(x:=T)",
+        ] {
+            accepted(format!("def f(x: {annotation}) -> {annotation}: pass\n"));
+            let result = candidates(format!(
+                "eval()\ndef f(x: ({annotation}, hidden())): pass\n"
+            ));
+            assert_ne!(result.files[0].status, CandidateStatus::AcceptedFacts);
+            assert_eq!(result.facts.len(), 1);
+        }
+    }
+
+    #[test]
+    fn policy14_star_future_and_inline_import_metadata_are_exact() {
+        let result = accepted(concat!(
+            "from __future__ import (annotations as renamed, division,)\n",
+            "from pkg import *\n",
+            "from ..pkg import *\n",
+            "def f(): from tools import ( # opening\n",
+            "    eval as go, # retained order\n",
+            "    exec,\n",
+            "); go(); exec();\n",
+        ));
+        let imports: Vec<_> = result
+            .facts
+            .iter()
+            .filter(|f| f.kind == "from_import")
+            .map(|f| (f.line, f.end_line, f.symbol.as_str(), f.value.as_str()))
+            .collect();
+        assert_eq!(imports, [
+            (1, 1, "sample", "{\"level\":0,\"module\":\"__future__\",\"names\":[{\"asname\":\"renamed\",\"name\":\"annotations\"},{\"asname\":null,\"name\":\"division\"}]}"),
+            (2, 2, "sample", "{\"level\":0,\"module\":\"pkg\",\"names\":[{\"asname\":null,\"name\":\"*\"}]}"),
+            (3, 3, "sample", "{\"level\":2,\"module\":\"pkg\",\"names\":[{\"asname\":null,\"name\":\"*\"}]}"),
+            (4, 7, "sample.f", "{\"level\":0,\"module\":\"tools\",\"names\":[{\"asname\":\"go\",\"name\":\"eval\"},{\"asname\":null,\"name\":\"exec\"}]}"),
+        ]);
+        assert_eq!(
+            warning_messages(&result),
+            [warning(7, "tools.eval"), warning(7, "tools.exec")]
+        );
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "function" && f.end_line == 7));
+        let result = accepted("from __future__ import eval as go; from tools import *; go()\n");
+        assert_eq!(warning_messages(&result), [warning(1, "__future__.eval")]);
+        for text in [
+            "def f(): from tools import FastAPI",
+            "from __future__ import FastAPI",
+            "if x: import pkg.APIRouter as unused",
+        ] {
+            let result = candidates(format!("eval()\n{text}\n"));
+            assert_eq!(result.files[0].status, CandidateStatus::UnsupportedSyntax);
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn policy14_logical_bridges_tabs_comments_and_simple_separators() {
+        for newline in ["\n", "\r\n"] {
+            let text = concat!(
+                "from\ttools \\\n import eval as go; type Alias[T] = T;\n",
+                "def \\\n owner[T](\n):\n",
+                "\tmatch \\\n subject(), \\\n other():\n",
+                "\t\tcase [x, *xs] \\\n if (\n go() # comment\n ) \\\n : pass; go();\n",
+                "\treturn \\\n go()\n",
+            );
+            let result = accepted(text.replace('\n', newline));
+            assert_eq!(result.diagnostics.len(), 3);
+            assert!(result
+                .facts
+                .iter()
+                .any(|f| f.kind == "call" && f.value == "subject()"));
+            accepted("def f():\\\npass; import tools; type Alias = T;\n".replace('\n', newline));
+            accepted("if\tx: pass\nelse:\n\tpass\n".replace('\n', newline));
+            accepted("class C( # comment\n): import\ttools; pass\n".replace('\n', newline));
+        }
+    }
+
+    #[test]
+    fn policy14_layout_invalid_joins_separators_and_mixed_indentation_rollback() {
+        for text in [
+            "; pass",
+            "pass;; pass",
+            "pass; if x: pass",
+            "pass; def f(): pass",
+            "pass; class C: pass",
+            "import x,",
+            "from x import a,",
+            "from x import (*,)",
+            "from x import * as y",
+            "from x import \\\n\n a",
+            "from x import \\\n# comment\n a",
+            "from x import \\ \n a",
+            "x = \\\n\nvalue",
+            "x = \\\n# comment\nvalue",
+            "x = \\ \nvalue",
+            "if x:\n\t pass",
+            "if x:\n\tpass\n    pass",
+            "if x:\n    pass\nelse:\n\tpass",
+            "match x:\n    case _ \\\n\n    : pass",
+            "type A\n= T",
+            "def f\n(): pass",
+        ] {
+            let result = candidates(format!("eval()\n{text}\n"));
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{text}: {result:?}"
+            );
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+        for text in [b"pass\0".as_slice(), b"x = \\\0value", b"pass\rpass"] {
+            assert_ne!(
+                candidates(text).files[0].status,
+                CandidateStatus::AcceptedFacts
+            );
+        }
+    }
+
+    #[test]
+    fn policy14_resources_cancellation_and_one_counted_walk() {
+        let sources = [source("sample.py", "sample", "from tools import eval as go\nclass C[T: (A | B)](Base[T], metaclass=Meta):\n    match subject():\n        case C(value=x) if go():\n            type Alias[U: Bound] = go()\n            use(x); go()\n")];
+        let mut parses = 0;
+        let mut visits = 0;
+        let full = extract(
+            &sources,
+            Limits::default(),
+            FactLimits::default(),
+            |phase| {
+                parses += usize::from(phase == Checkpoint::PostParse);
+                visits += usize::from(phase == Checkpoint::Collector);
+                false
+            },
+        )
+        .unwrap();
+        assert_eq!(full.files[0].status, CandidateStatus::AcceptedFacts);
+        assert_eq!(parses, 1);
+        let parsed = parse_batch(&sources).unwrap();
+        assert_eq!(full.files[0].nodes_visited, parsed.files[0].nodes_visited);
+        assert_eq!(full.files[0].max_depth, parsed.files[0].max_depth);
+        assert!(full.files[0].traversal_finished);
+        for stop in [1, visits / 2, visits] {
+            let mut seen = 0;
+            let result = extract(
+                &sources,
+                Limits::default(),
+                FactLimits::default(),
+                |phase| {
+                    seen += usize::from(phase == Checkpoint::Collector);
+                    seen == stop
+                },
+            )
+            .unwrap();
+            assert_eq!(result.files[0].status, CandidateStatus::ResourceLimit);
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+        for limits in [
+            FactLimits {
+                count: full.facts.len() - 1,
+                ..FactLimits::default()
+            },
+            FactLimits {
+                warnings: 0,
+                ..FactLimits::default()
+            },
+            FactLimits {
+                working: 1024,
+                ..FactLimits::default()
+            },
+            FactLimits {
+                bytes: serde_json::to_vec(&full).unwrap().len() - 1,
+                ..FactLimits::default()
+            },
+        ] {
+            let result = extract(&sources, Limits::default(), limits, |_| false).unwrap();
+            assert_eq!(result.files[0].status, CandidateStatus::ResourceLimit);
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+        for limits in [
+            Limits {
+                nodes: parsed.files[0].nodes_visited - 1,
+                ..Limits::default()
+            },
+            Limits {
+                depth: parsed.files[0].max_depth - 1,
+                ..Limits::default()
+            },
+        ] {
+            let result = extract(&sources, limits, FactLimits::default(), |_| false).unwrap();
+            assert_eq!(result.files[0].status, CandidateStatus::ResourceLimit);
+            assert_eq!(result.facts.len(), 1);
+        }
+    }
+
+    #[test]
+    fn policy14_file_isolation_replay_digests_and_later_parser_failure() {
+        let sources = [
+            source(
+                "bad.py",
+                "same",
+                "from tools import eval as go\nmatch x:\n\tcase _: go(); FastAPI()\n",
+            ),
+            source(
+                "good.py",
+                "same",
+                "type Alias[T] = go()\nmatch x:\n    case FastAPI(): go()\n",
+            ),
+        ];
+        let result = extract_fact_candidates(&sources).unwrap();
+        assert_eq!(result.files[0].status, CandidateStatus::UnsupportedSyntax);
+        assert_eq!(result.files[1].status, CandidateStatus::AcceptedFacts);
+        assert!(result.diagnostics.is_empty());
+        assert_eq!(
+            result.facts.iter().filter(|f| f.path == "bad.py").count(),
+            1
+        );
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.path == "good.py" && f.kind == "call" && f.value == "go()"));
+        assert_eq!(
+            serde_json::to_vec(&result).unwrap(),
+            serde_json::to_vec(&extract_fact_candidates(&sources).unwrap()).unwrap()
+        );
+        assert_eq!(
+            result.files[1].sha256,
+            super::super::super::hash(&sources[1].bytes)
+        );
+        let result = candidates("match x:\n    case _: FastAPI()\ndef broken(:\n");
+        assert_eq!(result.files[0].status, CandidateStatus::SyntaxError);
+        assert_eq!(result.facts.len(), 1);
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn policy13_four_opaque_shapes_root_invalidation_and_no_named_write() {
+        for (value, shape) in [
+            ("await hidden()", "<Await>"),
+            ("(yield hidden())", "<Yield>"),
+            ("(yield from hidden())", "<YieldFrom>"),
+            ("(written := hidden())", "<NamedExpr>"),
+        ] {
+            let result = accepted(format!("item = {value}\nsink({value})\n"));
+            let writes: Vec<_> = result
+                .facts
+                .iter()
+                .filter(|f| f.kind == "binding" || f.kind == "binding_invalidation")
+                .map(|f| (f.kind.as_str(), f.value.as_str()))
+                .collect();
+            assert_eq!(writes, [("binding_invalidation", "{\"target\":\"item\"}")]);
+            assert!(result
+                .facts
+                .iter()
+                .any(|f| f.kind == "call" && f.value == format!("sink({shape})")));
+            assert_eq!(
+                result
+                    .facts
+                    .iter()
+                    .filter(|f| f.kind == "call" && f.value == "hidden()")
+                    .count(),
+                2
+            );
+            for outer in [format!("({value}).field"), format!("({value})()")] {
+                let result = accepted(format!("item = {outer}\n"));
+                assert!(result
+                    .facts
+                    .iter()
+                    .any(|f| f.kind == "binding" && f.value.contains(shape)));
+            }
+        }
+        let result = accepted("class C:\n    (field := value)\n");
+        assert!(result
+            .facts
+            .iter()
+            .all(|f| matches!(f.kind.as_str(), "module" | "class")));
+    }
+
+    #[test]
+    fn policy13_ast_not_compiler_scope_contexts() {
+        for text in [
+            "await value\nyield\nyield value\nyield from values\n",
+            "def f():\n    await value\n    yield value\n",
+            "sink(lambda: await value)\nsink(lambda: (yield value))\n",
+            "def f(a=(yield value), b=await other, c=(name := value)): pass\n",
+            "sink([(yield x) for x in xs])\nsink([await x for x in xs])\n",
+            "sink([x := x for x in xs])\nsink([x for x in (ys := values)])\n",
+            "class C:\n    sink([x := x for x in xs])\n",
+            "for x in *xs: pass\n",
+        ] {
+            accepted(text);
+        }
+    }
+
+    #[test]
+    fn policy13_named_raw_and_grouped_positive_roles() {
+        for text in [
+            "if x := value: pass\nelif y := other: pass\n",
+            "while x := value: pass\n",
+            "sink(x := value)\nsink([x := value], (x := value,), {x := value})\n",
+            "sink([x := value for item in xs])\nsink({x := value for item in xs})\n",
+            "sink(x := value for item in xs)\nsink(items[x := value])\n",
+        ] {
+            accepted(text);
+        }
+        for value in ["(x := value)", "(x := (y := value))"] {
+            for text in [
+                format!("{value}\nitem = {value}\n"),
+                format!("def f():\n    return {value}\n"),
+                format!("raise {value}\nassert {value}\nyield {value}\n"),
+                format!("def f(a={value}): pass\nsink(lambda: {value})\n"),
+                format!("sink(k={value}, *{value}, **{value})\n"),
+                format!("sink({{{value}: {value}}})\n"),
+                format!("sink({{{value}: {value} for item in xs}})\n"),
+                format!("sink([item for item in {value} if {value}])\n"),
+                format!("sink({value} if {value} else {value})\n"),
+                format!("sink({value} + {value}, not {value}, {value} < {value})\n"),
+                format!("sink(items[{value}:{value}:{value}])\n"),
+            ] {
+                accepted(text);
+            }
+        }
+    }
+
+    #[test]
+    fn policy13_named_grouping_and_identifier_failures_rollback() {
+        for text in [
+            "x := value",
+            "item = x := value",
+            "def f():\n    return x := value",
+            "raise x := value",
+            "assert x := value",
+            "yield x := value",
+            "def f(a=x := value): pass",
+            "sink(lambda: x := value)",
+            "sink(k=x := value)",
+            "sink(*x := value)",
+            "sink(**x := value)",
+            "sink({x := value: other})",
+            "sink({key: x := value})",
+            "sink({x := value: other for item in xs})",
+            "sink({key: x := value for item in xs})",
+            "sink([item for item in x := value])",
+            "sink([item for item in xs if x := value])",
+            "sink(x := value if y := other else z)",
+            "sink(left if ready else x := value)",
+            "sink(left or x := value)",
+            "sink(not x := value)",
+            "sink(left < x := value)",
+            "sink(items[x := value:stop])",
+            "sink(items[start:x := value])",
+            "sink(x := y := value)",
+            "for item in x := values: pass",
+            "sink((obj.field := value))",
+            "sink((items[0] := value))",
+            "sink(((x) := value))",
+            "sink((x, y := value)) = value",
+            "sink((True := value))",
+            "sink((\u{212a} := value))",
+            "sink((x :=))",
+            "sink((:= value))",
+        ] {
+            let result = candidates(format!("eval()\n{text}\n"));
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{text}"
+            );
+            assert_eq!(result.facts.len(), 1, "{text}");
+            assert!(result.diagnostics.is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn policy13_yield_roles_tuples_stars_and_from_token() {
+        for text in [
+            "yield\nyield value\nyield a,b\nyield *xs, last\n",
+            "item = yield\nitem: T = yield value\nitem += yield from values\n",
+            "yield from (x := values)\nyield from (yield value)\n",
+            "sink((yield), (yield a,b), (yield value,), (yield from values))\n",
+            "sink([(yield value)], {(yield value)}, {(yield key): (yield value)})\n",
+            "sink((yield value) + (yield other))\nsink(lambda: (yield value))\n",
+            "def f(a=(yield value)): pass\n",
+            "def f():\n    return (yield value)\n",
+        ] {
+            accepted(text);
+        }
+        let result = accepted("sink((yield 'from'))\n");
+        assert!(result.facts.iter().any(|f| f.value == "sink(<Yield>)"));
+        for text in [
+            "yield from",
+            "yield from *xs",
+            "yield from x := value",
+            "yield from yield value",
+            "yield from a,b",
+            "sink(yield value)",
+            "sink([yield value])",
+            "sink({yield value})",
+            "def f():\n    return yield value",
+            "def f(a=yield value): pass",
+            "sink(lambda: yield value)",
+            "sink(left + yield value)",
+            "sink(left if yield value else right)",
+            "for item in yield values: pass",
+            "sink(a < lambda: value)",
+        ] {
+            let result = candidates(format!("eval()\n{text}\n"));
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{text}"
+            );
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn policy13_await_primary_roles_and_grouping() {
+        for operand in [
+            "value",
+            "obj.field",
+            "items[index()]",
+            "factory()",
+            "factory()().field[index()]",
+            "None",
+            "True",
+            "1",
+            "'text'",
+            "[]",
+            "{}",
+            "{value}",
+            "(value,)",
+            "[x for x in xs]",
+            "{x for x in xs}",
+            "{x: x for x in xs}",
+            "(x for x in xs)",
+            "(await value)",
+            "(-value)",
+            "(left + right)",
+            "(lambda: value)",
+            "(yield value)",
+            "(x := value)",
+        ] {
+            accepted(format!("sink(await {operand})\n"));
+        }
+        for operand in [
+            "await value",
+            "-value",
+            "+value",
+            "~value",
+            "*xs",
+            "yield value",
+        ] {
+            let result = candidates(format!("eval()\nsink(await {operand})\n"));
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{operand}"
+            );
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn policy13_await_power_association_budget_and_call_spans() {
+        for (value, shape) in [
+            ("await value ** exponent", "<Await> Pow exponent"),
+            ("await (value ** exponent)", "<Await>"),
+            ("await x ** y ** z", "<Await> Pow y Pow z"),
+            ("await x ** await y ** z", "<Await> Pow <Await> Pow z"),
+            ("await x ** -y", "<Await> Pow <UnaryOp>"),
+            ("await left() ** right()", "<Await> Pow right()"),
+        ] {
+            let result = accepted(format!("sink({value})\n"));
+            assert!(
+                result
+                    .facts
+                    .iter()
+                    .any(|f| f.kind == "call" && f.value == format!("sink({shape})")),
+                "{value}"
+            );
+        }
+        let result = accepted("sink(\n await left(\n  eval()\n ) ** right(\n  exec()\n )\n)\n");
+        for (value, line, end) in [
+            ("left(eval())", 2, 4),
+            ("right(exec())", 4, 6),
+            ("eval()", 3, 3),
+            ("exec()", 5, 5),
+        ] {
+            assert_eq!(
+                result
+                    .facts
+                    .iter()
+                    .filter(|f| f.kind == "call"
+                        && f.value == value
+                        && f.line == line
+                        && f.end_line == end)
+                    .count(),
+                1
+            );
+        }
+        let result = accepted(format!(
+            "sink(await x ** {})",
+            std::iter::repeat_n("y", 16)
+                .collect::<Vec<_>>()
+                .join(" ** ")
+        ));
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "call" && f.value.contains("...")));
+    }
+
+    #[test]
+    fn policy13_alias_constancy_all_dynamic_terminals_and_no_scope_changes() {
+        for terminal in [
+            "__import__",
+            "import_module",
+            "iter_modules",
+            "walk_packages",
+            "entry_points",
+            "load_entry_point",
+            "find_spec",
+            "exec",
+            "eval",
+        ] {
+            for value in [
+                "await probe()",
+                "(yield probe())",
+                "(yield from probe())",
+                "(probe := probe())",
+            ] {
+                let result = accepted(format!(
+                    "from tools import {terminal} as probe\nsink({value})\nprobe()\n"
+                ));
+                assert_eq!(result.diagnostics.len(), 2, "{terminal}: {value}");
+                assert!(result
+                    .diagnostics
+                    .iter()
+                    .all(|w| w.message.contains(&format!("tools.{terminal};"))));
+                assert!(!result.facts.iter().any(|f| f.kind.starts_with("binding")));
+            }
+        }
+        let result = accepted("from tools import eval as probe\nsink(lambda probe: (probe := probe()))\nsink([probe := probe() for probe in values])\nprobe()\n");
+        assert_eq!(result.diagnostics.len(), 3);
+        assert!(result
+            .facts
+            .iter()
+            .filter(|f| f.kind == "call")
+            .all(|f| f.symbol == "sample"));
+    }
+
+    #[test]
+    fn policy13_opaque_render_budget_does_not_hide_descendant_calls() {
+        for value in [
+            "await eval()",
+            "(yield eval())",
+            "(yield from eval())",
+            "(x := eval())",
+        ] {
+            let args = std::iter::repeat_n(value, 18)
+                .collect::<Vec<_>>()
+                .join(",\n");
+            let result = accepted(format!("sink({args}, last)\n"));
+            assert_eq!(result.diagnostics.len(), 18);
+            assert_eq!(
+                result
+                    .facts
+                    .iter()
+                    .filter(|f| f.kind == "call" && f.value == "eval()")
+                    .count(),
+                18
+            );
+            let outer = result
+                .facts
+                .iter()
+                .find(|f| f.kind == "call" && f.value.starts_with("sink("))
+                .unwrap();
+            assert_eq!(outer.value.matches('<').count(), 16);
+            assert!(outer.value.ends_with(", ...)"));
+        }
+        let wide = std::iter::repeat_n("item", 100)
+            .collect::<Vec<_>>()
+            .join(",");
+        for value in [
+            format!("await [{wide}, eval()]"),
+            format!("(yield [{wide}, eval()])"),
+            format!("(yield from [{wide}, eval()])"),
+            format!("(x := [{wide}, eval()])"),
+        ] {
+            let result = accepted(format!("sink({value}, last)\n"));
+            assert!(result
+                .facts
+                .iter()
+                .any(|f| f.kind == "call" && f.value.ends_with(", last)")));
+            assert_eq!(result.diagnostics.len(), 1);
+        }
+    }
+
+    #[test]
+    fn policy13_hidden_guards_and_recursive_call_free_defaults() {
+        for (value, shape) in [
+            ("await value", "<Await>"),
+            ("(yield value)", "<Yield>"),
+            ("(yield from value)", "<YieldFrom>"),
+            ("(x := T)", "<NamedExpr>"),
+        ] {
+            let result = accepted(format!(
+                "class C({value}):\n field: ({value})\ndef f(a: ({value})) -> ({value}): pass\n"
+            ));
+            for kind in [
+                "base",
+                "attribute_annotation",
+                "parameter_annotation",
+                "return_annotation",
+            ] {
+                assert!(
+                    result
+                        .facts
+                        .iter()
+                        .any(|f| f.kind == kind && f.value == shape),
+                    "{value}: {result:?}"
+                );
+            }
+            assert!(!result
+                .facts
+                .iter()
+                .any(|f| matches!(f.kind.as_str(), "call" | "binding" | "binding_invalidation")));
+            assert!(result.diagnostics.is_empty());
+        }
+        for hidden in ["FastAPI()", "pkg.APIRouter()", "obj.include_router(child)"] {
+            for value in [
+                format!("await {hidden}"),
+                format!("(yield {hidden})"),
+                format!("(yield from {hidden})"),
+                format!("(x := {hidden})"),
+            ] {
+                let result =
+                    candidates(format!("eval()\nsink(lambda: [{value} for item in xs])\n"));
+                assert_ne!(result.files[0].status, CandidateStatus::AcceptedFacts);
+                assert_eq!(result.facts.len(), 1);
+                assert!(result.diagnostics.is_empty());
+            }
+        }
+        for value in [
+            "await eval()",
+            "(yield eval())",
+            "(yield from eval())",
+            "(x := eval())",
+            "lambda: await eval()",
+            "[await eval() for x in xs]",
+        ] {
+            let result = candidates(format!("eval()\ndef f(a={value}): pass\n"));
+            assert_ne!(result.files[0].status, CandidateStatus::AcceptedFacts);
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+        for text in [
+            "self.router = (x := value)",
+            "self.prefix += await value",
+            "del (await value).router",
+            "class C(await hidden()): pass",
+            "def f(a: (x := hidden())): pass",
+            "@decorate(await value)\ndef f(): pass",
+        ] {
+            assert_ne!(
+                candidates(text).files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn policy13_shared_limits_cancellation_and_counted_walk() {
+        let sources = [source("a.py", "a", "sink(await left(eval()) ** await right(exec()), (yield from values()), (x := probe()))\n")];
+        let mut parses = 0;
+        let mut visits = 0;
+        let full = extract(
+            &sources,
+            Limits::default(),
+            FactLimits::default(),
+            |phase| {
+                parses += usize::from(phase == Checkpoint::PostParse);
+                visits += usize::from(phase == Checkpoint::Collector);
+                false
+            },
+        )
+        .unwrap();
+        assert_eq!(full.files[0].status, CandidateStatus::AcceptedFacts);
+        assert_eq!(parses, 1);
+        let parsed = parse_batch(&sources).unwrap();
+        assert_eq!(full.files[0].nodes_visited, parsed.files[0].nodes_visited);
+        assert_eq!(full.files[0].max_depth, parsed.files[0].max_depth);
+        for stop in [1, visits / 2, visits] {
+            let mut seen = 0;
+            let result = extract(
+                &sources,
+                Limits::default(),
+                FactLimits::default(),
+                |phase| {
+                    seen += usize::from(phase == Checkpoint::Collector);
+                    seen == stop
+                },
+            )
+            .unwrap();
+            assert_eq!(result.files[0].status, CandidateStatus::ResourceLimit);
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+        for limits in [
+            FactLimits {
+                working: 1024,
+                ..FactLimits::default()
+            },
+            FactLimits {
+                warnings: 0,
+                ..FactLimits::default()
+            },
+            FactLimits {
+                count: full.facts.len() - 1,
+                ..FactLimits::default()
+            },
+            FactLimits {
+                bytes: serde_json::to_vec(&full).unwrap().len() - 1,
+                ..FactLimits::default()
+            },
+        ] {
+            let result = extract(&sources, Limits::default(), limits, |_| false).unwrap();
+            assert_eq!(result.files[0].status, CandidateStatus::ResourceLimit);
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+        for limits in [
+            Limits {
+                nodes: parsed.files[0].nodes_visited - 1,
+                ..Limits::default()
+            },
+            Limits {
+                depth: parsed.files[0].max_depth - 1,
+                ..Limits::default()
+            },
+        ] {
+            let result = extract(&sources, limits, FactLimits::default(), |_| false).unwrap();
+            assert_eq!(result.files[0].status, CandidateStatus::ResourceLimit);
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn policy13_replay_isolation_and_arena_release() {
+        let sources = [
+            source(
+                "bad.py",
+                "bad",
+                "from tools import eval as leak\nsink(await leak())\nsink(k=x := value)\n",
+            ),
+            source("syntax.py", "syntax", "sink((yield eval()))\nsink(\n"),
+            source(
+                "good.py",
+                "good",
+                "sink((x := leak()), (yield eval()), await value ** exponent)\n",
+            ),
+        ];
+        let result = extract_fact_candidates(&sources).unwrap();
+        assert_ne!(result.files[0].status, CandidateStatus::AcceptedFacts);
+        assert_eq!(result.files[1].status, CandidateStatus::SyntaxError);
+        assert_eq!(result.files[2].status, CandidateStatus::AcceptedFacts);
+        assert_eq!(
+            result.facts.iter().filter(|f| f.path != "good.py").count(),
+            2
+        );
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].path, "good.py");
+        assert_eq!(
+            serde_json::to_vec(&result).unwrap(),
+            serde_json::to_vec(&extract_fact_candidates(&sources).unwrap()).unwrap()
+        );
+        let sources = [source(
+            "a.py",
+            "a",
+            "sink(await value ** exponent, (yield item), (x := item))\n".repeat(80),
+        )];
+        let result = extract(
+            &sources,
+            Limits::default(),
+            FactLimits {
+                working: 128 * 1024,
+                ..FactLimits::default()
+            },
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(result.files[0].status, CandidateStatus::AcceptedFacts);
+    }
+
+    #[test]
+    fn policy12_opaque_shapes_and_root_binding_invalidation() {
+        for (value, shape) in [
+            ("lambda: hidden()", "<Lambda>"),
+            ("[hidden() for x in xs]", "<ListComp>"),
+            ("{hidden() for x in xs}", "<SetComp>"),
+            ("{x: hidden() for x in xs}", "<DictComp>"),
+            ("(hidden() for x in xs)", "<GeneratorExp>"),
+        ] {
+            let result = accepted(format!("item = {value}\nsink({value})\n"));
+            assert!(result
+                .facts
+                .iter()
+                .any(|f| f.kind == "binding_invalidation" && f.value == "{\"target\":\"item\"}"));
+            assert!(!result.facts.iter().any(|f| f.kind == "binding"));
+            assert!(result
+                .facts
+                .iter()
+                .any(|f| f.kind == "call" && f.value == format!("sink({shape})")));
+            assert_eq!(
+                result
+                    .facts
+                    .iter()
+                    .filter(|f| f.kind == "call" && f.value == "hidden()")
+                    .count(),
+                2
+            );
+        }
+    }
+
+    #[test]
+    fn policy12_arbitrary_callee_receiver_and_attribute_binding() {
+        let result = accepted(concat!(
+            "a = (lambda: foo())()\n",
+            "b = [x for x in values()].field\n",
+            "c = (x for x in values())()\n",
+        ));
+        for shape in ["<Lambda>()", "<ListComp>.field", "<GeneratorExp>()"] {
+            assert!(
+                result
+                    .facts
+                    .iter()
+                    .any(|f| f.kind == "binding" && f.value.contains(shape)),
+                "{shape}"
+            );
+        }
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "call" && f.value == "foo()"));
+        accepted("try: pass\nexcept lambda a=E: a as error: pass\n");
+        accepted("try: pass\nexcept A if ready else lambda: E as error: pass\n");
+    }
+
+    #[test]
+    fn policy12_lambda_operand_roles_require_raw_grouping() {
+        for form in [
+            "sink(flag or lambda: exec())",
+            "sink(flag and lambda: eval())",
+            "sink(not lambda: eval())",
+            "sink(left if lambda: test() else right)",
+            "def f(value=flag or lambda: item): pass",
+        ] {
+            let sources = [
+                source("a.py", "a", format!("eval()\n{form}\n")),
+                source("b.py", "b", "okay()\n"),
+            ];
+            let result = extract_fact_candidates(&sources).unwrap();
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{form}"
+            );
+            assert_eq!(result.files[1].status, CandidateStatus::AcceptedFacts);
+            assert_eq!(result.facts.iter().filter(|f| f.path == "a.py").count(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+        for text in [
+            "sink(flag or (lambda: eval()))",
+            "sink(not (lambda: eval()))",
+            "sink(left if (lambda: test()) else right)",
+            "sink(lambda: flag or eval())",
+            "sink(left if ready else lambda: eval())",
+            "def f(value=flag or (lambda: item)): pass",
+        ] {
+            accepted(text);
+        }
+    }
+
+    #[test]
+    fn policy12_lambda_parameter_roles_and_ast_only_duplicates() {
+        for parameters in [
+            "",
+            "a",
+            "a, a",
+            "a=one, a=two",
+            "a, /",
+            "a=one, /, b=two",
+            "a, /, b=two, *rest, c=three, d, **opts,",
+            "*, a=one, b",
+            "*rest",
+            "**opts,",
+            "a, *a, **a",
+        ] {
+            let result = accepted(format!("sink(lambda {parameters}: body())\n"));
+            assert!(result
+                .facts
+                .iter()
+                .any(|f| f.kind == "call" && f.value == "sink(<Lambda>)"));
+            assert!(result
+                .facts
+                .iter()
+                .all(|f| matches!(f.kind.as_str(), "module" | "call")));
+        }
+        for parameters in [
+            "/",
+            "*",
+            "*, **opts",
+            "a, /, /",
+            "a, *rest, /",
+            "**opts, a",
+            "*a, *b",
+            "**a, **b",
+            "a=one, b",
+            "a=one, /, b",
+            "a: T",
+            "a: T=one",
+            "(a,b)",
+            "(a,b)=one",
+            "*obj.attr",
+            "**obj[index]",
+            "*rest=one",
+            "True",
+            "\u{03bb}",
+        ] {
+            let result = candidates(format!("eval()\nsink(lambda {parameters}: body())\n"));
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{parameters}"
+            );
+            assert_eq!(result.facts.len(), 1, "{parameters}");
+            assert!(result.diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn policy12_default_mode_is_recursive_and_nested_dispatch_stays_in_arena() {
+        for value in [
+            "lambda a=one, *, b=two: a",
+            "[x for x in xs if x]",
+            "{x for x in xs}",
+            "{x: x for x in xs}",
+            "(x for x in xs)",
+            "lambda a=lambda b=one: b: a",
+        ] {
+            let result = accepted(format!("def f(value={value}): pass\n"));
+            assert_eq!(
+                result
+                    .facts
+                    .iter()
+                    .filter(|f| f.kind == "parameter_default")
+                    .count(),
+                1
+            );
+            assert!(!result.facts.iter().any(|f| f.kind == "call"));
+        }
+        accepted("sink(lambda a=default_call(), *, b=kw_call(): body_call())\n");
+        for value in [
+            "lambda: eval()",
+            "lambda a=eval(): a",
+            "lambda *, a=eval(): a",
+            "lambda a=lambda: eval(): a",
+            "[eval() for x in xs]",
+            "[x for items[eval()] in xs]",
+            "[x for x in eval()]",
+            "[x for x in xs if eval()]",
+            "{eval(): x for x in xs}",
+            "{x: eval() for x in xs}",
+            "(eval() for x in xs)",
+        ] {
+            let result = candidates(format!("eval()\ndef f(value={value}): pass\n"));
+            assert_eq!(
+                result.files[0].status,
+                CandidateStatus::UnsupportedSyntax,
+                "{value}"
+            );
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn policy12_comprehension_clauses_targets_and_owner_are_neutral() {
+        let result = accepted(concat!(
+            "class C:\n    def f():\n",
+            "        [result() async for (self.router, [items[index()], *rest]) in source() if first() if second() for factory().prefix in more() if final()]\n",
+            "        (result() async for x in source())\n",
+            "        [[*xs] for x in xs]\n",
+            "        after()\n",
+        ));
+        assert!(result
+            .facts
+            .iter()
+            .filter(|f| f.kind == "call")
+            .all(|f| f.symbol == "sample.C.f"));
+        for value in [
+            "result()",
+            "index()",
+            "source()",
+            "first()",
+            "second()",
+            "factory()",
+            "more()",
+            "final()",
+            "after()",
+        ] {
+            assert!(
+                result
+                    .facts
+                    .iter()
+                    .any(|f| f.kind == "call" && f.value == value),
+                "{value}"
+            );
+        }
+        assert!(!result.facts.iter().any(|f| f.kind.starts_with("binding")));
+    }
+
+    #[test]
+    fn policy12_comprehension_raw_wrappers_and_star_roles() {
+        for value in [
+            "[x for x in (a,b)]",
+            "[x for x in (a if b else c)]",
+            "[x for x in (lambda: xs)]",
+            "[x for x in xs if (a if b else c)]",
+            "[x for x in xs if (lambda: flag)]",
+            "[x for (a,*b) in xs]",
+            "[x for [a,*b] in xs]",
+            "[[*x] for x in xs]",
+        ] {
+            accepted(format!("sink({value})\n"));
+        }
+        for value in [
+            "[x for x in a,b]",
+            "[x for x in xs,]",
+            "[x for x in lambda: xs]",
+            "[x for x in a if b else c]",
+            "[x for x in xs if lambda: flag]",
+            "[x for x in xs if a if b else c]",
+            "[*x for x in xs]",
+            "{*x for x in xs}",
+            "(*x for x in xs)",
+            "{**x for x in xs}",
+            "{*x: y for x in xs}",
+            "{x: *y for x in xs}",
+            "[x for x in *xs]",
+            "[x for x in xs if *flag]",
+            "[x for call() in xs]",
+            "[x for (lambda: y) in xs]",
+            "[x if flag for x in xs]",
+            "[for x in xs]",
+            "[x for in xs]",
+            "[x for x in]",
+        ] {
+            let result = candidates(format!("eval()\nsink({value})\n"));
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{value}"
+            );
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn policy12_direct_generator_argument_shape_spans_and_sole_argument() {
+        let result = accepted("sink(\n    inner() for x in source()\n)\nsink((inner() for x in source()), other, key=value)\n");
+        for (line, end, value) in [
+            (1, 3, "sink(<GeneratorExp>)"),
+            (2, 2, "inner()"),
+            (2, 2, "source()"),
+            (4, 4, "sink(<GeneratorExp>, other, key=value)"),
+        ] {
+            assert!(
+                result.facts.iter().any(|f| f.kind == "call"
+                    && f.line == line
+                    && f.end_line == end
+                    && f.value == value),
+                "{value}"
+            );
+        }
+        for args in [
+            "x for x in xs,",
+            "x for x in xs,other",
+            "x for x in xs,key=v",
+            "key=v,x for x in xs",
+        ] {
+            let result = candidates(format!("eval()\nsink({args})\n"));
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{args}"
+            );
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn policy12_hidden_dynamic_calls_all_roles_and_alias_binders_are_neutral() {
+        for name in DYNAMIC_NAMES {
+            for value in [
+                format!("lambda a={name}(), *, b=kw(): body()"),
+                format!("lambda: {name}()"),
+                format!("[{name}() for x in xs]"),
+                format!("[x for items[{name}()] in xs]"),
+                format!("[x for x in {name}()]"),
+                format!("[x for x in xs if {name}()]"),
+                format!("{{{name}(): x for x in xs}}"),
+                format!("{{x: {name}() for x in xs}}"),
+                format!("({name}() for x in xs)"),
+            ] {
+                let result = accepted(format!("sink({value})\n"));
+                assert_eq!(warning_messages(&result), [warning(1, name)], "{value}");
+            }
+        }
+        let result = accepted(concat!(
+            "from importlib import import_module as load\n",
+            "sink(lambda load: load())\n",
+            "[load() for load in xs]\n",
+            "load()\n",
+        ));
+        assert_eq!(
+            warning_messages(&result),
+            [
+                warning(2, "importlib.import_module"),
+                warning(3, "importlib.import_module"),
+                warning(4, "importlib.import_module")
+            ]
+        );
+    }
+
+    #[test]
+    fn policy12_hidden_guards_future_forms_and_headers_remain_excluded() {
+        for hidden in [
+            "FastAPI()",
+            "pkg.APIRouter()",
+            "obj.include_router(x)",
+            "await FastAPI()",
+            "(yield pkg.APIRouter())",
+            "(yield from obj.include_router(xs))",
+            "(x:=FastAPI())",
+        ] {
+            for value in [
+                format!("lambda a={hidden}: a"),
+                format!("lambda *, a={hidden}: a"),
+                format!("lambda: {hidden}"),
+                format!("[{hidden} for x in xs]"),
+                format!("[x for items[{hidden}] in xs]"),
+                format!("[x for x in {hidden}]"),
+                format!("[x for x in xs if {hidden}]"),
+                format!("{{{hidden}: x for x in xs}}"),
+                format!("{{x: {hidden} for x in xs}}"),
+                format!("({hidden} for x in xs)"),
+            ] {
+                let result = candidates(format!("eval()\nsink({value})\n"));
+                assert_ne!(
+                    result.files[0].status,
+                    CandidateStatus::AcceptedFacts,
+                    "{value}"
+                );
+                assert_eq!(result.facts.len(), 1);
+                assert!(result.diagnostics.is_empty());
+            }
+        }
+        for text in [
+            "class C([eval() for x in xs]): pass",
+            "def f(x: (lambda: eval())): pass",
+            "@decorate(lambda: eval())\ndef f(): pass",
+            "def f(x=lambda: eval()): pass",
+            "match x:\n    case {**_}: pass",
+        ] {
+            let result = candidates(text);
+            assert_ne!(
+                result.files[0].status,
+                CandidateStatus::AcceptedFacts,
+                "{text}"
+            );
+            assert_eq!(result.facts.len(), 1);
+        }
+    }
+
+    #[test]
+    fn policy12_opaque_children_do_not_spend_parent_render_budget_or_hide_calls() {
+        let arguments = std::iter::repeat_n("lambda: eval()", 18)
+            .collect::<Vec<_>>()
+            .join(",");
+        let result = accepted(format!("sink({arguments})\n"));
+        let expected = format!(
+            "sink({}, ...)",
+            std::iter::repeat_n("<Lambda>", 16)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "call" && f.value == expected));
+        assert_eq!(result.diagnostics.len(), 18);
+        let nested = format!("{}lambda: eval(){}", "wrap(".repeat(15), ")".repeat(15));
+        let result = accepted(nested);
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "call" && f.value == "eval()"));
+        let wide = std::iter::repeat_n("x", 100).collect::<Vec<_>>().join(",");
+        let result = accepted(format!("sink(lambda: [{wide}, eval()], last)"));
+        assert!(result
+            .facts
+            .iter()
+            .any(|f| f.kind == "call" && f.value == "sink(<Lambda>, last)"));
+        assert_eq!(warning_messages(&result), [warning(1, "eval")]);
+    }
+
+    #[test]
+    fn policy12_resources_cancellation_and_one_counted_walk() {
+        let sources = [source(
+            "a.py",
+            "a",
+            "sink(lambda a=eval(): [body() async for items[index()] in source() if test()])\n",
+        )];
+        let mut parses = 0;
+        let mut visits = 0;
+        let full = extract(
+            &sources,
+            Limits::default(),
+            FactLimits::default(),
+            |phase| {
+                parses += usize::from(phase == Checkpoint::PostParse);
+                visits += usize::from(phase == Checkpoint::Collector);
+                false
+            },
+        )
+        .unwrap();
+        assert_eq!(full.files[0].status, CandidateStatus::AcceptedFacts);
+        assert_eq!(parses, 1);
+        let parsed = parse_batch(&sources).unwrap();
+        assert_eq!(full.files[0].nodes_visited, parsed.files[0].nodes_visited);
+        assert_eq!(full.files[0].max_depth, parsed.files[0].max_depth);
+        for stop in [1, visits / 2, visits] {
+            let mut seen = 0;
+            let result = extract(
+                &sources,
+                Limits::default(),
+                FactLimits::default(),
+                |phase| {
+                    seen += usize::from(phase == Checkpoint::Collector);
+                    seen == stop
+                },
+            )
+            .unwrap();
+            assert_eq!(result.files[0].status, CandidateStatus::ResourceLimit);
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+        for limits in [
+            FactLimits {
+                working: 1024,
+                ..FactLimits::default()
+            },
+            FactLimits {
+                count: full.facts.len() - 1,
+                ..FactLimits::default()
+            },
+            FactLimits {
+                warnings: 0,
+                ..FactLimits::default()
+            },
+            FactLimits {
+                bytes: serde_json::to_vec(&full).unwrap().len() - 1,
+                ..FactLimits::default()
+            },
+        ] {
+            let result = extract(&sources, Limits::default(), limits, |_| false).unwrap();
+            assert_eq!(result.files[0].status, CandidateStatus::ResourceLimit);
+            assert_eq!(result.facts.len(), 1);
+            assert!(result.diagnostics.is_empty());
+        }
+        for limits in [
+            Limits {
+                nodes: parsed.files[0].nodes_visited - 1,
+                ..Limits::default()
+            },
+            Limits {
+                depth: parsed.files[0].max_depth - 1,
+                ..Limits::default()
+            },
+        ] {
+            let result = extract(&sources, limits, FactLimits::default(), |_| false).unwrap();
+            assert_eq!(result.files[0].status, CandidateStatus::ResourceLimit);
+            assert_eq!(result.facts.len(), 1);
+        }
+    }
+
+    #[test]
+    fn policy12_replay_isolation_and_arena_release() {
+        let sources = [
+            source("bad.py", "bad", "from importlib import import_module as leak\nsink(lambda: leak())\nsink(x for x in xs,)\n"),
+            source("syntax.py", "syntax", "sink(lambda: eval())\nf(\n"),
+            source("good.py", "good", "sink(lambda leak: leak())\n[eval() for x in xs]\n"),
+        ];
+        let result = extract_fact_candidates(&sources).unwrap();
+        assert_ne!(result.files[0].status, CandidateStatus::AcceptedFacts);
+        assert_eq!(result.files[1].status, CandidateStatus::SyntaxError);
+        assert_eq!(result.files[2].status, CandidateStatus::AcceptedFacts);
+        assert_eq!(
+            result.facts.iter().filter(|f| f.path != "good.py").count(),
+            2
+        );
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].path, "good.py");
+        assert_eq!(
+            serde_json::to_vec(&result).unwrap(),
+            serde_json::to_vec(&extract_fact_candidates(&sources).unwrap()).unwrap()
+        );
+        let sources = [source(
+            "a.py",
+            "a",
+            "sink(lambda a=x: [x for x in xs])\n".repeat(80),
+        )];
+        let result = extract(
+            &sources,
+            Limits::default(),
+            FactLimits {
+                working: 128 * 1024,
+                ..FactLimits::default()
+            },
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(result.files[0].status, CandidateStatus::AcceptedFacts);
     }
 
     #[test]
@@ -4096,9 +6912,9 @@ mod tests {
                 "try: pass\nexcept E,\nF: pass",
                 "try: pass\nfinally\n: pass",
                 "try: pass\n    except E: pass",
-                "assert\tx",
-                "global\tx",
-                "try: pass\nexcept\tE: pass",
+                "assert\tFastAPI()",
+                "global\tTrue",
+                "try: pass\nexcept\tFastAPI(): pass",
                 "try: pass\nexcept E: # type: ignore\n    pass",
             ] {
                 let result = candidates(format!("eval()\n{text}\n").replace('\n', newline));
@@ -4140,7 +6956,7 @@ mod tests {
             "x,(lambda: y)",
             "[x for x in xs]",
             "*(lambda: x)",
-            "items[lambda: x]",
+            "items[await FastAPI()]",
             "obj.include_router(x).field",
             "FastAPI().x",
             "self.router",
@@ -4162,7 +6978,7 @@ mod tests {
         for text in [
             "x += y = eval()",
             "x += y += eval()",
-            "x += a,(lambda: b)",
+            "x += a,(await FastAPI())",
             "del x,(lambda: y)",
             "x +=\neval()",
             "del\nx",
@@ -4182,13 +6998,36 @@ mod tests {
 
     #[test]
     fn policy10_new_contexts_preserve_metadata_and_header_exclusions() {
+        for text in [
+            "try: pass\nexcept E: import pkg",
+            "try: pass\nfinally: import pkg",
+        ] {
+            let result = accepted(text);
+            let imports: Vec<_> = result
+                .facts
+                .iter()
+                .filter(|f| f.kind == "import")
+                .map(|f| (f.line, f.end_line, f.symbol.as_str(), f.value.as_str()))
+                .collect();
+            assert_eq!(
+                imports,
+                [(
+                    2,
+                    2,
+                    "sample",
+                    "{\"level\":0,\"module\":\"\",\"names\":[{\"asname\":null,\"name\":\"pkg\"}]}"
+                )]
+            );
+            assert_eq!(result.facts.len(), 2);
+            assert!(result.diagnostics.is_empty());
+        }
         for value in [
             "FastAPI()",
             "pkg.APIRouter()",
             "app.include_router(child)",
             "outer(FastAPI())",
-            "(lambda: eval())",
-            "[eval() for x in xs]",
+            "(lambda: await FastAPI())",
+            "[eval() for x in await APIRouter()]",
         ] {
             for text in [
                 format!("assert {value}"),
@@ -4211,8 +7050,8 @@ mod tests {
         for text in [
             "try: pass\nexcept E:\n    from fastapi import APIRouter as R",
             "try: pass\nfinally:\n    from fastapi import FastAPI",
-            "try: pass\nexcept E: import pkg",
-            "try: pass\nfinally: import pkg",
+            "try: pass\nexcept E: import FastAPI",
+            "try: pass\nfinally: from fastapi import APIRouter",
             "try: pass\nexcept E:\n    def f(x=eval()): pass",
             "try: pass\nexcept E:\n    @decorate(eval())\n    def f(): pass",
         ] {
@@ -4629,13 +7468,11 @@ mod tests {
                 "elif x: pass",
                 "while x: pass\nelif y: pass",
                 "with x: pass\nelse: pass",
-                "if x: pass; pass",
-                "if\tx: pass",
-                "if x:\n\tpass",
-                concat!("if x:", "\\", "\n", "    pass"),
+                "if x: pass;; pass",
+                "if\tx: FastAPI()",
+                "if x:\n\tpass\n    pass",
                 "if x: # type: ignore\n    pass",
-                concat!("if x", "\\", "\n", ": pass"),
-                "if (\n\tx\n): pass",
+                concat!("if x", "\\", "\n\n", ": pass"),
                 "for\nx in xs: pass",
                 "for x\nin xs: pass",
                 "for x in\nxs: pass",
@@ -4646,7 +7483,7 @@ mod tests {
                 "for [x for x in xs] in xs: pass",
                 "for *(lambda: x) in xs: pass",
                 "for FastAPI().x in xs: pass",
-                "for xs[lambda: x] in xs: pass",
+                "for xs[await FastAPI()] in xs: pass",
                 "for \u{212a} in xs: pass",
                 "for True in xs: pass",
                 "with\nx: pass",
@@ -4660,16 +7497,16 @@ mod tests {
                 "with x as (y,lambda: z): pass",
                 "with x as [y for y in ys]: pass",
                 "with x as FastAPI().y: pass",
-                "with x as y[lambda: z]: pass",
+                "with x as y[await FastAPI()]: pass",
                 "with x as *(lambda: y): pass",
                 "with x as \u{212a}: pass",
                 // Parenthesized with-item lists, even valid ones, are deferred.
                 "with (x as y, z as w): pass",
                 "with (\n x as y,\n z as w,\n): pass",
-                "match x:\n    case _: pass",
-                "if x: assert (y for y in ys)",
-                "if x: raise (lambda: E)",
-                "if x: del items[lambda: y]",
+                "match x:\n    case {**_}: pass",
+                "if x: assert (y for y in await FastAPI())",
+                "if x: raise (lambda: await APIRouter())",
+                "if x: del items[await FastAPI()]",
                 "if FastAPI(): pass",
                 "while obj.include_router(x): pass",
                 "for x in APIRouter(): pass",
@@ -4785,7 +7622,7 @@ mod tests {
             source(
                 "bad.py",
                 "bad",
-                "if eval():\n    from importlib import import_module as leak\nelse:\n    match x:\n        case _: pass\n",
+                "if eval():\n    from importlib import import_module as leak\nelse:\n    @decorate\n    def hidden(): pass\n",
             ),
             source(
                 "good.py",
@@ -4966,6 +7803,43 @@ mod tests {
                 }
             }
             accepted("(eval(),\n helper())\n(eval()\n), helper()\n".replace('\n', newline));
+            // The blank line ends the tuple statement; the later call is not joined.
+            let result =
+                accepted("eval()\nx=helper()\neval(),\\\n\nhelper()\n".replace('\n', newline));
+            let calls: Vec<_> = result
+                .facts
+                .iter()
+                .filter(|f| f.kind == "call")
+                .map(|f| (f.line, f.end_line, f.value.as_str()))
+                .collect();
+            assert_eq!(
+                calls,
+                [
+                    (1, 1, "eval()"),
+                    (2, 2, "helper()"),
+                    (3, 3, "eval()"),
+                    (5, 5, "helper()")
+                ]
+            );
+            let bindings: Vec<_> = result
+                .facts
+                .iter()
+                .filter(|f| matches!(f.kind.as_str(), "binding" | "binding_invalidation"))
+                .map(|f| (f.kind.as_str(), f.line, f.end_line, f.value.as_str()))
+                .collect();
+            assert_eq!(
+                bindings,
+                [(
+                    "binding",
+                    2,
+                    2,
+                    "{\"source\":\"helper()\",\"target\":\"x\"}"
+                )]
+            );
+            assert_eq!(
+                warning_messages(&result),
+                [warning(1, "eval"), warning(3, "eval")]
+            );
             for statement in [
                 "eval()\n, helper()",
                 "eval(),,helper()",
@@ -4974,7 +7848,7 @@ mod tests {
                 "eval(), x=helper()",
                 "eval(), x: T = helper()",
                 "x: T, helper()",
-                "eval(),\\\nhelper()",
+                "eval(),\\\n\n, helper()",
             ] {
                 let result =
                     candidates(format!("eval()\nx=helper()\n{statement}\n").replace('\n', newline));
@@ -5280,10 +8154,7 @@ mod tests {
             }
         }
         for expression in ["A|B", "[A]", "{A}", "A+B", "T[A:B]"] {
-            assert_ne!(
-                candidates(format!("def f(x: {expression}): pass")).files[0].status,
-                CandidateStatus::AcceptedFacts
-            );
+            accepted(format!("def f(x: {expression}): pass"));
         }
         let padding = std::iter::repeat_n("a", 81).collect::<Vec<_>>().join(",");
         for expression in [
@@ -5309,23 +8180,23 @@ mod tests {
             "sink(,)",
             "xs[]",
             "xs[a:b:c:d]",
-            "[*xs, lambda: x]",
-            "(*xs, lambda: x)",
-            "{*xs, lambda: x}",
-            "{**xs, x: lambda: y}",
-            "*xs, lambda: x",
-            "sink(*xs, lambda: x)",
-            "sink(**xs, k=lambda: x)",
-            "[*xs][lambda: x]",
-            "[x for x in xs]",
-            "(lambda: x)",
-            "(x:=y)",
-            "(x for x in xs)",
-            "(yield x)",
-            "await x",
-            "[lambda: a].field",
-            "xs[lambda: a].field",
-            "xs[lambda: a]()",
+            "[*xs, lambda: await FastAPI()]",
+            "(*xs, lambda: await FastAPI())",
+            "{*xs, lambda: await FastAPI()}",
+            "{**xs, x: lambda: await FastAPI()}",
+            "*xs, lambda: await FastAPI()",
+            "sink(*xs, lambda: await FastAPI())",
+            "sink(**xs, k=lambda: await FastAPI())",
+            "[*xs][lambda: await FastAPI()]",
+            "[x for x in await FastAPI()]",
+            "(lambda: await FastAPI())",
+            "(x:=FastAPI())",
+            "(x for x in await FastAPI())",
+            "(yield FastAPI())",
+            "await FastAPI()",
+            "[lambda: await FastAPI()].field",
+            "xs[lambda: await FastAPI()].field",
+            "xs[lambda: await FastAPI()]()",
             "{a: FastAPI()}",
             "[obj.include_router(x)]",
             "a if pkg.APIRouter() else b",
@@ -5359,12 +8230,35 @@ mod tests {
             ] {
                 accepted(text.replace('\n', newline));
             }
+            // With a blank line these are Assign(Name) and a separate UnaryOp,
+            // not the BinOp assignment produced by an uninterrupted join.
+            for (text, kind, end, value) in [
+                (
+                    "x=a\\\n\n+b",
+                    "binding",
+                    1,
+                    "{\"source\":\"a\",\"target\":\"x\"}",
+                ),
+                ("x=a\\\n+b", "binding_invalidation", 2, "{\"target\":\"x\"}"),
+            ] {
+                let result = accepted(text.replace('\n', newline));
+                let facts: Vec<_> = result
+                    .facts
+                    .iter()
+                    .filter(|f| f.kind != "module")
+                    .map(|f| (f.kind.as_str(), f.line, f.end_line, f.value.as_str()))
+                    .collect();
+                assert_eq!(facts, [(kind, 1, end, value)]);
+                assert!(result.diagnostics.is_empty());
+            }
             for text in [
                 "x=a not\n in b",
                 "x=a is\n not b",
                 "x=a+\nb",
-                "x=a\\\n+b",
-                "x=[a,\tb]",
+                "x=a+\\\n\nb",
+                "x=a\\ \n+b",
+                "x= # comment\nvalue",
+                "x=[a,\tb()] # type: ignore",
                 "x=[a] # type: ignore",
             ] {
                 assert_ne!(
@@ -5461,7 +8355,7 @@ mod tests {
     #[test]
     fn policy9_core_failure_isolation_and_replay() {
         let sources = [
-            source("bad.py", "bad", "eval()\nx={a:[lambda: b]}\n"),
+            source("bad.py", "bad", "eval()\nx={a:[lambda: await FastAPI()]}\n"),
             source("good.py", "good", "x=[a+b, xs[:], {a:eval()}]\n"),
         ];
         let result = extract_fact_candidates(&sources).unwrap();
@@ -5800,20 +8694,37 @@ mod tests {
 
     #[test]
     fn base_and_assignment_annotations_reject_unreviewed_and_hidden_forms() {
+        for (text, expected) in [
+            ("class Plain(A,\n B): pass", vec![(1, 1, "A"), (2, 2, "B")]),
+            ("class Plain((\n A)): pass", vec![(2, 2, "A")]),
+            (
+                "class Plain(A, # comment\n B): pass",
+                vec![(1, 1, "A"), (2, 2, "B")],
+            ),
+        ] {
+            let result = accepted(text);
+            let bases: Vec<_> = result
+                .facts
+                .iter()
+                .filter(|f| f.kind == "base")
+                .map(|f| (f.line, f.end_line, f.value.as_str()))
+                .collect();
+            assert_eq!(bases, expected, "{text}");
+            assert!(result
+                .facts
+                .iter()
+                .any(|f| f.kind == "class" && f.line == 1 && f.end_line == 2));
+            assert!(result
+                .facts
+                .iter()
+                .all(|f| matches!(f.kind.as_str(), "module" | "class" | "base")));
+            assert!(result.diagnostics.is_empty());
+        }
         for base in [
             "factory()",
-            "T[A]",
-            "'literal'",
-            "None",
-            "...",
-            "1",
-            "(A,B)",
-            "A+B",
-            "*bases",
-            "**options",
-            "metaclass=Meta",
-            "A, metaclass=Meta",
-            "A, *bases",
+            "T[factory()]",
+            "metaclass=(lambda: factory())",
+            "**options()",
             "A, factory()",
         ] {
             let result = candidates(format!("eval()\nclass Plain({base}): pass\n"));
@@ -5827,18 +8738,9 @@ mod tests {
         }
         for annotation in [
             "factory()",
-            "A | B",
-            "1",
-            "True",
-            "b'text'",
-            "-1",
-            "A+B",
-            "(A,B)",
-            "T[A][B]",
             "T[factory()]",
             "T[A, factory()]",
-            "T[A | B]",
-            "lambda: A",
+            "lambda: factory()",
         ] {
             let result = candidates(format!(
                 "eval()\nclass Plain:\n    field: {annotation} = helper()\n"
@@ -5855,7 +8757,7 @@ mod tests {
             "(lambda: x)",
             "(FastAPI().member)",
             "other.include_router(x).member",
-            "x[lambda: y]",
+            "x[await FastAPI()]",
             "x,y",
             "self.router",
             "self.prefix",
@@ -5880,9 +8782,9 @@ mod tests {
             "x:\n T",
             "x: T\n = value",
             "x: T =\n value",
-            "class Plain(A,\n B): pass",
-            "class Plain((\n A)): pass",
-            "class Plain(A, # comment\n B): pass",
+            "class Plain(A,\n B()): pass",
+            "class Plain((\n A())): pass",
+            "class Plain(A, # comment\n B()): pass",
         ] {
             assert_ne!(
                 candidates(statement).files[0].status,
@@ -6370,24 +9272,20 @@ mod tests {
     fn class_policy_rejects_header_extensions_returns_and_special_metadata() {
         for text in [
             "class Hidden(Base()): pass",
-            "class Hidden(object[T]): pass",
-            "class Hidden(metaclass=Meta): pass",
-            "class Hidden(*bases): pass",
-            "class Hidden(**options): pass",
+            "class Hidden(object[eval()]): pass",
+            "class Hidden(metaclass=Meta()): pass",
+            "class Hidden(*bases()): pass",
+            "class Hidden(**options()): pass",
             "class Hidden(factory()): pass",
-            "class Hidden[T]: pass",
+            "class Hidden[T: eval()]: pass",
             "@decorate\nclass Hidden: pass",
-            "class Hidden(\n): pass",
-            "class Hidden( # comment\n): pass",
-            "class Hidden(\r\n): pass",
-            "class Hidden \\\n(): pass",
             "class Hidden:\n    @decorate\n    def method(): pass",
-            "class Hidden:\n    value: Kind | Other = item",
+            "class Hidden:\n    value: Kind | eval() = item",
             "class Hidden:\n    value: Kind()",
-            "class Hidden: import pkg",
-            "class Hidden: pass; ordinary()",
+            "class Hidden: import FastAPI",
+            "class Hidden: pass; FastAPI()",
             "class Hidden: def method(): pass",
-            "class Hidden:\n\tpass",
+            "class Hidden:\n\tpass\n    pass",
             "class Hidden:\n    from pkg import FastAPI as unused",
             "class Hidden:\n    import APIRouter as unused",
             "class Hidden:\n    FastAPI()",
@@ -6724,7 +9622,7 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(result.identity.policy, "python-native-private-facts-11");
+        assert_eq!(result.identity.policy, FACT_POLICY);
     }
 
     #[test]
@@ -7093,7 +9991,7 @@ mod tests {
             source(
                 "a.py",
                 "a",
-                format!("{calls}class Unsupported(metaclass=Meta): pass\n"),
+                format!("{calls}@decorate\nclass Unsupported: pass\n"),
             ),
             source("b.py", "b", &calls),
         ];
@@ -7120,7 +10018,7 @@ mod tests {
             source(
                 "a.py",
                 "a",
-                format!("{calls}class Unsupported(metaclass=Meta): pass\n"),
+                format!("{calls}@decorate\nclass Unsupported: pass\n"),
             ),
             source("b.py", "b", "def f(): pass\n"),
         ];
@@ -7544,16 +10442,13 @@ mod tests {
             "from pkg import (x) (y)",
             "from pkg import (x,) as y",
             "import (pkg)",
-            "from pkg import (x\t)",
-            "from pkg import (\n\tx\n)",
             "from pkg import (x\u{c})",
             "from pkg import (\u{212a})",
-            "from pkg import (x as \\\n y)",
             "from pkg import (x, # type: ignore\n y)",
             "from pkg import ( #\t type: list[T]\n x)",
-            "from __future__ import (annotations,)",
-            "from pkg import (x); pass",
-            "def f(): from pkg import (x)",
+            "from __future__ import (annotations,,)",
+            "from pkg import (x);; pass",
+            "def f(): from pkg import FastAPI",
         ] {
             let result = candidates(format!(
                 "import safe\ndef before(): pass\n{text}\ndef after(): pass\n"
@@ -7592,29 +10487,26 @@ mod tests {
     #[test]
     fn import_grammar_rejections_rollback_every_candidate() {
         for text in [
-            "from pkg import *",
+            "from pkg import * as x",
             "from pkg import ((x))",
             "from pkg import (*)",
             "import a,",
             "from pkg import a,",
             "from pkg import a.b",
-            "from __future__ import annotations",
-            "import a; import b",
-            "import a\t",
-            "import\ta",
-            "from pkg\timport a",
+            "from __future__ import annotations,",
+            "import a;; import b",
             "import a\u{c}",
             "import \u{212a}",
             "from \u{212a} import x",
             "import a as \u{212a}",
-            "import a \\\n .b",
-            "from pkg \\\n import x",
-            "from pkg import \\\n x",
+            "import a \\\n\n .b",
+            "from pkg \\\n\n import x",
+            "from pkg import \\\n\n x",
             "import a.\nb",
             "from pkg\nimport x",
             "from pkg import x # type: ignore",
-            "def f(): import tools",
-            "def f(): from pkg import item",
+            "def f(): import FastAPI",
+            "def f(): from pkg import FastAPI",
             "import a as class",
             "from pkg import True",
             "from pkgimport x",
@@ -8076,26 +10968,10 @@ mod tests {
     #[test]
     fn expression_rejections_are_whole_file_transactions() {
         for annotation in [
-            "(A,B)",
-            "[A]",
-            "{A}",
-            "{'a': A}",
-            "T[A:B]",
-            "T[*A]",
-            "A | B",
-            "Callable[[A],B]",
-            "T[A][B]",
             "T[call()]",
             "call()",
-            "f'text'",
-            "b'text'",
-            "True",
-            "123",
-            "-1",
-            "T[1]",
-            "T[(A, (B,C))]",
             "T[A for A in B]",
-            "T[A].B",
+            "T[lambda: call()].B",
         ] {
             let result = candidates(format!("def prefix(): pass\ndef f(x: {annotation}): pass"));
             assert_ne!(
@@ -8106,27 +10982,25 @@ mod tests {
             assert_eq!(result.facts.len(), 1, "{annotation}");
         }
         for default in [
-            "lambda: DEFAULT",
-            "[x for x in xs]",
-            "{x for x in xs}",
-            "{x: x for x in xs}",
-            "(x for x in xs)",
-            "(x:=value)",
-            "[*xs, lambda: x]",
-            "{**xs, x: lambda: y}",
-            "await value",
-            "(yield value)",
+            "lambda: await call()",
+            "[x for x in await call()]",
+            "{x for x in await call()}",
+            "{x: x for x in await call()}",
+            "(x for x in await call())",
+            "(x:=call())",
+            "[*xs, lambda: await call()]",
+            "{**xs, x: lambda: await call()}",
+            "await call()",
+            "(yield call())",
             "value <> other",
             "value.method()",
             "call()",
-            "f'text'",
             "f'{call()}'",
             "t'text'",
             "ur'text'",
             "'a' b'b'",
             "b'a' 'b'",
-            "r'a\\b'",
-            "'a\\n'",
+            "'a\\xQ0'",
             "b'\u{03bb}'",
             "1L",
             "0xffL",
@@ -8158,10 +11032,10 @@ mod tests {
             "def f(*x:A, *y:B): pass",
             "def f(*x:A=1): pass",
             "def f(**x:A=1): pass",
-            "def f(x:\tA): pass",
+            "def f(x:\tA()): pass",
             "def f(x:A): # type: ignore\n pass",
-            "def f(x:A\n): pass",
-            "def f() -> (\n A\n): pass",
+            "def f(x:A()\n): pass",
+            "def f() -> (\n A()\n): pass",
         ] {
             let result = candidates(text);
             assert_ne!(
@@ -8174,7 +11048,7 @@ mod tests {
         accepted("def f(x=1, /, y=2, *, required, z: T): pass");
         accepted("def f(x: T, /, y: T=2, *args: T, required: T, **kw: T): pass");
         assert_ne!(
-            candidates(format!("def f(x={}): pass", "1".repeat(513))).files[0].status,
+            candidates(format!("def f(x={}): pass", "1".repeat(4301))).files[0].status,
             CandidateStatus::AcceptedFacts
         );
     }
@@ -8588,7 +11462,7 @@ mod tests {
             "@wrap\ndef f(): pass",
             "class C(Base()): pass",
             "import sys,",
-            "from x import *",
+            "from x import (*,)",
             "def \u{212a}(): pass",
             "def f(\u{212a}): pass",
             "def f(x, x): pass",
@@ -8602,20 +11476,20 @@ mod tests {
             "def f(*x, *y): pass",
             "def f(**x, **y): pass",
             "def f(True): pass",
-            "def f[T](): pass",
+            "def f[T: call()](): pass",
             "print 'old'",
             "pass\0",
-            "def f():\\\n    pass",
+            "def f():\\\n    FastAPI()",
             "\u{200b}pass",
-            "pass; pass",
-            "pass\t",
+            "pass;; pass",
+            "pass\tFastAPI()",
             "\u{c}pass",
             "pass\n\u{feff}",
             "# type: ignore\npass",
             "def f(): # type: () -> None\n    pass",
-            "def f():\n    match x:\n        case _: pass",
-            "def f():\n    assert (lambda: x)",
-            "def f():\n    try: pass\n    finally: yield x",
+            "def f():\n    match x:\n        case {**_}: pass",
+            "def f():\n    assert (lambda: await FastAPI())",
+            "def f():\n    try: pass\n    finally: yield FastAPI()",
             "pass\rpass",
             "# hidden\rimport x",
         ] {
@@ -8829,20 +11703,20 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         for expression in [
-            "factory(lambda: x)()",
-            "factory().run(lambda: x)",
-            "f(*xs, lambda: x)",
-            "f(**xs, k=lambda: x)",
-            "f(x for x in xs)",
+            "factory(lambda: await FastAPI())()",
+            "factory().run(lambda: await FastAPI())",
+            "f(*xs, lambda: await FastAPI())",
+            "f(**xs, k=lambda: await FastAPI())",
+            "f(x for x in await FastAPI())",
             "f(k=x, y)",
-            "f(k=x,k=lambda: y)",
-            "await f()",
-            "lambda: x",
-            "[x for x in xs]",
-            "(x for x in xs)",
-            "x[lambda: y]",
-            "a+(lambda: b)",
-            "(x:=f())",
+            "f(k=x,k=lambda: await FastAPI())",
+            "await FastAPI()",
+            "lambda: await FastAPI()",
+            "[x for x in await FastAPI()]",
+            "(x for x in await FastAPI())",
+            "x[lambda: await FastAPI()]",
+            "a+(lambda: await FastAPI())",
+            "(x:=FastAPI())",
             "FastAPI()",
             "pkg.APIRouter()",
             "obj.include_router(x)",
@@ -8870,7 +11744,7 @@ mod tests {
             "cls.prefix",
             "self.router.child",
             "self.field.router.child",
-            "x[lambda: y]",
+            "x[lambda: await FastAPI()]",
             "x,(lambda: y)",
             "*(lambda: x)",
             "x=y:T",
@@ -8891,12 +11765,12 @@ mod tests {
         for text in [
             "return",
             "return x",
-            "x: T | U = helper()",
-            "items[lambda: x] += helper()",
-            "del items[lambda: x]",
+            "x: T | eval() = helper()",
+            "items[lambda: await FastAPI()] += helper()",
+            "del items[lambda: await FastAPI()]",
             "x=y:T=z",
-            "x=(y:=z)",
-            "pass; helper()",
+            "x=(y:=FastAPI())",
+            "pass; FastAPI()",
         ] {
             let result = candidates(text);
             assert_ne!(
@@ -9270,13 +12144,12 @@ mod tests {
             "def f():\npass",
             "def f():\n    pass\n  pass",
             "def f():\n    pass\n     pass",
-            "def f():\n\tpass",
+            "def f():\n\tpass\n    pass",
             "def f():\n    pass\n        pass",
             "def f(): def g(): pass",
-            "def f(\n): pass",
+            "def f(\n): FastAPI()",
             "\0",
             "\u{200b}",
-            "\t",
             "\u{c}",
             "def\nf(): pass",
             "async\ndef f(): pass",

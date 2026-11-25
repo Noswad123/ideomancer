@@ -52,7 +52,13 @@ src/analysis.rs
 src/analysis/python_native.rs
 src/analysis/python_native/facts.rs
 src/analysis/python_native/expressions.rs
+src/analysis/python_native/patterns.rs
+src/analysis/python_native/literals.rs
 src/analysis/python_parity.rs
+src/analysis/python_parity/generic_batch.rs
+src/analysis/python_parity/structure_batch.rs
+src/analysis/python_parity/literal_batch.rs
+src/analysis/python_parity/fstring_batch.rs
 src/analyze.rs
 src/catalog.rs
 src/cli.rs
