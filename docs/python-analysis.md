@@ -436,6 +436,162 @@ that native compatibility is impossible. Reopening native replacement requires a
 explicit product/architecture decision about remaining compatibility and
 maintenance costs, not another syntax-slice milestone. G2–G6 remain open.
 
+#### Native Rust continuation design and first foundation batch
+
+The subsequent continuation moves from parser probes to a **parser-independent
+implementation of observable helper behavior**. It does not adopt Ruff or reopen
+the closed experiment. The existing AST helper remains production; the pinned
+Tree-sitter candidate remains a conservative private regression lane. Ruff at the
+evaluated revision is a possible future frontend, subject to a separate dependency,
+packaging and compatibility decision.
+
+##### Reconstruct only observable semantics
+
+The experiment compared more value/range detail than the product necessarily
+exposes. Keep its failures as recorded evidence, but scope implementation to the
+actual helper contract:
+
+| Input | Observable requirement | Unnecessary reconstruction |
+| --- | --- | --- |
+| Numeric constants | Validate spelling and applicable decimal admission; render `<literal>` | Arbitrary-precision numeric values or a new integer-digit conversion cap |
+| Ordinary string/bytes constants | Validate all input; render `<literal>`; retain only direct text required by existing metadata | Unbounded decoded payloads or general constant evaluation |
+| F-strings | Correct admission, `<JoinedStr>` rendering, descendant calls/names and visitor order | Evaluated strings, debug-text synthesis or constant merging that cannot affect facts |
+| Literal API metadata | Exact code-point lengths, route text, HTTP whitelist behavior and restricted prefixes | An unrestricted public literal-value API |
+| AST/token ranges | Exact emitted fact line/end-line and failure line | Every parser byte range when no fact or diagnostic observes it |
+
+Redaction never excuses skipping validation. Unknown named escapes, malformed
+strings, misplaced type comments and unsupported versions still affect admission
+even when they produce no retained literal value. Generator grouping can affect
+a parameter-default span, so range normalization remains driven by the emitting
+fact rather than discarded wholesale.
+
+##### Recommended private architecture
+
+Use **captured bytes → decoding/admission → validated frontend → bounded semantic
+projection → helper-order visitor → transactional facts**. Keep this a private
+Python language implementation, not a general plugin framework or public AST API.
+
+- Reuse captured-byte digests, deadline/cancellation latching, bounded emitters,
+  fact IDs, alias primitives and final sorting/deduplication. Extract reusable
+  pieces from CST state machines rather than replacing validated semantics.
+- Lower once through a counted frontend walk into owned names, expression
+  descriptors, literal summaries, logical spans and explicit child references.
+  No parser nodes/lifetimes cross that seam. Bound arena capacity and child edges
+  before allocation. Charge semantic interpretation to the same invocation budget
+  and deadline; a second semantic pass is not an uncounted parser walk or reparse.
+- Separate rendering edges from visitation edges: shape truncation and opaque
+  `<NodeKind>` rendering must not hide descendant calls or warnings.
+- Preserve helper phases, not source order or runtime execution order. Definitions
+  push scope and emit declaration/header metadata first. Python-3.12 function
+  generic traversal visits arguments, body, decorators, return annotation and type
+  parameters; class traversal visits bases, keywords, body, decorators and type
+  parameters. Argument traversal has its own AST field order. Body imports can
+  therefore affect later decorator/return-call alias resolution even though
+  decorator discovery metadata was already emitted.
+- Preserve path-keyed alias scopes, including repeated same-named definitions.
+  Imports update the helper's alias map; ordinary assignment invalidation facts
+  do not erase it. Final sorting cannot repair a wrong resolution decision.
+
+##### Implemented foundation: text retention and ASCII JSON
+
+`src/analysis/python_native/scalars.rs` is a standard-library-only private module,
+independent of parser nodes and frontend cancellation enums. It provides:
+
+- Checked code points from zero through U+10FFFF, including lone surrogates.
+- Streaming Python `ensure_ascii=True` string spelling with lowercase escapes,
+  bounded output, cancellation and explicit I/O failures.
+- Bounded retention of fallible decoded-code-point events using existing route
+  (2048) and prefix (128) limits. Length counts Python code points, not UTF-8 bytes
+  or UTF-16 units. Overflow drops retained payload but continues consuming events
+  so a late invalid/unresolved escape event cannot become successful admission.
+
+These are retention/serialization primitives, **not a literal decoder**. Callers
+still own lexical validity, source bounds, named-Unicode lookup and method
+normalization. The retention seam is not wired to G3 admission in this batch.
+
+The shared writer is integrated into private fact-ID hashing and signature
+metadata. Hashing remains streaming with Python's default spaced identity array;
+signature metadata remains compact with sorted keys and its 128-parameter/16384
+encoded-byte bounds. The byte cap is applied after ASCII escaping. Import metadata
+remains on the existing path and needs coordinated ASCII-writer integration before
+Unicode import admission. The new module participates in the private implementation
+fingerprint. Existing accepted-source semantics and private policy 15 are retained;
+the implementation fingerprint changes, not the public backend identity.
+
+No global `Fact.value` or serde representation changes are needed to support
+surrogates in metadata: emit them as ASCII escapes inside the inner JSON text,
+then escape that text again for the fact-ID preimage. Do not round-trip the inner
+metadata through a Unicode-scalar-only JSON value representation. A non-BMP point
+and two explicit surrogate points can have identical ASCII JSON spellings but
+different Python lengths; retention eligibility must be decided before encoding.
+
+##### Remaining implementation batches and decisions
+
+1. **Helper-order semantic projection.** Introduce bounded descriptors and explicit
+   definition phases, render/visit edges, argument order, imports and calls. Prove
+   body-import effects, early discovery metadata, nested owner restoration and
+   repeated scope-name behavior using synthetic semantic traces. Integrate an
+   already-admitted private lane without expanding acceptance on an assumed-correct
+   frontend. Include imports' ASCII serialization and contextual metadata sinks;
+   do not approximate Python Unicode uppercase with ASCII-only method conversion.
+2. **Reviewed frontend and complete visitor/metadata coverage.** Before any parser
+   dependency change, decide the exact revision, unpublished-crate distribution
+   mechanism, maintained AST-only policy, closure/notices, MSRV and platforms.
+   Reuse the probe findings rather than another shopping round. Then lower all
+   headers, expressions, statements, patterns and existing G3 side outputs. Empty
+   parse and unsupported-version error channels remain mandatory; no recovery-tree
+   publication or diagnostic waivers.
+3. **Input and failure closure.** Choose reviewed versioned Unicode data for raw
+   identifiers, whole-name NFKC, named escapes/aliases/algorithmic names and the
+   necessary uppercase behavior. Record immutable inputs, generator provenance
+   and notices; neither the three-name prototype nor per-code-point NFKC mappings
+   are sufficient. Enforce `type_comments=True` placement, decoding/cookies/BOM,
+   original-byte digests and exact observable failures. Enforce byte limits before
+   parsing, then bounded decoded storage/descriptors/events/output under one
+   deadline. Cooperative limits remain distinct from process/RSS isolation.
+4. **Public migration and acceptance.** Design identity, capabilities, saved-state
+   compatibility and interpreter-setting retirement only after G2–G4 close.
+   Never invent `pythonVersion`, silently reinterpret a request or upgrade old
+   capabilities. Complete existing-engine, adapter, platform/package/resource and
+   saved-source acceptance before explicit cutover approval.
+
+The immediate implementation boundary is the private foundation above. Parser
+adoption, distributable Unicode/codec data and a production native language/version
+profile remain explicit decisions. Python 3.12.11 / Unicode 15 / decimal limit
+4300 describe the development oracle only; production's Python >=3.12 contract is
+unchanged. No new toolchain, Unicode-data retrieval or public backend is approved
+by this design. Completing these foundations does not close G2–G6.
+
+##### Foundation validation record
+
+The foundation was validated with existing Rust **1.89.0**, two Cargo jobs/test
+threads and `RUSTUP_AUTO_INSTALL=0`; synthetic test scratch used owned disk-backed
+directories with cleanup. No new dependency or toolchain was installed.
+
+| Gate | Actual result |
+| --- | --- |
+| Ordinary library tests | 570 passed; 169 opt-in tests ignored by this invocation, not counted as passing |
+| Public API regression targets | `adapter_api`: 18 passed; `engine_api`: 8 passed |
+| Explicit existing Python oracle gate | All 162 `analysis::python_parity` tests passed with trusted Python 3.12.11 |
+| Scalar-focused checks | Four scalar-module tests and two emitter integration-unit tests passed; the `scalar --include-ignored` filter also passed the new oracle and two existing OpenAPI tests |
+| New retained-text oracle | Eight synthetic route cases compared metadata and fact IDs against the trusted helper, including lone surrogates, U+FFFD, controls, non-BMP text and the 2048/2049-point boundary |
+| Static checks | Formatting check and all-target Clippy with warnings denied passed; independent read-only review found no blocking issue |
+| Package inventory | 117 paths verified, including the new scalar module; no publication |
+
+The new oracle is
+`analysis::python_native::facts::tests::scalar_bridge_retained_route_metadata_matches_trusted_ast`.
+It requires explicit `IDEOMANCER_TEST_PYTHON` and is **not** selected by the sibling
+`analysis::python_parity` filter; run it separately or include ignored tests in the
+focused scalar filter. It proves the retained-event → metadata → ID seam, not a
+native literal decoder or G3 acceptance.
+
+An initial focused invocation correctly failed without explicit oracle selection;
+the oracle fixture's initially invalid native-only hex transport was then fixed.
+The first broad library attempt hit the command timeout, not a reported assertion
+failure. Its stopped processes were checked and exact owned scratch was removed;
+the completed rerun above used an adequate timeout. These interrupted/failed
+attempts are not counted as passing validation.
+
 P1 has a **private captured-source AST parity harness**, a native parse-only
 front-end and bounded class/function/header/body/import candidates, not a production native Python
 backend. The production helper, evidence v1 serialization,

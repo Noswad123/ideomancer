@@ -54,6 +54,7 @@ src/analysis/python_native/facts.rs
 src/analysis/python_native/expressions.rs
 src/analysis/python_native/patterns.rs
 src/analysis/python_native/literals.rs
+src/analysis/python_native/scalars.rs
 src/analysis/python_parity.rs
 src/analysis/python_parity/generic_batch.rs
 src/analysis/python_parity/structure_batch.rs

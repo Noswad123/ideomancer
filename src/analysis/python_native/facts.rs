@@ -11,6 +11,9 @@ mod patterns;
 use patterns::Pattern;
 #[path = "literals.rs"]
 mod literals;
+#[path = "scalars.rs"]
+mod scalars;
+use scalars::AsciiJson;
 
 // Private Python 3.12 target, not the grammar's broader Python-2/3 acceptance.
 const FACT_POLICY: &str = "python-native-private-facts-15";
@@ -233,6 +236,7 @@ fn extract<F: FnMut(Checkpoint) -> bool>(
         include_bytes!("expressions.rs").as_slice(),
         include_bytes!("patterns.rs").as_slice(),
         include_bytes!("literals.rs").as_slice(),
+        include_bytes!("scalars.rs").as_slice(),
     ] {
         hash.update((part.len() as u64).to_le_bytes());
         for chunk in part.chunks(4096) {
@@ -3629,29 +3633,22 @@ fn ascii_json<F: FnMut(Checkpoint) -> bool>(
     hash: &mut Sha256,
     cancel: &Cancellation<F>,
 ) {
-    hash.update(b"\"");
-    for (index, ch) in text.chars().enumerate() {
-        if index % 256 == 0 && cancel.at(Checkpoint::FactId) {
-            return;
+    struct HashWriter<'a>(&'a mut Sha256);
+    impl Write for HashWriter<'_> {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
         }
-        match ch {
-            '"' => hash.update(b"\\\""),
-            '\\' => hash.update(b"\\\\"),
-            '\u{8}' => hash.update(b"\\b"),
-            '\u{c}' => hash.update(b"\\f"),
-            '\n' => hash.update(b"\\n"),
-            '\r' => hash.update(b"\\r"),
-            '\t' => hash.update(b"\\t"),
-            ' '..='~' => hash.update([ch as u8]),
-            _ => {
-                let mut buffer = [0; 2];
-                for unit in ch.encode_utf16(&mut buffer) {
-                    hash.update(format!("\\u{unit:04x}").as_bytes());
-                }
-            }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
         }
     }
-    hash.update(b"\"");
+    // Source and fact budgets already bound input. Only cancellation can fail
+    // this infallible hashing sink; the caller discards the whole transaction.
+    let _ = AsciiJson::new(HashWriter(hash), usize::MAX, || {
+        cancel.at(Checkpoint::FactId)
+    })
+    .text(text);
 }
 
 fn fact_id<F: FnMut(Checkpoint) -> bool>(fact: &CandidateFact, cancel: &Cancellation<F>) -> String {
@@ -3669,55 +3666,47 @@ fn fact_id<F: FnMut(Checkpoint) -> bool>(fact: &CandidateFact, cancel: &Cancella
 }
 
 fn signature<F: FnMut(Checkpoint) -> bool>(f: &Definition, cancel: &Cancellation<F>) -> String {
-    #[derive(Serialize)]
-    struct Signature<'a> {
-        #[serde(rename = "keywordOnly")]
-        keyword_only: &'a [String],
-        #[serde(skip_serializing_if = "Option::is_none")]
-        kwarg: &'a Option<String>,
-        positional: &'a [String],
-        #[serde(rename = "positionalOnly")]
-        positional_only: usize,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        vararg: &'a Option<String>,
-    }
-    struct Bounded<'a, F> {
-        bytes: Vec<u8>,
-        cancel: &'a Cancellation<F>,
-    }
-    impl<F: FnMut(Checkpoint) -> bool> Write for Bounded<'_, F> {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            if self.cancel.at(Checkpoint::Signature) || bytes.len() > 16384 - self.bytes.len() {
-                return Err(io::Error::other("signature bound"));
-            }
-            self.bytes.extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
     cancel.at(Checkpoint::Signature);
     if f.positional.len() + f.keyword.len() > 128 {
         return "{\"truncated\":true}".into();
     }
-    let value = Signature {
-        keyword_only: &f.keyword,
-        kwarg: &f.kwarg,
-        positional: &f.positional,
-        positional_only: f.positional_only,
-        vararg: &f.vararg,
-    };
-    let mut writer = Bounded {
-        bytes: Vec::with_capacity(16384),
-        cancel,
-    };
-    if serde_json::to_writer(&mut writer, &value).is_err() {
+    let mut writer = AsciiJson::new(Vec::with_capacity(16384), 16384, || {
+        cancel.at(Checkpoint::Signature)
+    });
+    let result = (|| {
+        writer.raw(b"{\"keywordOnly\":[")?;
+        for (index, name) in f.keyword.iter().enumerate() {
+            if index > 0 {
+                writer.raw(b",")?;
+            }
+            writer.text(name)?;
+        }
+        writer.raw(b"]")?;
+        if let Some(name) = &f.kwarg {
+            writer.raw(b",\"kwarg\":")?;
+            writer.text(name)?;
+        }
+        writer.raw(b",\"positional\":[")?;
+        for (index, name) in f.positional.iter().enumerate() {
+            if index > 0 {
+                writer.raw(b",")?;
+            }
+            writer.text(name)?;
+        }
+        writer.raw(b"],\"positionalOnly\":")?;
+        writer.raw(f.positional_only.to_string().as_bytes())?;
+        if let Some(name) = &f.vararg {
+            writer.raw(b",\"vararg\":")?;
+            writer.text(name)?;
+        }
+        writer.raw(b"}")
+    })();
+    if result.is_err() {
         "{\"truncated\":true}".into()
     } else {
         // Do not transfer 16 KiB of spare capacity per short signature into the
         // output array, whose separate budget measures encoded bytes.
-        String::from_utf8(writer.bytes.into_boxed_slice().into_vec())
+        String::from_utf8(writer.into_inner().into_boxed_slice().into_vec())
             .expect("ASCII parameter signature")
     }
 }
@@ -12223,6 +12212,172 @@ mod tests {
             if bytes == 16384 {
                 assert_eq!(value.len(), bytes);
             }
+        }
+    }
+
+    #[test]
+    fn scalar_bridge_normalized_signatures_escape_before_measuring() {
+        // Normalized private data only: Unicode source admission is unchanged.
+        let cancel = Cancellation {
+            expired: Cell::new(false),
+            check: RefCell::new(|_| false),
+        };
+        let mut definition = Definition {
+            keyword: vec!["\u{7f}".into()],
+            kwarg: Some("\u{e9}".into()),
+            positional: vec!["\u{1f600}".into()],
+            positional_only: 1,
+            vararg: Some("a\"\\\n".into()),
+            ..Definition::default()
+        };
+        assert_eq!(
+            signature(&definition, &cancel),
+            r#"{"keywordOnly":["\u007f"],"kwarg":"\u00e9","positional":["\ud83d\ude00"],"positionalOnly":1,"vararg":"a\"\\\n"}"#
+        );
+        let overhead = r#"{"keywordOnly":[],"positional":[""],"positionalOnly":0}"#.len();
+        definition = Definition {
+            positional: vec![format!("{}\u{e9}", "x".repeat(16384 - overhead - 6))],
+            ..Definition::default()
+        };
+        let value = signature(&definition, &cancel);
+        assert_eq!(value.len(), 16384);
+        assert!(value.is_ascii());
+        definition.positional[0].push('\u{e9}');
+        assert_eq!(signature(&definition, &cancel), "{\"truncated\":true}");
+        let cancelled = Cancellation {
+            expired: Cell::new(false),
+            check: RefCell::new(|phase| phase == Checkpoint::Signature),
+        };
+        assert_eq!(
+            signature(&Definition::default(), &cancelled),
+            "{\"truncated\":true}"
+        );
+        assert!(cancelled.expired.get());
+    }
+
+    #[test]
+    fn scalar_bridge_keeps_existing_ascii_identity_bytes() {
+        let cancel = Cancellation {
+            expired: Cell::new(false),
+            check: RefCell::new(|_| false),
+        };
+        let fact = CandidateFact {
+            id: String::new(),
+            path: "sample.py".into(),
+            kind: "signature".into(),
+            line: 2,
+            end_line: 4,
+            symbol: "sample.f".into(),
+            value: signature(
+                &Definition {
+                    positional: vec!["x".into()],
+                    ..Definition::default()
+                },
+                &cancel,
+            ),
+        };
+        // Python 3.12 json.dumps with default spaces, then SHA-256 over ASCII.
+        assert_eq!(
+            fact_id(&fact, &cancel),
+            "fact_4c2230a6b0ddf75dd5b169675fd2b4c61806e40ff1239be8faf133a48b128511"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+    fn scalar_bridge_retained_route_metadata_matches_trusted_ast() {
+        use scalars::{retain, CodePoint, Retention, TextLimit};
+
+        let python = std::path::PathBuf::from(
+            std::env::var_os("IDEOMANCER_TEST_PYTHON")
+                .expect("explicit trusted Python selection is required"),
+        );
+        assert!(python.is_absolute() && python.is_file());
+        let cancel = Cancellation {
+            expired: Cell::new(false),
+            check: RefCell::new(|_| false),
+        };
+        let mut cases = vec![
+            vec![],
+            vec![47, 0xd800],
+            vec![47, 0xdfff, 0xfffd],
+            vec![47, 0x1f600],
+            vec![47, 0xd83d, 0xde00],
+            vec![47, 0, 8, 9, 10, 12, 13, 31, 34, 92, 127, 0xe9],
+        ];
+        // A non-BMP point counts once, whereas two escaped surrogates count
+        // twice, even though ensure_ascii JSON can spell them identically.
+        let mut boundary = vec![47; 2047];
+        boundary.push(0x1f600);
+        cases.push(boundary);
+        let mut boundary = vec![47; 2047];
+        boundary.extend([0xd83d, 0xde00]);
+        cases.push(boundary);
+        for (index, points) in cases.into_iter().enumerate() {
+            let mut literal = String::from("'");
+            for point in &points {
+                use std::fmt::Write;
+                // Python source escapes must preserve one non-BMP point:
+                // JSON's surrogate-pair spelling would change the source value.
+                write!(literal, "\\U{point:08x}").unwrap();
+            }
+            literal.push('\'');
+            let mut sources = [source(
+                "sample.py",
+                "sample",
+                format!("@api.get({literal})\ndef f(): pass\n"),
+            )];
+            // Native unit fixtures deliberately carry invalid legacy transport;
+            // the actual helper requires the captured bytes' hexadecimal form.
+            sources[0].hex = sources[0]
+                .bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            let response = crate::analysis::extract_captured(&python, &sources).unwrap();
+            assert!(
+                response.complete,
+                "case {index}: {:?}",
+                response.diagnostics
+            );
+            if index == 0 {
+                eprintln!("Scalar metadata oracle: {}", response.python_version);
+            }
+            let retained = retain(
+                points.into_iter().map(CodePoint::new),
+                TextLimit::Route,
+                || false,
+            )
+            .unwrap();
+            let mut metadata = AsciiJson::new(Vec::new(), 16384, || false);
+            metadata.raw(b"{\"methods\":[\"GET\"],\"path\":").unwrap();
+            match retained {
+                Retention::Retained(points) => metadata.points(points.iter().copied()).unwrap(),
+                Retention::Oversize => metadata.raw(b"null").unwrap(),
+            }
+            metadata
+                .raw(b",\"pathIsFragment\":true,\"receiver\":\"api\"}")
+                .unwrap();
+            let mut candidate = CandidateFact {
+                id: String::new(),
+                path: "sample.py".into(),
+                kind: "api_route".into(),
+                line: 1,
+                end_line: 1,
+                symbol: "sample.f".into(),
+                value: String::from_utf8(metadata.into_inner()).unwrap(),
+            };
+            candidate.id = fact_id(&candidate, &cancel);
+            let actual = response
+                .facts
+                .iter()
+                .find(|fact| fact.kind == "api_route")
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(candidate).unwrap(),
+                serde_json::to_value(actual).unwrap(),
+                "case {index}"
+            );
         }
     }
 
