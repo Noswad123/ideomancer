@@ -2,7 +2,7 @@
 
 ## Purpose And Ownership
 
-Ideomancer is a public, MIT-licensed engine and CLI for source-grounded software
+Ideomancer is an MIT-licensed engine and CLI for source-grounded software
 understanding. Its job is to collect source safely, describe language-level
 structure, validate models and provenance, and generate useful diagrams.
 
@@ -23,7 +23,7 @@ or that a whole application is understood. There are no promised dates.
 | I2 | Read-only facts and validated class-model augmentation | Synthetic integration and a bounded real-source explicit-configuration slice accepted | Preserve immutability, identity checks and provenance; broader framework/runtime interpretation remains separate |
 | I3 | Harden and release the consumable engine | **Next: release and history review** | An approved immutable release works as an upstream or mirrored dependency |
 | P0 | Shared parser backend and native JS/TS Tree-sitter migration | Scoped source/facts, rendered-diagram usefulness and external explicit-configuration boundary accepted; release gates separate | Preserve fact/proof/output contracts; no Node discovery prerequisite; package/consumer checks and supported-platform release validation |
-| P1 | Native Python backend | Private parser-independent retained-text/ASCII-JSON foundation implemented; next is helper-order semantic projection, not another parser probe; frontend adoption and G2–G6 remain open, production AST helper retained | Complete the [Python completion gates](docs/python-analysis.md#completion-contract-and-remaining-gates); retain the AST helper until parity, compatibility, integration and cutover acceptance pass |
+| P1 | Native Python backend | Ruff 0.12.0 integrated as a private captured-byte syntax frontend using a reviewed source snapshot carried by Git; fact lowering and compatibility closure next; G2–G6 open, production AST helper retained | Complete the [Python completion gates](docs/python-analysis.md#completion-contract-and-remaining-gates); retain the AST helper until parity, compatibility, integration and cutover acceptance pass |
 | P2 | Rust Tree-sitter backend and language facts | Next parser milestone; Rust analysis not implemented | Model Rust structs, enums, traits, impls, functions and modules honestly; no build scripts or macro execution |
 | I4 | Broader language/model capabilities | Later | Independent use cases justify each extension without weakening the boundary |
 

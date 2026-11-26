@@ -1,6 +1,6 @@
 //! Deliberately small, transactional candidate policy. Not production evidence.
 use super::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use tree_sitter::Node;
 
 #[path = "expressions.rs"]
@@ -14,6 +14,18 @@ mod literals;
 #[path = "scalars.rs"]
 mod scalars;
 use scalars::AsciiJson;
+#[path = "projection.rs"]
+mod projection;
+#[cfg(test)]
+use projection::AliasScope;
+use projection::{
+    CallObservation, DefinitionKind, HeaderEvent, HeaderMetadata, HeaderSchedule, Projection,
+    ScopeId, Shape,
+};
+
+#[cfg(test)]
+#[path = "../python_parity/phase_batch.rs"]
+mod phase_batch;
 
 // Private Python 3.12 target, not the grammar's broader Python-2/3 acceptance.
 const FACT_POLICY: &str = "python-native-private-facts-15";
@@ -68,6 +80,37 @@ pub(in crate::analysis) struct CandidateWarning {
     pub(in crate::analysis) code: &'static str,
     pub(in crate::analysis) path: String,
     pub(in crate::analysis) message: String,
+}
+
+// Opt-in test capture uses indices until definition spans/IDs are final. Ordinary
+// tests retain no second fact array; the public candidate schema is unchanged.
+#[cfg(test)]
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub(in crate::analysis) enum NativeObservation {
+    Fact { fact: CandidateFact },
+    Warning { warning: CandidateWarning },
+}
+
+#[cfg(test)]
+enum ObservationIndex {
+    Fact(usize),
+    Warning(usize),
+}
+
+#[cfg(test)]
+pub(in crate::analysis) fn extract_with_observations(
+    sources: &[Source],
+) -> Result<(CandidateReport<'_>, Vec<NativeObservation>), FrontEndError> {
+    let mut trace = Vec::new();
+    let report = extract_impl(
+        sources,
+        Limits::default(),
+        FactLimits::default(),
+        |_| false,
+        Some(&mut trace),
+    )?;
+    Ok((report, trace))
 }
 
 #[derive(Debug, Serialize)]
@@ -218,6 +261,23 @@ fn extract<F: FnMut(Checkpoint) -> bool>(
     fact_limits: FactLimits,
     check: F,
 ) -> Result<CandidateReport<'_>, FrontEndError> {
+    #[cfg(test)]
+    {
+        extract_impl(sources, limits, fact_limits, check, None)
+    }
+    #[cfg(not(test))]
+    {
+        extract_impl(sources, limits, fact_limits, check)
+    }
+}
+
+fn extract_impl<'a, F: FnMut(Checkpoint) -> bool>(
+    sources: &'a [Source],
+    limits: Limits,
+    fact_limits: FactLimits,
+    check: F,
+    #[cfg(test)] mut trace: Option<&mut Vec<NativeObservation>>,
+) -> Result<CandidateReport<'a>, FrontEndError> {
     let cancel = Cancellation {
         expired: Cell::new(false),
         check: RefCell::new(check),
@@ -237,6 +297,7 @@ fn extract<F: FnMut(Checkpoint) -> bool>(
         include_bytes!("patterns.rs").as_slice(),
         include_bytes!("literals.rs").as_slice(),
         include_bytes!("scalars.rs").as_slice(),
+        include_bytes!("projection.rs").as_slice(),
     ] {
         hash.update((part.len() as u64).to_le_bytes());
         for chunk in part.chunks(4096) {
@@ -270,6 +331,10 @@ fn extract<F: FnMut(Checkpoint) -> bool>(
         diagnostics: Vec::new(),
     };
     let mut collector = Collector {
+        #[cfg(test)]
+        observations: trace.as_ref().map(|_| Vec::new()),
+        #[cfg(test)]
+        observation_start: 0,
         sources,
         index: 0,
         facts: &mut result.facts,
@@ -278,7 +343,7 @@ fn extract<F: FnMut(Checkpoint) -> bool>(
         warning_text: 0,
         start_warning_text: 0,
         warning_slots: 0,
-        scopes: Vec::new(),
+        scopes: Projection::default(),
         files: Vec::new(),
         frames: Vec::new(),
         frame_slots: 0,
@@ -305,7 +370,22 @@ fn extract<F: FnMut(Checkpoint) -> bool>(
     };
     let parsed = run_admitted(sources, limits, &cancel, &mut collector)?;
     result.files = std::mem::take(&mut collector.files);
+    #[cfg(test)]
+    let observations = collector.observations.take();
     drop(collector);
+    #[cfg(test)]
+    if let (Some(trace), Some(observations)) = (trace.as_mut(), observations) {
+        for observation in observations {
+            trace.push(match observation {
+                ObservationIndex::Fact(index) => NativeObservation::Fact {
+                    fact: result.facts[index].clone(),
+                },
+                ObservationIndex::Warning(index) => NativeObservation::Warning {
+                    warning: result.diagnostics[index].clone(),
+                },
+            });
+        }
+    }
     // Global ID deduplication before the helper's exact tuple ordering.
     let mut ids = HashSet::new();
     result
@@ -327,6 +407,10 @@ fn extract<F: FnMut(Checkpoint) -> bool>(
     });
     let output_ok = cancel.expired.get() || measured(&result, fact_limits.bytes, &cancel).is_some();
     if cancel.at(Checkpoint::FinalOutput) || cancel.at(Checkpoint::Final) || !output_ok {
+        #[cfg(test)]
+        if let Some(trace) = trace.as_mut() {
+            trace.clear();
+        }
         result.facts.retain(|f| f.kind == "module");
         result.diagnostics.clear();
         // Only bounded mandatory metadata remains if sorting was interrupted.
@@ -547,7 +631,10 @@ fn ordinary_header_token(
 
 #[derive(Default)]
 struct Definition {
-    scope_id: usize,
+    header: HeaderSchedule,
+    scope_id: ScopeId,
+    declaration_fact: Option<usize>,
+    signature_fact: Option<usize>,
     working: usize,
     name: String,
     symbol: String,
@@ -574,6 +661,7 @@ struct Parameter {
     line: usize,
     end: usize,
     annotation: Option<String>,
+    default: Option<Shape>,
     working: usize,
 }
 
@@ -586,6 +674,8 @@ enum BodySequence {
 }
 
 struct BodyStatement {
+    assignment: bool,
+    calls: Vec<CallObservation>,
     line: usize,
     targets: Vec<(String, bool)>,
     source: Option<String>,
@@ -690,30 +780,6 @@ impl ImportStatement {
     }
 }
 
-// Fixed-size hashed keys keep map hashing/comparison bounded. Retain the full
-// spelling and fail closed on a collision rather than conflating scope/alias keys.
-// Every new entry is charged for four buckets plus allocator/control overhead.
-#[derive(Default)]
-struct AliasScope {
-    parent: Option<usize>,
-    children: HashMap<[u8; 32], (String, usize)>,
-    aliases: HashMap<[u8; 32], (String, String)>,
-}
-
-fn alias_key<F: FnMut(Checkpoint) -> bool>(
-    text: &str,
-    cancel: &Cancellation<F>,
-) -> Option<[u8; 32]> {
-    let mut hash = Sha256::new();
-    for chunk in text.as_bytes().chunks(256) {
-        if cancel.at(Checkpoint::Collector) {
-            return None;
-        }
-        hash.update(chunk);
-    }
-    Some(hash.finalize().into())
-}
-
 fn copy_text<F: FnMut(Checkpoint) -> bool>(text: &str, cancel: &Cancellation<F>) -> Option<String> {
     let mut result = String::with_capacity(text.len());
     for (i, ch) in text.chars().enumerate() {
@@ -723,14 +789,6 @@ fn copy_text<F: FnMut(Checkpoint) -> bool>(text: &str, cancel: &Cancellation<F>)
         result.push(ch);
     }
     Some(result)
-}
-
-fn same_text<F: FnMut(Checkpoint) -> bool>(a: &str, b: &str, cancel: &Cancellation<F>) -> bool {
-    a.len() == b.len()
-        && a.as_bytes()
-            .chunks(256)
-            .zip(b.as_bytes().chunks(256))
-            .all(|(a, b)| !cancel.at(Checkpoint::Collector) && a == b)
 }
 
 fn terminal_name<'a, F: FnMut(Checkpoint) -> bool>(
@@ -749,6 +807,10 @@ fn terminal_name<'a, F: FnMut(Checkpoint) -> bool>(
 }
 
 struct Collector<'a, 'b> {
+    #[cfg(test)]
+    observations: Option<Vec<ObservationIndex>>,
+    #[cfg(test)]
+    observation_start: usize,
     sources: &'a [Source],
     index: usize,
     facts: &'b mut Vec<CandidateFact>,
@@ -757,7 +819,7 @@ struct Collector<'a, 'b> {
     warning_text: usize,
     start_warning_text: usize,
     warning_slots: usize,
-    scopes: Vec<AliasScope>,
+    scopes: Projection,
     files: Vec<CandidateFile<'a>>,
     frames: Vec<Frame>,
     frame_slots: usize,
@@ -877,8 +939,266 @@ fn join_symbol<F: FnMut(Checkpoint) -> bool>(
 }
 
 impl Collector<'_, '_> {
-    fn scope(&self) -> usize {
-        self.definitions.last().map_or(0, |f| f.scope_id)
+    fn definition_metadata<F: FnMut(Checkpoint) -> bool>(&mut self, cancel: &Cancellation<F>) {
+        let f = self.definitions.last().unwrap();
+        let kind = if f.class {
+            DefinitionKind::Class
+        } else {
+            DefinitionKind::Function
+        };
+        // The frontend has already lowered call-free headers. Their metadata
+        // precedes generic field replay, under the pushed lexical owner. End
+        // lines are fixed transactionally after the counted suite walk; comments
+        // at the CST's tail must not become definition evidence.
+        {
+            let f = self.definitions.last().unwrap();
+            let extra = usize::from(!f.class) * f.symbol.len() + 256;
+            if !self.reserve_work(extra, cancel) {
+                return;
+            }
+            let f = self.definitions.last_mut().unwrap();
+            f.working += extra;
+            let line = f.line;
+            let class = f.class;
+            let fact_kind = if class {
+                "class"
+            } else if f.asynchronous {
+                "async_function"
+            } else {
+                "function"
+            };
+            let symbol = f.symbol.clone();
+            let name = std::mem::take(&mut f.name);
+            let index = self.facts.len();
+            self.add(fact_kind, line, usize::MAX, symbol, name, cancel);
+            if self.facts.len() != index + 1 {
+                return;
+            }
+            self.definitions.last_mut().unwrap().declaration_fact = Some(index);
+            if !class {
+                let f = self.definitions.last_mut().unwrap();
+                let symbol = f.symbol.clone();
+                let signature = std::mem::take(&mut f.signature);
+                let index = self.facts.len();
+                self.add("signature", line, usize::MAX, symbol, signature, cancel);
+                if self.facts.len() != index + 1 {
+                    return;
+                }
+                self.definitions.last_mut().unwrap().signature_fact = Some(index);
+            }
+        }
+        self.drain_header(kind, false, cancel);
+    }
+
+    fn stage_header<F: FnMut(Checkpoint) -> bool>(
+        &mut self,
+        metadata: HeaderMetadata,
+        text: usize,
+        cancel: &Cancellation<F>,
+    ) {
+        let mut header = std::mem::take(&mut self.definitions.last_mut().unwrap().header);
+        let result = header.stage(metadata, text, self.limits.count, &mut |n| {
+            self.projection_work(n, cancel)
+        });
+        self.definitions.last_mut().unwrap().header = header;
+        match result {
+            Ok(charge) => self.definitions.last_mut().unwrap().working += charge,
+            Err(error) => self.projection_error(error),
+        }
+    }
+
+    fn drain_header<F: FnMut(Checkpoint) -> bool>(
+        &mut self,
+        kind: DefinitionKind,
+        after: bool,
+        cancel: &Cancellation<F>,
+    ) {
+        let mut header = std::mem::take(&mut self.definitions.last_mut().unwrap().header);
+        let mut emit = |event| {
+            if cancel.at(Checkpoint::Collector) {
+                return Err(projection::Error::Cancelled);
+            }
+            match event {
+                HeaderEvent::Visit(call) => self.emit_call(call, cancel),
+                HeaderEvent::Metadata(HeaderMetadata::Parameter {
+                    name,
+                    line,
+                    end,
+                    annotation,
+                    default,
+                    ..
+                }) => {
+                    let Some(size) = self
+                        .definitions
+                        .last()
+                        .unwrap()
+                        .symbol
+                        .len()
+                        .checked_add(name.len())
+                        .and_then(|n| n.checked_add(1))
+                    else {
+                        return Err(projection::Error::WorkingLimit);
+                    };
+                    let Some(temporary) =
+                        size.checked_mul(3).and_then(|n| n.checked_add(name.len()))
+                    else {
+                        return Err(projection::Error::WorkingLimit);
+                    };
+                    if !self.reserve_work(temporary, cancel) {
+                        return Err(projection::Error::WorkingLimit);
+                    }
+                    let symbol = join_symbol(
+                        &self.definitions.last().unwrap().symbol,
+                        &name,
+                        self.limits.bytes.saturating_sub(self.used),
+                        cancel,
+                    );
+                    if let Some(symbol) = symbol {
+                        self.add("parameter", line, end, symbol.clone(), name, cancel);
+                        if let Some(annotation) = annotation {
+                            self.add(
+                                "parameter_annotation",
+                                line,
+                                end,
+                                symbol.clone(),
+                                annotation,
+                                cancel,
+                            );
+                        }
+                        if let Some(default) = default {
+                            self.add(
+                                "parameter_default",
+                                default.line,
+                                default.end,
+                                symbol,
+                                default.value,
+                                cancel,
+                            );
+                        }
+                    } else {
+                        self.limited = Some(CandidateDiagnostic::OutputLimit);
+                    }
+                    self.pending -= temporary;
+                }
+                HeaderEvent::Metadata(metadata) => {
+                    let (kind, shape) = match metadata {
+                        HeaderMetadata::Base(shape) => ("base", shape),
+                        HeaderMetadata::Return(shape) => ("return_annotation", shape),
+                        HeaderMetadata::Parameter { .. } => unreachable!(),
+                    };
+                    let size = self.definitions.last().unwrap().symbol.len();
+                    if !self.reserve_work(size, cancel) {
+                        return Err(projection::Error::WorkingLimit);
+                    }
+                    let owner = self.definitions.last().unwrap().symbol.clone();
+                    self.add(kind, shape.line, shape.end, owner, shape.value, cancel);
+                    self.pending -= size;
+                }
+            }
+            if cancel.expired.get() {
+                Err(projection::Error::Cancelled)
+            } else if self.limited.is_some() || self.unsupported {
+                Err(projection::Error::Unsupported)
+            } else {
+                Ok(())
+            }
+        };
+        let mut check = || {
+            if cancel.at(Checkpoint::Collector) {
+                Err(projection::Error::Cancelled)
+            } else {
+                Ok(())
+            }
+        };
+        let result = if after {
+            header.after(kind, &mut check, &mut emit)
+        } else {
+            header.before(kind, &mut check, &mut emit)
+        };
+        self.definitions.last_mut().unwrap().header = header;
+        if let Err(error) = result {
+            self.projection_error(error);
+        }
+    }
+
+    fn emit_call<F: FnMut(Checkpoint) -> bool>(
+        &mut self,
+        call: CallObservation,
+        cancel: &Cancellation<F>,
+    ) {
+        let size = self
+            .definitions
+            .last()
+            .map_or(self.sources[self.index].module.len(), |f| f.symbol.len());
+        if !self.reserve_work(size, cancel) {
+            return;
+        }
+        let owner = self
+            .definitions
+            .last()
+            .map_or(&self.sources[self.index].module, |f| &f.symbol)
+            .clone();
+        self.add("call", call.line, call.end, owner, call.value, cancel);
+        if !self.unsupported && self.limited.is_none() && !cancel.expired.get() {
+            self.warn_call(&call.callee, call.line, cancel);
+        }
+        self.pending -= size;
+    }
+
+    fn finish_definition_span<F: FnMut(Checkpoint) -> bool>(
+        &mut self,
+        index: usize,
+        end: usize,
+        cancel: &Cancellation<F>,
+    ) {
+        if cancel.at(Checkpoint::Collector) {
+            return;
+        }
+        let fact = &mut self.facts[index];
+        debug_assert_eq!(fact.end_line, usize::MAX);
+        // The provisional span reserved the largest integer spelling. IDs have
+        // fixed length and the retained per-definition scratch covers rehashing.
+        self.used -= usize::MAX.ilog10() as usize - end.max(1).ilog10() as usize;
+        fact.end_line = end;
+        fact.id = fact_id(fact, cancel);
+    }
+
+    fn scope(&self) -> ScopeId {
+        self.definitions
+            .last()
+            .map_or(ScopeId::default(), |f| f.scope_id)
+    }
+
+    fn projection_error(&mut self, error: projection::Error) {
+        match error {
+            projection::Error::Unsupported => self.unsupported = true,
+            projection::Error::WorkingLimit => {
+                self.limited = Some(CandidateDiagnostic::WorkingLimit)
+            }
+            // The invocation cancellation latch owns the final failure status.
+            projection::Error::Cancelled => {}
+        }
+    }
+
+    fn projection_work<F: FnMut(Checkpoint) -> bool>(
+        &mut self,
+        bytes: usize,
+        cancel: &Cancellation<F>,
+    ) -> Result<(), projection::Error> {
+        if bytes == 0 {
+            return if cancel.at(Checkpoint::Collector) {
+                Err(projection::Error::Cancelled)
+            } else {
+                Ok(())
+            };
+        }
+        if self.reserve_work(bytes, cancel) {
+            Ok(())
+        } else if cancel.expired.get() {
+            Err(projection::Error::Cancelled)
+        } else {
+            Err(projection::Error::WorkingLimit)
+        }
     }
 
     fn enter_scope<F: FnMut(Checkpoint) -> bool>(&mut self, name: &str, cancel: &Cancellation<F>) {
@@ -887,36 +1207,14 @@ impl Collector<'_, '_> {
             .iter()
             .rev()
             .nth(1)
-            .map_or(0, |f| f.scope_id);
-        let Some(key) = alias_key(name, cancel) else {
-            return;
-        };
-        if let Some((stored, id)) = self.scopes[parent].children.get(&key) {
-            if !same_text(stored, name, cancel) {
-                self.unsupported = true;
-                return;
-            }
-            self.definitions.last_mut().unwrap().scope_id = *id;
-            return;
+            .map_or(ScopeId::default(), |f| f.scope_id);
+        let mut scopes = std::mem::take(&mut self.scopes);
+        let result = scopes.enter(parent, name, 256, &mut |n| self.projection_work(n, cancel));
+        self.scopes = scopes;
+        match result {
+            Ok(id) => self.definitions.last_mut().unwrap().scope_id = id,
+            Err(error) => self.projection_error(error),
         }
-        let charge = 4
-            * (std::mem::size_of::<AliasScope>()
-                + std::mem::size_of::<([u8; 32], (String, usize))>()
-                + 64)
-            + name.len();
-        if !self.reserve_work(charge, cancel) {
-            return;
-        }
-        let Some(name) = copy_text(name, cancel) else {
-            return;
-        };
-        let id = self.scopes.len();
-        self.scopes.push(AliasScope {
-            parent: Some(parent),
-            ..AliasScope::default()
-        });
-        self.scopes[parent].children.insert(key, (name, id));
-        self.definitions.last_mut().unwrap().scope_id = id;
     }
 
     fn import_alias<F: FnMut(Checkpoint) -> bool>(
@@ -926,44 +1224,15 @@ impl Collector<'_, '_> {
         name: &str,
         cancel: &Cancellation<F>,
     ) {
-        let Some(key) = alias_key(local, cancel) else {
-            return;
-        };
         let scope = self.scope();
-        let old_size = if let Some((stored, target)) = self.scopes[scope].aliases.get(&key) {
-            if !same_text(stored, local, cancel) {
-                self.unsupported = true;
-                return;
-            }
-            Some(target.len())
-        } else {
-            None
-        };
-        let target_size = prefix.len() + usize::from(!prefix.is_empty()) + name.len();
-        let entry = if old_size.is_none() {
-            local.len() + 4 * (std::mem::size_of::<([u8; 32], (String, String))>() + 64)
-        } else {
-            0
-        };
-        if !self.reserve_work(target_size + entry, cancel) {
-            return;
-        }
-        let target = if prefix.is_empty() {
-            copy_text(name, cancel)
-        } else {
-            join_symbol(prefix, name, target_size, cancel)
-        };
-        let Some(target) = target else {
-            return;
-        };
-        if let Some(old_size) = old_size {
-            self.scopes[scope].aliases.get_mut(&key).unwrap().1 = target;
-            self.pending -= old_size;
-        } else {
-            let Some(local) = copy_text(local, cancel) else {
-                return;
-            };
-            self.scopes[scope].aliases.insert(key, (local, target));
+        let mut scopes = std::mem::take(&mut self.scopes);
+        let result = scopes.import(scope, local, prefix, name, &mut |n| {
+            self.projection_work(n, cancel)
+        });
+        self.scopes = scopes;
+        match result {
+            Ok(released) => self.pending -= released,
+            Err(error) => self.projection_error(error),
         }
     }
 
@@ -975,29 +1244,20 @@ impl Collector<'_, '_> {
     ) {
         let head_end = callee.find('.').unwrap_or(callee.len());
         let head = &callee[..head_end];
-        let Some(key) = alias_key(head, cancel) else {
-            return;
-        };
-        let mut scope = self.scope();
-        let mut target = None;
-        loop {
+        let alias = match self.scopes.lookup(self.scope(), head, &mut |_| {
             if cancel.at(Checkpoint::Collector) {
+                Err(projection::Error::Cancelled)
+            } else {
+                Ok(())
+            }
+        }) {
+            Ok(alias) => alias,
+            Err(error) => {
+                self.projection_error(error);
                 return;
             }
-            if let Some((stored, value)) = self.scopes[scope].aliases.get(&key) {
-                if !same_text(stored, head, cancel) {
-                    self.unsupported = true;
-                    return;
-                }
-                target = Some(value.as_str());
-                break;
-            }
-            let Some(parent) = self.scopes[scope].parent else {
-                break;
-            };
-            scope = parent;
-        }
-        let prefix = target.unwrap_or(head);
+        };
+        let prefix = alias.map_or(head, |id| self.scopes.target(id));
         let tail = &callee[head_end..];
         // The tail is already bounded by expression(func); only a bare head can
         // acquire a different terminal. Never reclip the full imported target.
@@ -1029,16 +1289,11 @@ impl Collector<'_, '_> {
         // survives rollback. Text charges roll back independently with warnings.
         let grow = usize::from(self.diagnostics.len() == self.warning_slots) * slot_charge;
         let text_charge = message_len + path_len;
-        let scope_target = target.is_some();
         // End the borrowed arena reference before reserving; retrieve by fixed key.
         if !self.reserve_work(grow + text_charge, cancel) {
             return;
         }
-        let prefix = if scope_target {
-            self.scopes[scope].aliases.get(&key).unwrap().1.as_str()
-        } else {
-            head
-        };
+        let prefix = alias.map_or(head, |id| self.scopes.target(id));
         let mut message = String::with_capacity(message_len);
         use std::fmt::Write as _;
         write!(&mut message, "line {line}: ").unwrap();
@@ -1088,6 +1343,10 @@ impl Collector<'_, '_> {
             path,
             message,
         });
+        #[cfg(test)]
+        if let Some(trace) = &mut self.observations {
+            trace.push(ObservationIndex::Warning(self.diagnostics.len() - 1));
+        }
     }
 
     fn finish_import<F: FnMut(Checkpoint) -> bool>(&mut self, cancel: &Cancellation<F>) {
@@ -1269,26 +1528,6 @@ impl Collector<'_, '_> {
                 break;
             }
         }
-        if metadata.level == 0 {
-            for item in &metadata.names {
-                if cancel.at(Checkpoint::Collector) {
-                    return;
-                }
-                let local = item
-                    .asname
-                    .as_deref()
-                    .unwrap_or_else(|| item.name.split('.').next().unwrap());
-                let target = if !import.from && item.asname.is_none() {
-                    local
-                } else {
-                    &item.name
-                };
-                self.import_alias(local, &metadata.module, target, cancel);
-                if self.unsupported || self.limited.is_some() {
-                    return;
-                }
-            }
-        }
         let Some(size) = measured(
             &metadata,
             self.limits.bytes.saturating_sub(self.used),
@@ -1379,6 +1618,31 @@ impl Collector<'_, '_> {
             .map_or(&self.sources[self.index].module, |f| &f.symbol)
             .clone();
         self.add(kind, import.line, self.terminal_line, owner, value, cancel);
+        if self.unsupported || self.limited.is_some() || cancel.expired.get() {
+            return;
+        }
+        // Match the helper transaction: publish import metadata before changing
+        // alias state. Assignment invalidations deliberately never touch it.
+        if metadata.level == 0 {
+            for item in &metadata.names {
+                if cancel.at(Checkpoint::Collector) {
+                    return;
+                }
+                let local = item
+                    .asname
+                    .as_deref()
+                    .unwrap_or_else(|| item.name.split('.').next().unwrap());
+                let target = if !import.from && item.asname.is_none() {
+                    local
+                } else {
+                    &item.name
+                };
+                self.import_alias(local, &metadata.module, target, cancel);
+                if self.unsupported || self.limited.is_some() || cancel.expired.get() {
+                    return;
+                }
+            }
+        }
         self.pending -= import.working + text_work + names_work + temporary;
     }
 
@@ -1394,7 +1658,9 @@ impl Collector<'_, '_> {
             }
         }
         if expression.mode == Mode::HeaderValue {
-            self.pending -= expression.working;
+            let working = expression.working;
+            drop(expression);
+            self.pending -= working;
             return;
         }
         if expression.mode == Mode::ExceptionType && expression.handler_alias {
@@ -1416,8 +1682,12 @@ impl Collector<'_, '_> {
                 .into_string();
             if expression.mode == Mode::Base {
                 let (line, end) = expression.span();
-                let symbol = self.definitions.last().unwrap().symbol.clone();
-                self.add("base", line, end, symbol, value, cancel);
+                let retained = value.len();
+                self.stage_header(
+                    HeaderMetadata::Base(Shape { line, end, value }),
+                    retained,
+                    cancel,
+                );
             } else if self.body.as_ref().unwrap().field_name.is_some() {
                 // Keep only a bounded redacted shape until the statement closes.
                 if !self.reserve_work(512, cancel) {
@@ -1427,7 +1697,9 @@ impl Collector<'_, '_> {
                 body.annotation = Some(value);
                 body.working += 512;
             }
-            self.pending -= expression.working + temporary;
+            let working = expression.working;
+            drop(expression);
+            self.pending -= working + temporary;
             return;
         }
         if matches!(
@@ -1460,30 +1732,28 @@ impl Collector<'_, '_> {
         let (line, end) = expression.span();
         match expression.mode {
             Mode::Annotation => {
+                let retained = value.len();
                 let p = self.parameter.as_mut().unwrap();
                 p.annotation = Some(value);
                 p.end = expression.terminal_end_line;
-                p.working += temporary;
+                p.working += retained;
+                self.pending -= temporary - retained;
             }
             Mode::Return => {
-                let f = self.definitions.last_mut().unwrap();
-                let symbol = f.symbol.clone();
-                self.add("return_annotation", line, end, symbol, value, cancel);
+                let retained = value.len();
+                self.stage_header(
+                    HeaderMetadata::Return(Shape { line, end, value }),
+                    retained,
+                    cancel,
+                );
                 self.pending -= temporary;
             }
             Mode::Default => {
-                let symbol = join_symbol(
-                    &self.definitions.last().unwrap().symbol,
-                    &self.parameter.as_ref().unwrap().name,
-                    self.limits.bytes.saturating_sub(self.used),
-                    cancel,
-                );
-                if let Some(symbol) = symbol {
-                    self.add("parameter_default", line, end, symbol, value, cancel);
-                } else {
-                    self.limited = Some(CandidateDiagnostic::OutputLimit);
-                }
-                self.pending -= temporary;
+                let retained = value.len();
+                let parameter = self.parameter.as_mut().unwrap();
+                parameter.default = Some(Shape { line, end, value });
+                parameter.working += retained;
+                self.pending -= temporary - retained;
             }
             Mode::Base
             | Mode::HeaderValue
@@ -1495,7 +1765,9 @@ impl Collector<'_, '_> {
             | Mode::ScalarTarget
             | Mode::DeleteTarget => unreachable!(),
         }
-        self.pending -= expression.working;
+        let working = expression.working;
+        drop(expression);
+        self.pending -= working;
     }
 
     fn finish_body_expression<F: FnMut(Checkpoint) -> bool>(
@@ -1550,28 +1822,46 @@ impl Collector<'_, '_> {
             }
         }
         {
-            // Aliases are constant inside admitted expressions; lambda parameters
-            // and comprehension binders do not change the helper's owner/scope.
-            // Source-order calls are equivalent after sorting, even where AST
-            // default/argument groups differ. This does not admit header calls.
+            // Replay helper order independently of opaque/truncated rendering.
+            // Lambda/comprehension binders do not create helper lexical scopes.
             for index in expression.calls(cancel) {
                 if cancel.at(Checkpoint::Collector) || self.limited.is_some() {
                     break;
+                }
+                let capture = self.body.as_ref().is_some_and(|body| body.assignment);
+                let charge = 1024 + 4 * std::mem::size_of::<CallObservation>();
+                if capture {
+                    if self.body.as_ref().unwrap().calls.len() >= self.limits.count {
+                        self.limited = Some(CandidateDiagnostic::FactLimit);
+                        break;
+                    }
+                    if !self.reserve_work(charge, cancel) {
+                        break;
+                    }
                 }
                 let bytes = self.sources[self.index]
                     .bytes
                     .strip_prefix(b"\xef\xbb\xbf")
                     .unwrap_or(&self.sources[self.index].bytes);
                 let value = expression.render_call(index, bytes, cancel);
-                let callee = expression.render_callee(index, bytes, cancel);
+                let callee = expression
+                    .render_callee(index, bytes, cancel)
+                    .into_boxed_str()
+                    .into_string();
                 let (line, end) = expression.call_span(index);
-                self.warn_call(&callee, line, cancel);
-                let owner = self
-                    .definitions
-                    .last()
-                    .map_or(&self.sources[self.index].module, |f| &f.symbol)
-                    .clone();
-                self.add("call", line, end, owner, value, cancel);
+                let call = CallObservation {
+                    line,
+                    end,
+                    value,
+                    callee,
+                };
+                if capture {
+                    let body = self.body.as_mut().unwrap();
+                    body.calls.push(call);
+                    body.working += charge;
+                } else {
+                    self.emit_call(call, cancel);
+                }
             }
             let bytes = self.sources[self.index]
                 .bytes
@@ -1594,11 +1884,13 @@ impl Collector<'_, '_> {
                 self.pending -= retained;
             }
         }
-        self.pending -= expression.working + temporary;
+        let working = expression.working;
+        drop(expression);
+        self.pending -= working + temporary;
     }
 
     fn finish_body_statement<F: FnMut(Checkpoint) -> bool>(&mut self, cancel: &Cancellation<F>) {
-        let body = self.body.take().unwrap();
+        let mut body = self.body.take().unwrap();
         if let (Some(name), Some(annotation)) = (body.field_name.as_ref(), body.annotation.as_ref())
         {
             let size = self.definitions.last().unwrap().symbol.len() + name.len() + 1;
@@ -1682,7 +1974,15 @@ impl Collector<'_, '_> {
             );
             self.pending -= temporary;
         }
-        self.pending -= body.working;
+        for call in std::mem::take(&mut body.calls) {
+            if cancel.at(Checkpoint::Collector) || self.limited.is_some() || self.unsupported {
+                break;
+            }
+            self.emit_call(call, cancel);
+        }
+        let working = body.working;
+        drop(body);
+        self.pending -= working;
     }
 
     fn reserve_work<F: FnMut(Checkpoint) -> bool>(
@@ -1737,6 +2037,10 @@ impl Collector<'_, '_> {
         }
         self.used += size + 1;
         self.facts.push(fact);
+        #[cfg(test)]
+        if let Some(trace) = &mut self.observations {
+            trace.push(ObservationIndex::Fact(self.facts.len() - 1));
+        }
     }
 
     fn statement<F: FnMut(Checkpoint) -> bool>(
@@ -1803,6 +2107,10 @@ impl Collector<'_, '_> {
 
 impl Observer for Collector<'_, '_> {
     fn begin(&mut self) {
+        #[cfg(test)]
+        {
+            self.observation_start = self.observations.as_ref().map_or(0, Vec::len);
+        }
         self.start = self.facts.len();
         self.warning_start = self.diagnostics.len();
         self.start_warning_text = self.warning_text;
@@ -1816,7 +2124,7 @@ impl Observer for Collector<'_, '_> {
         self.definition_frames = 0;
         self.pending =
             self.warning_text + self.warning_slots * 4 * std::mem::size_of::<CandidateWarning>();
-        self.scopes = Vec::new();
+        self.scopes = Projection::default();
         self.expression = None;
         self.pattern = None;
         self.parameter = None;
@@ -2696,10 +3004,13 @@ impl Observer for Collector<'_, '_> {
         } else {
             match kind {
                 "module" if parent.is_empty() => {
-                    if !self.reserve_work(4 * std::mem::size_of::<AliasScope>(), cancel) {
+                    let mut scopes = std::mem::take(&mut self.scopes);
+                    let result = scopes.root(&mut |n| self.projection_work(n, cancel));
+                    self.scopes = scopes;
+                    if let Err(error) = result {
+                        self.projection_error(error);
                         return;
                     }
-                    self.scopes.push(AliasScope::default());
                     for (chunk_index, chunk) in bytes.chunks(4096).enumerate() {
                         if cancel.at(Checkpoint::Collector) {
                             return;
@@ -2827,7 +3138,11 @@ impl Observer for Collector<'_, '_> {
                         self.unsupported = true;
                     }
                 }
-                "block" if suite_parent(parent, field) => {}
+                "block" if suite_parent(parent, field) => {
+                    if matches!(parent, "function_definition" | "class_definition") {
+                        self.definition_metadata(cancel);
+                    }
+                }
                 "with_clause" if parent == "with_statement" => {
                     if !same_line {
                         self.unsupported = true;
@@ -2966,6 +3281,8 @@ impl Observer for Collector<'_, '_> {
                         return;
                     }
                     self.body = Some(BodyStatement {
+                        assignment: false,
+                        calls: Vec::new(),
                         line: node.start_position().row + 1,
                         targets: Vec::new(),
                         source: None,
@@ -2984,6 +3301,7 @@ impl Observer for Collector<'_, '_> {
                 {
                     let nested = parent == "assignment";
                     let body = self.body.as_mut().unwrap();
+                    body.assignment = true;
                     let annotated = node.child_by_field_name("type").is_some();
                     // Recursive CST assignments do not start BodyValue, so
                     // enforce the RHS entry-line gate here too. A grouped
@@ -3034,6 +3352,7 @@ impl Observer for Collector<'_, '_> {
                         line: 0,
                         end: 0,
                         annotation: None,
+                        default: None,
                         working,
                     });
                 }
@@ -3142,28 +3461,25 @@ impl Observer for Collector<'_, '_> {
                             parameter.line = node.start_position().row + 1;
                             parameter.end = node.end_position().row + 1;
                         } else {
-                            let temporary = f.symbol.len() + 2 * name.len() + 1;
-                            if !self.reserve_work(temporary, cancel) {
-                                return;
-                            }
-                            let Some(symbol) = join_symbol(
-                                &self.definitions.last().unwrap().symbol,
-                                name,
-                                self.limits.bytes.saturating_sub(self.used),
-                                cancel,
-                            ) else {
-                                self.limited = Some(CandidateDiagnostic::OutputLimit);
-                                return;
+                            let order = if f.kwarg.as_deref() == Some(name) {
+                                2
+                            } else if f.vararg.as_deref() == Some(name) {
+                                1
+                            } else {
+                                0
                             };
-                            self.add(
-                                "parameter",
-                                node.start_position().row + 1,
-                                node.end_position().row + 1,
-                                symbol,
-                                name.into(),
+                            self.stage_header(
+                                HeaderMetadata::Parameter {
+                                    order,
+                                    name: name.into(),
+                                    line: node.start_position().row + 1,
+                                    end: node.end_position().row + 1,
+                                    annotation: None,
+                                    default: None,
+                                },
+                                name.len(),
                                 cancel,
                             );
-                            self.pending -= temporary;
                         }
                     } else {
                         self.unsupported = true;
@@ -3443,42 +3759,37 @@ impl Observer for Collector<'_, '_> {
             }
             "typed_parameter" | "typed_default_parameter" | "default_parameter" => {
                 let parameter = self.parameter.take().unwrap();
-                let temporary =
-                    self.definitions.last().unwrap().symbol.len() + parameter.name.len() + 1;
-                if !self.reserve_work(temporary, cancel) {
-                    return;
-                }
-                let symbol = join_symbol(
-                    &self.definitions.last().unwrap().symbol,
-                    &parameter.name,
-                    self.limits.bytes.saturating_sub(self.used),
-                    cancel,
-                );
-                let Some(symbol) = symbol else {
-                    self.limited = Some(CandidateDiagnostic::OutputLimit);
-                    return;
+                let f = self.definitions.last_mut().unwrap();
+                let order = if f.kwarg.as_deref() == Some(parameter.name.as_str()) {
+                    2
+                } else if f.vararg.as_deref() == Some(parameter.name.as_str()) {
+                    1
+                } else {
+                    0
                 };
-                if let Some(annotation) = parameter.annotation {
-                    // The second symbol copy is covered by the expression's
-                    // retained temporary reservation until this parameter exits.
-                    self.add(
-                        "parameter_annotation",
-                        parameter.line,
-                        parameter.end,
-                        symbol.clone(),
-                        annotation,
-                        cancel,
-                    );
-                }
-                self.add(
-                    "parameter",
-                    parameter.line,
-                    parameter.end,
-                    symbol,
-                    parameter.name,
+                // Only compact text survives rendering and parameter completion.
+                // Renderer scratch and the temporary Parameter slot must not
+                // accumulate across thousands of staged parameters.
+                let retained = parameter.annotation.as_ref().map_or(0, String::len)
+                    + parameter
+                        .default
+                        .as_ref()
+                        .map_or(0, |shape| shape.value.len());
+                let released = parameter.working - retained;
+                f.working += retained;
+                self.stage_header(
+                    HeaderMetadata::Parameter {
+                        order,
+                        name: parameter.name,
+                        line: parameter.line,
+                        end: parameter.end,
+                        annotation: parameter.annotation,
+                        default: parameter.default,
+                    },
+                    0,
                     cancel,
                 );
-                self.pending -= parameter.working + temporary;
+                self.pending -= released;
             }
             "pass_statement"
             | "assert_statement"
@@ -3517,27 +3828,26 @@ impl Observer for Collector<'_, '_> {
                 }
             }
             "function_definition" | "class_definition" => {
+                let kind = if self.definitions.last().unwrap().class {
+                    DefinitionKind::Class
+                } else {
+                    DefinitionKind::Function
+                };
+                self.drain_header(kind, true, cancel);
+                if self.unsupported || self.limited.is_some() || cancel.expired.get() {
+                    return;
+                }
                 let f = self.definitions.pop().unwrap();
-                if f.end == 0 || f.name.is_empty() {
+                if f.end == 0
+                    || f.declaration_fact.is_none()
+                    || (!f.class && f.signature_fact.is_none())
+                {
                     self.unsupported = true;
                     return;
                 }
-                self.add(
-                    if f.class {
-                        "class"
-                    } else if f.asynchronous {
-                        "async_function"
-                    } else {
-                        "function"
-                    },
-                    f.line,
-                    f.end,
-                    f.symbol.clone(),
-                    f.name,
-                    cancel,
-                );
-                if !f.class {
-                    self.add("signature", f.line, f.end, f.symbol, f.signature, cancel);
+                self.finish_definition_span(f.declaration_fact.unwrap(), f.end, cancel);
+                if let Some(index) = f.signature_fact {
+                    self.finish_definition_span(index, f.end, cancel);
                 }
                 if let Some(parent) = self.definitions.last_mut() {
                     parent.end = f.end;
@@ -3545,7 +3855,9 @@ impl Observer for Collector<'_, '_> {
                 if let Some(suite) = self.frames.last_mut() {
                     suite.last_end = Some(f.end - 1);
                 }
-                self.pending -= f.working;
+                let working = f.working;
+                drop(f);
+                self.pending -= working;
             }
             _ => {}
         }
@@ -3579,6 +3891,10 @@ impl Observer for Collector<'_, '_> {
             }
         };
         if status != CandidateStatus::AcceptedFacts {
+            #[cfg(test)]
+            if let Some(trace) = &mut self.observations {
+                trace.truncate(self.observation_start);
+            }
             self.facts.truncate(self.start);
             self.diagnostics.truncate(self.warning_start);
             self.warning_text = self.start_warning_text;

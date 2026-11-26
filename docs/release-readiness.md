@@ -1,5 +1,16 @@
 # Source Release Readiness — 2026-11-13
 
+**Current status (2026-11-25):** approved delivery is personal/company Git source,
+not registry publication; root `publish = false`. The maintained five-crate Ruff
+snapshot travels with the checkout. Active gates are the reviewed source inventory,
+vendor integrity and independent checkout consumer in [releasing.md](releasing.md).
+A dirty working-tree snapshot is not an attested Git revision; current Linux/macOS
+× Rust 1.89.0/stable hosted results are not yet known. The archive evidence,
+dependency counts and decisions below are historical, not current-closure proof.
+Private Ruff syntax classification is not CPython compatibility or fact-backend
+completion; production Python remains the trusted >=3.12 AST helper. No new
+validation result or release authorization is recorded by this note.
+
 This is a bounded engineering review of the JS/TS P0 source candidate, not legal,
 ownership, security, framework, or publication approval. The dated baseline below
 is historical; later scoped diagram and consumer acceptance is recorded in the

@@ -17,6 +17,9 @@ use std::time::{Duration, Instant};
 #[allow(dead_code)] // Private native candidates, pending a production caller.
 mod python_native;
 
+#[allow(dead_code)] // Private Ruff admission lane; no production dispatch.
+mod python_ruff;
+
 #[cfg(unix)]
 use rustix::fs::{openat, statat, AtFlags, Dir, FileType, Mode, OFlags};
 

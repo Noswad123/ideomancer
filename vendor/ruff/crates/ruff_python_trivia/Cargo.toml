@@ -1,0 +1,30 @@
+[package]
+name = "ruff_python_trivia"
+version = "0.0.0"
+publish = false
+authors = ["Charlie Marsh <charlie.r.marsh@gmail.com>"]
+edition = "2024"
+rust-version = "1.85"
+homepage = "https://docs.astral.sh/ruff"
+documentation = "https://docs.astral.sh/ruff"
+repository = "https://github.com/astral-sh/ruff"
+license = "MIT"
+license-file = "../../LICENSE"
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+
+[lib]
+test = false
+doctest = false
+bench = false
+
+[dependencies]
+ruff_text_size = { path = "../ruff_text_size" }
+ruff_source_file = { path = "../ruff_source_file" }
+itertools = "=0.14.0"
+unicode-ident = "1.0.12"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)', 'cfg(codspeed)'] }

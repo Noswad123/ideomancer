@@ -73,9 +73,9 @@ The finite completion ledger is:
 | Gate | Outcome and required acceptance | State |
 | --- | --- | --- |
 | P1-G1 | Generic expression and ordinary-body coverage: containers/operators/indexing, call-free defaults, conditions, loops and context managers; hidden calls/warnings, owner restoration, spans and one counted walk remain exact. | Implemented and locally validated for the bounded G1 subset below |
-| P1-G2 | Close the generic visitor inventory: remaining statements, targets/writes/imports, arbitrary callees/splats, comprehensions/lambdas/generators, await/yield/walrus, all headers and literal/identifier forms. Every target-version node has a normalization/traversal rule and cross-family oracle cases. | In progress: broad traversal and ordinary-literal/f-string subset locally validated; remaining header/identifier and AST-only pattern inventory open |
+| P1-G2 | Close the generic visitor inventory: remaining statements, targets/writes/imports, arbitrary callees/splats, comprehensions/lambdas/generators, await/yield/walrus, all headers and literal/identifier forms. Every target-version node has a normalization/traversal rule and cross-family oracle cases. | In progress: admitted-lane statement/header ordering and literal subset locally validated; header calls/identifiers and AST-only pattern inventory remain open |
 | P1-G3 | Preserve every existing discovery/framework side output: decorators, CLI/job/API entry facts, route diagnostics and FastAPI host/prefix/include/mutation metadata, including aliases and literal-retention limits. | Pending |
-| P1-G4 | Close grammar/version/encoding/failure differences: original-byte digests, decoding/cookies, physical layout and exact observable parse diagnostics. No unexplained valid-file rejection or invalid-file acceptance in the approved compatibility suite. | Blocked: grammar correction and bounded Ruff policy/adapter experiment did not establish a compatible native replacement; retain the production helper and close this experiment |
+| P1-G4 | Close grammar/version/encoding/failure differences: original-byte digests, decoding/cookies, physical layout and exact observable parse diagnostics. No unexplained valid-file rejection or invalid-file acceptance in the approved compatibility suite. | Open: private Ruff syntax frontend integrated; CPython admission, normalization/decoding/failure and resource closure remain; production helper retained |
 | P1-G5 | Integrate distinct native identity, evidence/snapshots, CLI/library dispatch, workflow revalidation and capabilities. Preserve old-save reading/rendering; rediscovery invalidates stale claims. Native operation must not probe Python. | Pending; public migration design required |
 | P1-G6 | Existing-engine usefulness and operational/cutover acceptance: class/callable/API/network/services views, adapter proofs, saved-source reuse, supported platforms/toolchain/package/resource checks, then explicit replacement approval. | Pending |
 
@@ -441,9 +441,9 @@ maintenance costs, not another syntax-slice milestone. G2–G6 remain open.
 The subsequent continuation moves from parser probes to a **parser-independent
 implementation of observable helper behavior**. It does not adopt Ruff or reopen
 the closed experiment. The existing AST helper remains production; the pinned
-Tree-sitter candidate remains a conservative private regression lane. Ruff at the
-evaluated revision is a possible future frontend, subject to a separate dependency,
-packaging and compatibility decision.
+Tree-sitter candidate remains a conservative private regression lane. At that
+checkpoint Ruff was a possible future frontend. The subsequent selection below
+chooses it as the implementation direction, not as a compatible production backend.
 
 ##### Reconstruct only observable semantics
 
@@ -527,7 +527,10 @@ different Python lengths; retention eligibility must be decided before encoding.
 
 ##### Remaining implementation batches and decisions
 
-1. **Helper-order semantic projection.** Introduce bounded descriptors and explicit
+1. **Helper-order semantic projection.** The admitted-lane call/scope and
+   statement/header portions are implemented below; new header-call admission
+   remains separate. Use
+   bounded descriptors and explicit
    definition phases, render/visit edges, argument order, imports and calls. Prove
    body-import effects, early discovery metadata, nested owner restoration and
    repeated scope-name behavior using synthetic semantic traces. Integrate an
@@ -555,7 +558,8 @@ different Python lengths; retention eligibility must be decided before encoding.
    capabilities. Complete existing-engine, adapter, platform/package/resource and
    saved-source acceptance before explicit cutover approval.
 
-The immediate implementation boundary is the private foundation above. Parser
+The first implementation boundary was the private foundation above; the next
+admitted-lane projection batch is recorded below. Parser
 adoption, distributable Unicode/codec data and a production native language/version
 profile remain explicit decisions. Python 3.12.11 / Unicode 15 / decimal limit
 4300 describe the development oracle only; production's Python >=3.12 contract is
@@ -591,6 +595,407 @@ The first broad library attempt hit the command timeout, not a reported assertio
 failure. Its stopped processes were checked and exact owned scratch was removed;
 the completed rerun above used an adequate timeout. These interrupted/failed
 attempts are not counted as passing validation.
+
+#### Helper-order call and scope projection: admitted lane integrated
+
+The next implementation batch adds private `python_native/projection.rs` and
+integrates it behind the existing counted CST collector. There is no new parser,
+dependency, backend, public capability or syntax admission. Private policy 15
+remains; implementation fingerprint inputs now include the projection module.
+The production helper and evidence identity are unchanged.
+
+**Actual integrated behavior:**
+
+- `Projection` owns persistent parent/name-keyed scope identities and import
+  aliases, separate from parser nodes. The collector's existing definition stack
+  retains lexical ownership and supplies explicit scope IDs. Repeated definitions
+  reuse path identities even across class/function kinds. Lookup selects the
+  nearest prefix, substitutes once and retains the full target without reclipping;
+  assignment/invalidation facts still do not mutate import aliases. Fixed hashed
+  keys retain original spellings and fail closed on a collision.
+- Import metadata is emitted before applying its absolute-alias updates. Calls
+  emit their fact before the dynamic-discovery diagnostic, then replay descendant
+  calls. Relative imports and conservative constructor/mutation guards retain
+  their existing behavior. Import metadata serialization remains ASCII-only on
+  its existing path; this is not Unicode import admission.
+- Expression completion builds intrusive call chains from validated child
+  topology, independently of renderer edges. Calls visit the callee, positional/
+  starred arguments, then keyword/unpacked-keyword values. Dictionaries visit all
+  keys before values; conditionals visit test before body/alternate; lambda
+  keyword defaults precede positional defaults. Comprehension element/key/value
+  traversal precedes generator target/iterable/conditions. Opaque nodes, f-string
+  fields and children past render caps remain observable. Splat and await/power
+  normalization retain each call once. Unknown nonleaf scheduling forms reject
+  rather than silently adopting source order.
+- Declaration/signature facts are now tentatively emitted before admitted bodies.
+  Their end lines and IDs are finalized after the suite's counted walk, excluding
+  trailing comments from definition evidence. Provisional records are never
+  published on cancellation, unsupported syntax or resource failure.
+
+At that checkpoint this did **not** complete the entire helper event schedule:
+parameter/base/header facts still used their existing call-free lowering path,
+and assignment-specific metadata still needed its pre-child phase integration.
+The subsequent batch below integrates those admitted-lane phases. Header calls
+and decorators remain excluded; their generic visit groups are exercised with
+synthetic observations, not newly admitted source. No full parser-neutral AST has
+been introduced as unused infrastructure.
+
+**Bounds and failure behavior:** call links live inside already charged expression
+entries; `ENTRY_WORK` automatically includes the additional storage. Building
+chains visits sibling edges a constant number of times and replay follows each
+call link once, with cancellation checks. There is no second CST walk, recovery
+parse or render-limit-dependent traversal. Scope maps and target copies are
+charged before growth through frontend-independent charge/checkpoint callbacks.
+Definition finalization reserves 256 bytes of scratch per active definition and
+one additional function-owner symbol copy. Provisional maximum-width end lines
+reserve output conservatively before finalization releases unused bytes. Tight
+private working/output limits can therefore reject earlier than the preceding
+implementation; this is not a change to production hard-limit behavior or a claim
+of an allocator/RSS sandbox.
+
+**Validation for this batch:**
+
+- The completed ordinary library gate passed **577 tests**, with 173 opt-in tests
+  ignored by that invocation. API regressions passed **18 adapter** and **8 engine**
+  tests. Ignored tests are not counted as passing ordinary tests.
+- The explicitly selected trusted **Python 3.12.11** gate passed all **165**
+  `analysis::python_parity` tests, including the three new `projection_batch` cases:
+  cross-family facts/warnings and persistent ownership; captured replay and
+  nonexecution past rendering caps; unchanged header/constructor rejection with
+  full-file rollback.
+- Two separate opt-in native-module oracle tests passed: the existing eight-case
+  retained-text metadata/ID seam and a new **18-expression raw call-order**
+  comparison against stdlib `ast.NodeVisitor`. The latter deliberately compares
+  unsorted traces, not final fact arrays. It covers interleaved argument groups,
+  dictionary unpacking, lambda parameter separators, conditional expressions,
+  comprehension targets, nested f-string specifications, normalized splats,
+  await/power, deep calls and calls beyond rendering caps. Python only parses the
+  independent synthetic inputs; no target code is executed or imported.
+- Unit traces cover alias overwrite, lexical fallback, one-step substitution,
+  full long targets, repeated paths and future definition phases. Bounds/collision
+  checks run before allocations; per-file resource failures discard facts and
+  warnings. Cancellation was injected at **every fact-ID checkpoint** in a nested
+  definition fixture, including provisional/final IDs; only the module baseline
+  and deadline status survive.
+- Formatting and all-target Clippy with warnings denied passed on existing Rust
+  1.89.0 with two jobs and `RUSTUP_AUTO_INSTALL=0`. The exact package inventory
+  passed at **119 paths**, including both new source files; nothing was published.
+  Independent read-only review identified the initially missing inventory entries,
+  which were added before this gate. No blocking code issue was found.
+
+The raw-order test is
+`analysis::python_native::facts::expressions::tests::projection_semantic_call_trace_matches_trusted_ast`.
+Like the scalar seam test, it is outside the `analysis::python_parity` filter and
+must be selected separately; the native-module `--ignored` gate selects both.
+These checks establish the integrated admitted lane, not complete G2/G3 traversal,
+encoding/failure compatibility, a reviewed frontend replacement or cutover.
+
+#### Statement and header phases: admitted lane integrated
+
+The following batch completes the statement-local and definition-local ordering
+work for the **already-admitted private lane**, not all Python headers or G3.
+No parser dependency, source-admission rule, production identity, public schema or
+default changed. Existing private policy 15 and final fact/diagnostic semantics
+remain; the implementation fingerprint changes with the implementation.
+
+**Assignment observations.** Assign/AnnAssign retain unresolved call observations
+until their outer statement closes. The collector emits class attribute annotation
+metadata first, then the helper's LIFO binding/invalidation metadata, then target
+and value child calls in AST order. A call still emits its fact before its dynamic
+diagnostic. Annotation-only targets retain their calls even without an RHS.
+Capturing child visits does not reverse them with the binding-target stack and
+does not pre-resolve aliases. AugAssign/Delete, ordinary expressions/returns and
+loop/with/exception expressions keep their existing immediate paths; no statement
+buffer crosses a compound suite or nested definition. Constructor/mutation guards
+remain in force.
+
+**Definition metadata.** Owned header descriptors retain compact shapes and
+logical spans during the existing counted walk. Before the body, functions emit
+declaration/signature, positional-only and positional parameters, keyword-only
+parameters, vararg, kwarg, then return-annotation metadata. Each parameter emits
+parameter → annotation → default, preserving the argument's annotation span and
+the default's independent span. Classes emit declaration before base metadata;
+keyword values do not become bases. Signature truncation still leaves all
+parameter facts observable. Declaration/signature end spans and IDs finalize after
+the body as before.
+
+**Owned phase driver.** `HeaderSchedule` replaces the iterator-only integration
+with bounded metadata and visit groups, consume-once pre-body/post-body drains,
+and a poisoned state after failed drains. Metadata emission is separate from
+generic child visitation. Function argument visit groups follow AST field order:
+posonlyargs, args, vararg, kwonlyargs, kw_defaults, kwarg, defaults. Bases/keywords
+are the class pre-body groups; decorators, function return and type parameters are
+post-body groups. Post-body draining occurs before the definition owner is popped.
+Synthetic call observations exercise the same drain implementation and prove that
+body imports affect later resolution without changing earlier resolution or
+leaking nested-owner imports.
+
+Current admitted headers are call-free, so their visit groups remain empty.
+Source decorators and calls in defaults, annotations, bases and return annotations
+are **not** enabled by this batch. Existing ASCII-name and duplicate-parameter
+restrictions remain. In particular, the current name-based metadata role
+classification must be replaced by syntactic roles before any future relaxation
+of the duplicate-parameter guard; current accepted inputs cannot reach that
+ambiguity. This is not full AST-only parameter compatibility.
+
+**Resource and transaction discipline.** Call buffers charge retained text,
+initial/geometric capacity and growth transients before storage. Rendering scratch
+and expression storage remain charged while observations are captured. Completed
+expressions and statements drop owned storage before refunding its charge. Header
+descriptors retain only compact annotation/default text after rendering; renderer
+and temporary parameter scratch do not accumulate across parameters. Header vector
+capacity remains charged until owner disposal. Tight private working limits can
+reject earlier because of the new bounded scheduling storage; no production
+hard-limit behavior or hard RSS guarantee is implied. Partial drains, capture
+failures and cancellation still discard the whole file's facts and warnings.
+
+**Raw trace proof.** An opt-in, test-only indexed observation capture records facts
+and warning positions before global sorting/deduplication, then resolves indices
+after declaration spans/IDs finalize. Ordinary extraction/tests do not retain a
+second fact array. Per-file failure truncates its trace prefix; final cancellation
+clears the trace with the facts/warnings. Module baselines are deliberately excluded
+from this comparison because native preflight reserves them batch-wide rather
+than visiting them sequentially.
+
+The new ignored oracle is
+`analysis::python_native::facts::phase_batch::phase_batch_raw_trace_and_complete_facts_match_trusted_helper`.
+It instruments the repository's trusted `Extractor.fact` and diagnostic append
+methods without replacing visitor semantics. Nine independently synthetic source
+cases compare **unsorted fact/warning traces, finalized IDs/spans, complete fact
+arrays and diagnostics**. Cases cover chained/destructured/annotation-only writes,
+class fields, typed and variadic/async headers, multiline defaults, interleaved
+class arguments, persistent/repeated owners, control flow and AugAssign/Delete,
+duplicate same-line calls, 129 parameters, captured replay and nonexecution. Only
+the trusted helper/stdlib AST parses source; analyzed source is never executed or
+imported. The oracle has a Unix guard and sits outside the `python_parity` filter.
+
+**Completed behavioral gates:** **585** ordinary library tests passed, with 174
+opt-in tests ignored by that invocation; API regressions passed **18 adapter + 8
+engine** tests. All **165** explicitly selected `analysis::python_parity` tests
+passed with trusted **Python 3.12.11**. The separate native-module ignored gate
+passed all **three** oracle tests: raw expression call order, retained-text
+metadata/IDs and the new full raw-phase trace. Ignored tests are not counted as
+passing ordinary tests.
+
+Additional unit checks prove 4096 defaults, 4096 annotations and 4096 typed defaults
+each fit a 16 MiB working budget without clipping parameter facts; 100 sequential
+assignments fit 64 KiB without accumulating statement storage. Accepted/rejected/
+accepted file traces keep correct finalized indices, and final sort/output
+cancellation leaves only module baselines. Cancellation is injected across all
+observed collector/working/ID/sort/final checkpoints in the bounded phase fixture;
+working/count/output/warning-limit failures discard trace prefixes as well.
+Independent review caught the initial retained-renderer overcharge, the new test's
+missing Unix guard and missing inventory entry; those were corrected before the
+completed gates. No blocking issue remained in the follow-up review.
+Formatting and all-target Clippy with warnings denied passed on existing Rust
+1.89.0, using two jobs/test threads and `RUSTUP_AUTO_INSTALL=0`. The package
+inventory passed at **120 paths**, including `phase_batch.rs`; nothing was
+published. Test scratch was restricted to owned disk-backed run directories.
+No cross-platform compiler/toolchain matrix was run for this private slice.
+
+That batch reached the frontend adoption/packaging boundary. The subsequent Ruff
+selection below resolves parser choice, not remaining language/encoding
+compatibility or broader G3 admission. G2–G6 remain open.
+
+#### Ruff selected: initial dependency distribution decision
+
+**Decision:** use Ruff as the native Python frontend direction; do not reopen
+parser shopping without a concrete new blocker. The source baseline is Ruff
+**0.12.0**, revision `87f0feb21a1af67195bebf94d811770393f9f447`, with the
+previously demonstrated default-false AST-only duplicate-keyword policy. This
+selection authorizes the adoption direction, not acceptance of recovery trees,
+weaker compatibility, publication or a production switch. Both parser diagnostic
+channels must remain empty before lowering.
+
+At that checkpoint root integration had a distribution decision to resolve. The selected Ruff
+parser/AST workspace crates are unpublished. Ideomancer's current release gates
+require a standalone Cargo source package and independently resolved consumer:
+
+- `check_package_archive.py::dependency_tables` supports registry dependency
+  manifests and rejects path/git/workspace rewriting.
+- `check_package_consumer.py::validate_package` requires normalized, registry-only
+  dependencies without a workspace/patch/replace escape hatch.
+- CI checks package inventory, builds the package, verifies archive/extracted
+  bytes and exercises an independent package consumer.
+
+A private Rust module does not make its Cargo dependencies private to packaging.
+Exact-revision Git dependencies would support checkout development, but do not
+satisfy this release contract. Adding registry version fields does not make
+unpublished crates available. Local path crates likewise do not become usable
+dependencies merely by placing their source inside the root package's include
+boundary. Optional dependency flags do not remove these distribution obligations.
+
+**Recommended route:** preserve the existing package contract and prepare a minimal,
+maintained, separately publishable Ruff-derived crate closure, with selected source
+provenance, self-contained manifests, complete applicable notices and an auditable
+policy patch. Registry publication, remote fork creation and ownership/naming
+decisions need separate authorization. Root dependencies must not reference
+invented/unpublished registry versions while that work is pending.
+
+An independent non-publishable development package containing reviewed selected
+Ruff sources could bridge the implementation work, but must stay outside the root
+dependency graph and source package. It would be a maintained development
+integration—not proof of root-package adoption or a replacement for distribution
+acceptance. Alternatively, an explicitly approved Git-only distribution contract
+could permit pinned fork dependencies, but would require deliberate changes to
+the existing release/consumer gates rather than silently disabling them.
+
+No root manifest, dependency lockfile, package gate or production dispatch changed
+when recording that initial decision. The subsequent personal/company delivery
+decision below removes registry compatibility as an adoption requirement. No
+further parser comparison is required.
+
+#### Ruff private frontend and Git-source delivery: implementation boundary
+
+**Approved delivery decision:** personal/company consumers use pinned Git source
+or approved mirrors; registry/crates.io publication is not a requirement. Preserve
+reproducible source/consumer builds and notices, not a registry-only restriction.
+The root manifest is now `publish = false`. A maintained, selected-source Ruff
+snapshot travels inside Ideomancer's checkout via local path dependencies, so no
+remote fork, submodule, separately published Ruff crate family or invented registry
+version is needed. Source selection remains generic; this decision does not admit
+private fixtures, company paths or consumer-specific interpretation into the engine.
+
+**Maintained source:** `vendor/ruff` contains five unpublished Ruff workspace crates
+at **0.12.0**, revision `87f0feb21a1af67195bebf94d811770393f9f447`:
+parser, AST, trivia, source-file and text-size libraries. The selected production
+source comprises **65 files / 1629332 pristine bytes**. The complete maintained
+snapshot is **85 files / 1878654 bytes**, including adapted manifests, original
+upstream manifests/lockfile, complete upstream license/RustPython attribution,
+applicable pinned Unicode-name notices, the separate two-file policy patch and
+closed provenance. It does not contain a nested Git repository, unused Ruff crates,
+fixtures, parser test resources, registry implementation sources or tool binaries.
+
+The commit-addressed archive SHA-256 is
+`e4613ad9fe6f7293510586649aab788e10610ab80fe9dd509ba7ac2364413631`;
+upstream lockfile SHA-256 is
+`ccc843838d16f203d18a3410dd120e72e750a89ee42164145ae9cbf181fb6f47`.
+`check_ruff_vendor.py` anchors the committed provenance digest, checks exact file
+membership/types/hashes and self-contained manifest edges, and reverses the narrow
+policy patch to verify pristine source hashes. This is reviewed-source integrity,
+not a remote signature or a hostile same-user sandbox. See the maintained
+[snapshot instructions](../vendor/ruff/README.md).
+
+Root dependencies select parser/AST/text-size; sibling path dependencies supply
+the five-crate closure. Optional upstream features, auto targets and vendored
+library tests/doctests are disabled. Required generated AST source is retained;
+no regeneration or new toolchain was needed. Only the two reviewed parser source
+files differ from the selected upstream source. Product formatting and Clippy are
+scoped to the product, not used to rewrite third-party code.
+
+**Merged dependency graph:** the product lockfile adds **35 packages**—five local
+Ruff crates and 30 registry packages—while retaining every previously locked
+product version. Shared compatible requirements use existing product selections;
+unshared direct Ruff requirements use reviewed exact pins. The former isolated
+probe lock is provenance, not the merged product lock. `cargo fetch --locked
+--offline` found the selected inputs already cached; no new tools were installed.
+Only existing Rust **1.89.0 on macOS arm64** has been locally exercised for this
+adoption slice. The new registry metadata declares no MSRV above 1.73; thirteen
+new registry packages omit MSRV, and local Ruff manifests declare 1.85. Successful
+1.89 compilation is not a proof of undeclared/lower MSRVs or other platforms.
+
+The actual merged `unicode-ident 1.0.24` uses Unicode **17.0.0**; pinned
+`unicode_names2 1.3.0` and `unicode-normalization 0.1.24` use Unicode **16** data.
+Setting `PY312` does not turn these into Python 3.12's Unicode 15 baseline. Names,
+identifiers and normalization need explicit versioned admission before parity.
+Selected manifest/source-notice review found no declared copyleft requirement;
+this is scoped screening, not complete source/binary legal clearance. Binary
+bundles still need applicable target/feature/toolchain notice review.
+
+**Private frontend:** `src/analysis/python_ruff.rs::parse_batch` consumes captured
+`Source.bytes`, ignores legacy hex transport and never reopens source paths or
+probes Python. It selects `PY312` and the explicit default-false AST-only policy
+override. The override removes only duplicate-keyword validation; it is not a
+claim that every compile-time check now matches `ast.parse`.
+
+Both ordinary and unsupported-version diagnostic channels determine classification.
+Errored/recovered trees are never consumed. This first integration does not expose
+AST nodes at all: reports contain only source identity, structured admission/syntax
+classification, capped diagnostic counts/first-error lines and lexical counters.
+No source excerpts, decoded literals, raw parser messages, facts or Evidence are
+published. `AcceptedByRuff` is deliberately distinct from CPython compatibility;
+all CPython/Unicode/digit/type-comment/encoding/normalization/fact capabilities
+remain explicitly **Pending**.
+
+Admission enforces 5000 files, 1 MiB/file, 16 MiB total and 4096-byte path/module
+metadata bounds. Original-byte hashes include any BOM. Effective cookies and
+invalid UTF-8 remain explicit unsupported-encoding outcomes. Before parsing, a
+lexical pass caps tokens at 200000 and delimiter/indent/string nesting at 256;
+strings/comments are not scanned as punctuation. Escaped worst-case report storage
+is checked against 1 MiB before parsing. Cancellation latches across the batch and
+final expiry invalidates earlier accepted classifications. Ruff lacks a parser
+interrupt hook: the shared 60-second deadline is checked before/after parsing and
+before publication. Lexical caps do not prove every parser-recursion bound, and
+cooperative checks are not a hard timeout, stack/RSS limit or OS sandbox.
+
+**Active delivery validation:** `docs/source-files.txt` replaces the historical
+crate inventory as the reviewed Git-source boundary. `check_checkout.py` checks
+bounded no-follow source reads, exact selected paths and a content-based snapshot
+hash. The source closure includes the five Ruff crates but excludes `.git`,
+`.ideomancer`, `.agents`, build trees and private material. This boundary is not a
+secrets scanner or approval of every file/history entry in the Git repository.
+
+`check_checkout_consumer.py` exports only reviewed bytes to owned disk-backed
+scratch, resolves a fresh independent consumer lockfile, and performs a locked
+public-API build/test with local Ruff dependencies inside that export. It reuses
+the trusted project target, low-disk profiles and two jobs/test threads. It verifies
+source bytes before/after, requires the ABI bridge pin, and finalizes/verifies owned
+process groups even when the parent succeeds. Unverified shutdown preserves only
+the owned run and reports its path/reason/manual cleanup plan rather than deleting
+live files. This is an exported source-snapshot check, not attestation of an actual
+uncommitted Git revision, remote availability or an OS sandbox.
+
+CI now checks checkout/vendor integrity and the independent checkout consumer,
+plus explicit trusted-Python oracle lanes. Historical package/archive helpers and
+their tests remain available for old artifacts but are not active delivery gates;
+they are not weakened to pretend an unpublished dependency is registry-published.
+Use `cargo fmt --package ideomancer --check` and root Clippy `--all-targets
+--no-deps -- -D warnings`. The preserved vendor source currently emits 19
+non-fatal Rust-1.89 lifetime-style compiler warnings; these are not hidden by
+rewriting upstream source or relaxing warnings in product code.
+
+The focused Ruff suite passed **nine ordinary tests plus one ignored acceptance
+oracle** with trusted Python 3.12.11. Its 16 synthetic oracle cases explicitly
+assert four tracked acceptance differences (decimal limit, Unicode admission and
+two type-comment placements), not full AST/fact parity. **180 Python script
+tests** passed, including vendor tamper/patch/manifest checks, source-boundary
+checks and successful-parent/lingering-child cleanup regression coverage.
+
+Completed local adoption gates on existing Rust **1.89.0/macOS arm64** were:
+
+| Gate | Actual result |
+| --- | --- |
+| Ordinary library suite | 594 passed; 175 opt-in tests ignored by that invocation, not counted as passing |
+| API regression targets | 18 adapter and 8 engine tests passed |
+| Explicit Python oracle gate | 169 passed: 165 existing captured-source parity cases, three native semantic/scalar oracles and the new Ruff acceptance oracle |
+| Product static checks | Scoped formatting and all-target `--no-deps` Clippy with product warnings denied passed; the 19 preserved vendor compiler warnings remain visible |
+| Source/vendor integrity | 211 reviewed source paths verified; 85 vendor files and exact policy-patch reversal verified |
+| Fresh checkout consumer | Offline fresh lock resolution, locked compile and the independent native JS/TS public-API test passed from an isolated reviewed source export |
+
+The consumer verified the five local Ruff crates stayed inside its exported tree,
+the ABI bridge resolved to 0.1.5, and source/provenance were unchanged during its
+run. It required neither a published Ruff crate nor a separate Ruff Git checkout.
+This is build/distribution and existing public-API acceptance, not Ruff fact parity
+or proof that production Python no longer needs its helper.
+
+Fresh consumer resolution intentionally differed from the product lock, including
+`clap 4.6.7`, `serde_json 1.0.154` and `unicode-ident 1.0.27`, while the product
+kept its existing versions. The private frontend's root-lock hash is therefore a
+development fingerprint, not proof of an arbitrary downstream compiled dependency
+closure. A closed production semantic fingerprint and reviewed versioned admission
+remain G4/G5 work. Consumers should pin their own lockfiles for reproducibility.
+The consumer gate attests its tested source snapshot, not a real Git commit;
+documentation-only result recording afterward does not mint an immutable release
+pin. Hosted matrix results, a complete binary notice audit and production cutover
+are not claimed by these local gates.
+
+**Remaining boundary:** Ruff fact lowering into the helper-order semantic core is
+next. The Tree-sitter fact candidate remains a reference/regression path, not an
+additional replacement direction. Literal/name/version/comment/encoding/failure
+and resource compatibility still require closure. Production remains the trusted
+`python-static-8-generic-facts` helper; public requests, metadata, saved-state
+capabilities and defaults are unchanged. G2–G6 and explicit cutover approval remain
+open. No remote fork, commit, push, toolchain installation or publication is implied.
 
 P1 has a **private captured-source AST parity harness**, a native parse-only
 front-end and bounded class/function/header/body/import candidates, not a production native Python

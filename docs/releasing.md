@@ -1,10 +1,116 @@
-# Release Review And Package Boundary
+# Release Review And Git Delivery Boundary
 
 The current engine API is local development work, not a published immutable
 dependency. Passing the checks below does not authorize publication or certify
 source ownership, security, framework semantics, or historical clearance.
 
-## Review The Actual Source Package
+## Overview
+
+The approved personal/company delivery model is Git source, with no registry or
+crates.io publication requirement. Root `Cargo.toml` sets `publish = false` and
+depends on three local Ruff crates under `vendor/ruff/crates`; their closure is
+five source crates. All five, upstream notices and the narrow policy patch travel
+with the Ideomancer checkout. No external fork, submodule, published Ruff version
+or separately maintained unpublished registry-version family is required.
+
+## API / Interfaces
+
+Consumers use the existing `ideomancer_core::engine::v1` facade. Start with a local
+path; after an explicitly authorized commit is available, pin its **full actual
+Git revision** from the approved upstream or internal mirror. A working-tree
+snapshot receipt does not attest an actual Git commit or prove remote availability.
+
+The active source contract is [source-files.txt](source-files.txt), not the legacy
+Cargo include list. `check_checkout.py` checks the exact reviewed source inventory
+and hashes its contents. Its export excludes `.git`, `.ideomancer`, `.agents`,
+`target/` and private material; this is not a secrets/IP scanner or clearance of
+everything that may be tracked in Git. Review the actual authorized revision too.
+
+## Data Flow
+
+1. Review source additions and inventory changes rather than regenerating blindly.
+2. Check the source closure and `check_ruff_vendor.py`'s anchored provenance,
+   manifests, notices, exact hashes and policy-patch reversal.
+3. `check_checkout_consumer.py` exports only reviewed source into an owned external
+   temporary run. It resolves a fresh independent consumer lockfile, then runs the
+   locked public-API consumer tests with all local dependencies inside the export's
+   `vendor/ruff`. Root product dependency selections are not replaced by the
+   retained upstream provenance lockfile.
+4. It rechecks original/exported content hashes after validation. This establishes
+   bounded snapshot integrity, not authenticity or continuous filesystem isolation.
+5. Record actual results, tool versions, limitations and the eventual approved pin.
+   Hosted Linux/macOS × Rust 1.89.0/current-stable results remain unknown for this
+   change; historical package acceptance is not proof of the new Git closure.
+
+## Example usage
+
+These are gates for the coordinating maintainer, not results already obtained:
+
+```sh
+python3.12 -B -m unittest discover -s scripts -p 'test_*.py'
+python3.12 -B scripts/check_checkout.py --source-dir .
+python3.12 -B scripts/check_ruff_vendor.py
+RUSTUP_AUTO_INSTALL=0 python3.12 -B scripts/check_checkout_consumer.py \
+  --source-dir . --target-dir target --offline
+```
+
+Configure a verified disk-backed `TMPDIR` under an owned unique run in
+`${XDG_CACHE_HOME:-$HOME/.cache}/agent-test-runs` before substantial work, check
+space and establish cleanup. The consumer helper defaults to that cache parent
+when `TMPDIR` is unset, reuses only the trusted root `target/`, enforces low-disk
+profiles and two jobs/test threads, and rejects conflicting build overrides.
+It stops/verifies owned process groups even after a successful parent exits before
+removing temporary files. Unverified shutdown or cleanup failure retains the owned
+run and reports its path and cleanup plan on stderr; diagnostics can contain paths.
+No compiler/toolchain installation is authorized by these commands. Use the existing
+active compiler (local baseline 1.89); do not infer an installed toolchain alias.
+
+Example consumer manifest entries (choose one; replace placeholders, not a known pin):
+
+```toml
+[dependencies]
+ideomancer_core = { package = "ideomancer", path = "../ideomancer" }
+# After authorization and availability of the actual commit, replace the path with:
+# ideomancer_core = { package = "ideomancer", git = "<approved-upstream-or-mirror-url>", rev = "<full-actual-commit-revision>" }
+```
+
+## Edge Cases
+
+`cargo package` cannot provide a usable registry crate with the current unpublished
+path dependencies. The archive helpers and inventory below remain historical tools
+and unit-test coverage, **not active delivery gates**. Do not run archive builds as
+a substitute for checkout-consumer acceptance, or claim CI still runs them.
+
+Keep third-party Rust source pristine except for the reviewed two-file AST-only
+policy patch. Adapted manifests disable optional features and upstream tests;
+format only the product with
+`RUSTUP_AUTO_INSTALL=0 cargo fmt --package ideomancer --check`, never `--all`.
+Ruff syntax acceptance alone proves neither CPython compatibility nor semantic facts;
+production Python still uses the trusted >=3.12 AST helper.
+
+Personal/company scope does not permit private fixtures, identifiers or company
+paths in generic source. Existing history, ownership, source privacy, license,
+security and supported-platform gates below still apply. Binary bundles must retain
+`LICENSE`, `vendor/ruff/LICENSE`, vendored notices and applicable dependency/toolchain
+notices after actual target/feature review. `make install` copies only the executable,
+not a license-cleared release bundle. Remote commits, pushes, releases and any
+publication still require explicit authorization.
+
+## Related files
+
+- [Development workflow](development-workflow.md): gate selection and cleanup last.
+- [Third-party notices](third-party-notices.md), [Ruff maintenance](../vendor/ruff/README.md).
+- `scripts/check_checkout.py`, `scripts/check_checkout_consumer.py`,
+  `scripts/check_ruff_vendor.py`, and `docs/source-files.txt`: active source gates.
+- [Readiness review](release-readiness.md): dated historical evidence and open approvals.
+
+## Historical Registry-Package Archive Procedure (Inactive)
+
+The following archive procedure and JS/TS validation record are retained for
+historical context and legacy helper tests. They do not describe current CI or
+establish a deliverable for the current vendored path-dependency manifest.
+
+### Review The Actual Source Package
 
 `Cargo.toml` uses a root-anchored positive include policy. Cargo include patterns
 can select Git-ignored files, and unanchored names can match nested study files;
@@ -25,7 +131,7 @@ python3.12 scripts/check_package_archive.py \
 
 These commands never publish. `--allow-dirty` supports local candidate verification;
 it is not a substitute for reviewing/checkpointing the exact intended release.
-CI repeats the inventory check, builds the packaged crate, and compares the actual
+The historical CI procedure repeated the inventory check, built the packaged crate, and compared the actual
 archive with intended source and extracted files. Review additions before updating
 the inventory; never regenerate it blindly to make CI pass.
 
@@ -51,7 +157,7 @@ copies remain ignored and are not deleted. Reintroducing assets requires confirm
 provenance, redistribution permission and inventory review; package policy is not
 copyright clearance.
 
-## Validate Reuse From The Package
+### Validate Reuse From The Package (Historical)
 
 `cargo package` verifies the normalized package from its extracted source, including
 the embedded language helpers and viewer assets. Also exercise an independent
@@ -107,15 +213,16 @@ Node/Chromium renderer. Builds need a native C compiler. The declared MSRV is
 Rust **1.89**; record actual validation for that baseline and current stable,
 since current stable alone is insufficient. Python remains a trusted Python >=3.12
 AST-helper path;
-Python/Rust Tree-sitter and Rust source analysis are not delivered by this migration.
+production native Python fact extraction and Rust source analysis were not
+delivered by that migration. The current private Ruff frontend is described above.
 
 Native parser code, schemas, CLI migration errors, UTF-16 receipts, incomplete
 module-only parse handling and cooperative resource controls must be validated
 together. Local closeout passed the normal suite, packaging, independent consumer
 and release build on macOS with Rust 1.89.0 and 1.96.1; see the
 [dated validation record](javascript-typescript-analysis.md#validation-tooling).
-Hosted CI now defines Linux/macOS × Rust 1.89.0/current-stable lanes, each including
-the independent consumer; those runs remain pending. An installed 1.96.1 run is not
+The current CI matrix retains Linux/macOS × Rust 1.89.0/current-stable lanes but uses
+the checkout gates above, not these archive steps; those results remain unknown. An installed 1.96.1 run is not
 proof of the current hosted stable lane. Local docs/CI edits are not proof of release
 completion. The reviewed inventory includes `src/javascript_native.rs`
 and `src/javascript_native/optional.rs`; the deleted legacy JavaScript helper is

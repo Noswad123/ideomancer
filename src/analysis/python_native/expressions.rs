@@ -79,6 +79,9 @@ struct Entry {
     next: Option<usize>,
     next_value: Option<usize>,
     last_value: Option<usize>,
+    calls: projection::Calls,
+    next_call: Option<usize>,
+    keyword_default: bool,
     class: Class,
     shape: Shape,
     start: usize,
@@ -553,6 +556,9 @@ impl Expression {
             next: None,
             next_value: None,
             last_value: None,
+            calls: projection::Calls::default(),
+            next_call: None,
+            keyword_default: false,
             class,
             shape,
             start: node.start_byte(),
@@ -1477,6 +1483,7 @@ impl Expression {
             }
         }
         self.entries[index].end_line = self.terminal_end_line;
+        self.schedule_calls(index, lifted, cancel)?;
         self.current = self.entries[index].parent;
         if self.entries[index].class != Class::Ignore {
             if let Some(parent) = self.current {
@@ -1502,6 +1509,179 @@ impl Expression {
             return Ok(true);
         }
         Ok(false)
+    }
+
+    fn append_calls(&mut self, chain: &mut projection::Calls, index: usize) {
+        let child = self.entries[index].calls;
+        chain.append(child, |last, next| self.entries[last].next_call = next);
+    }
+
+    fn first_value<F: FnMut(Checkpoint) -> bool>(
+        &self,
+        index: usize,
+        cancel: &Cancellation<F>,
+    ) -> Option<usize> {
+        // Each pair has exactly two validated values and one colon; no subtree
+        // search or renderer alias resolution is involved here.
+        let mut child = self.entries[index].first;
+        while let Some(i) = child {
+            if cancel.at(Checkpoint::Collector) {
+                return None;
+            }
+            if self.entries[i].class != Class::Ignore {
+                return Some(i);
+            }
+            child = self.entries[i].next;
+        }
+        None
+    }
+
+    fn schedule_calls<F: FnMut(Checkpoint) -> bool>(
+        &mut self,
+        index: usize,
+        lifted: Option<usize>,
+        cancel: &Cancellation<F>,
+    ) -> Result<(), ()> {
+        let kind = self.entries[index].kind;
+        let mut chain = projection::Calls::default();
+        if kind == "call" {
+            // Splat normalization can move the renderable Call to a recycled
+            // descriptor. Emit that identity once, at the raw call's visit point.
+            let call = lifted.unwrap_or(index);
+            chain = projection::Calls {
+                first: Some(call),
+                last: Some(call),
+            };
+        }
+        let passes = match kind {
+            "argument_list" | "dictionary" | "lambda_parameters" => 2,
+            "conditional_expression" => 3,
+            // These admitted families have helper fields in the same order as
+            // their raw children (including opaque nodes and f-string fields).
+            "call"
+            | "lambda"
+            | "default_parameter"
+            | "for_in_clause"
+            | "if_clause"
+            | "list_comprehension"
+            | "set_comprehension"
+            | "dictionary_comprehension"
+            | "generator_expression"
+            | "pair"
+            | "await"
+            | "yield"
+            | "named_expression"
+            | "type"
+            | "parenthesized_expression"
+            | "attribute"
+            | "member_type"
+            | "generic_type"
+            | "type_parameter"
+            | "union_type"
+            | "constrained_type"
+            | "splat_type"
+            | "subscript"
+            | "tuple"
+            | "list"
+            | "set"
+            | "expression_list"
+            | "list_pattern"
+            | "tuple_pattern"
+            | "pattern_list"
+            | "list_splat"
+            | "list_splat_pattern"
+            | "dictionary_splat"
+            | "dictionary_splat_pattern"
+            | "keyword_argument"
+            | "binary_operator"
+            | "boolean_operator"
+            | "comparison_operator"
+            | "not_operator"
+            | "unary_operator"
+            | "slice"
+            | "string"
+            | "concatenated_string"
+            | "interpolation"
+            | "format_expression"
+            | "format_specifier"
+            | "as_pattern"
+            | "as_pattern_target" => 1,
+            // Remaining admitted leaves/payload tokens cannot contain calls.
+            _ if self.entries[index].first.is_none()
+                || matches!(
+                    kind,
+                    "string_content"
+                        | "escape_sequence"
+                        | "escape_interpolation"
+                        | "not in"
+                        | "is not"
+                        | "positional_separator"
+                        | "keyword_separator"
+                ) =>
+            {
+                1
+            }
+            _ => return Err(()),
+        };
+        if kind == "lambda_parameters" {
+            let mut keyword = false;
+            let mut child = self.entries[index].first;
+            while let Some(i) = child {
+                if cancel.at(Checkpoint::Collector) {
+                    return Err(());
+                }
+                keyword |= matches!(
+                    self.entries[i].kind,
+                    "keyword_separator" | "list_splat_pattern"
+                );
+                self.entries[i].keyword_default =
+                    keyword && self.entries[i].kind == "default_parameter";
+                child = self.entries[i].next;
+            }
+        }
+        for pass in 0..passes {
+            let mut child = self.entries[index].first;
+            let mut value = 0;
+            while let Some(i) = child {
+                if cancel.at(Checkpoint::Collector) {
+                    return Err(());
+                }
+                let entry = &self.entries[i];
+                let next = entry.next;
+                let selected = match kind {
+                    "argument_list" => {
+                        usize::from(matches!(entry.class, Class::Keyword | Class::Unpack)) == pass
+                    }
+                    "lambda_parameters" => usize::from(!entry.keyword_default) == pass,
+                    "conditional_expression" => {
+                        let selected = entry.class != Class::Ignore && value == [1, 0, 2][pass];
+                        value += usize::from(entry.class != Class::Ignore);
+                        selected
+                    }
+                    "dictionary" => false,
+                    _ => true,
+                };
+                if kind == "dictionary" {
+                    if entry.kind == "pair" {
+                        let key = self.first_value(i, cancel).ok_or(())?;
+                        let part = if pass == 0 {
+                            key
+                        } else {
+                            self.entries[key].next_value.ok_or(())?
+                        };
+                        self.append_calls(&mut chain, part);
+                    } else if pass == 1 {
+                        // Unpacks have no AST key, but their values still visit.
+                        self.append_calls(&mut chain, i);
+                    }
+                } else if selected {
+                    self.append_calls(&mut chain, i);
+                }
+                child = next;
+            }
+        }
+        self.entries[index].calls = chain;
+        Ok(())
     }
 
     pub(super) fn root_starred(&self) -> bool {
@@ -1747,11 +1927,15 @@ impl Expression {
         &'a self,
         cancel: &'a Cancellation<F>,
     ) -> impl Iterator<Item = usize> + 'a {
-        self.entries
-            .iter()
-            .enumerate()
-            .take_while(|_| !cancel.at(Checkpoint::Collector))
-            .filter_map(|(i, e)| matches!(e.shape, Shape::Call(..)).then_some(i))
+        let mut next = self.entries.first().and_then(|entry| entry.calls.first);
+        std::iter::from_fn(move || {
+            if cancel.at(Checkpoint::Collector) {
+                return None;
+            }
+            let current = next?;
+            next = self.entries[current].next_call;
+            Some(current)
+        })
     }
 
     pub(super) fn call_span(&self, index: usize) -> (usize, usize) {
@@ -2079,6 +2263,268 @@ pub(super) fn number<F: FnMut(Checkpoint) -> bool>(text: &[u8], cancel: &Cancell
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn semantic_trace(text: &str) -> Vec<String> {
+        facts(format!("{text}\n"), CandidateStatus::AcceptedFacts);
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_python::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(text, None).unwrap();
+        assert!(!tree.root_node().has_error());
+        let root = tree
+            .root_node()
+            .named_child(0)
+            .unwrap()
+            .named_child(0)
+            .unwrap();
+        let cancel = Cancellation {
+            expired: Cell::new(false),
+            check: RefCell::new(|_| false),
+        };
+        let mut expression = Expression::new(Mode::BodyValue, 0);
+        fn lower<F: FnMut(Checkpoint) -> bool>(
+            expression: &mut Expression,
+            node: Node<'_>,
+            bytes: &[u8],
+            cancel: &Cancellation<F>,
+        ) {
+            assert!(expression.enter(node, bytes, cancel), "{}", node.kind());
+            if node.child_count() == 0 {
+                assert!(expression.terminal(node, &[], cancel));
+            }
+            for i in 0..node.child_count() {
+                lower(expression, node.child(i).unwrap(), bytes, cancel);
+            }
+            assert!(expression.exit(bytes, cancel).is_ok(), "{}", node.kind());
+        }
+        lower(&mut expression, root, text.as_bytes(), &cancel);
+        expression
+            .calls(&cancel)
+            .map(|index| expression.render_callee(index, text.as_bytes(), &cancel))
+            .collect()
+    }
+
+    #[test]
+    fn projection_semantic_calls_match_python312_nodevisitor_field_order() {
+        // Expected preorders are Python 3.12 ast.NodeVisitor order, not runtime
+        // evaluation order and not the final fact sort. All callees are unique.
+        for (text, expected) in [
+            ("outer(key=keyword(), *star(), later=last(), **unpack())",
+                vec!["outer", "star", "keyword", "last", "unpack"]),
+            ("factory()(key=keyword(), *star())",
+                vec!["factory()", "factory", "star", "keyword"]),
+            ("{key1(): value1(), **unpack(), key2(): value2()}",
+                vec!["key1", "key2", "value1", "unpack", "value2"]),
+            ("body() if condition() else alternate()", vec!["condition", "body", "alternate"]),
+            ("lambda a=pos1(), b=pos2(), *, c=kw1(), d=kw2(): body()",
+                vec!["kw1", "kw2", "pos1", "pos2", "body"]),
+            ("[element() for receiver()[index()] in iterable() if guard() for other()[slot()] in second() if final()]",
+                vec!["element", "receiver", "index", "iterable", "guard", "other", "slot", "second", "final"]),
+            ("{key(): value() for receiver()[slot()] in iterable() if guard()}",
+                vec!["key", "value", "receiver", "slot", "iterable", "guard"]),
+            ("(element() for receiver()[slot()] in iterable() if guard())",
+                vec!["element", "receiver", "slot", "iterable", "guard"]),
+            ("{element() for receiver()[slot()] in iterable() if guard()}",
+                vec!["element", "receiver", "slot", "iterable", "guard"]),
+            ("f'{body() if test() else alternate():{width()}.{precision()}}'",
+                vec!["test", "body", "alternate", "width", "precision"]),
+            ("await left() ** right()", vec!["left", "right"]),
+            ("[*factory()(key=keyword(), *star())]", vec!["factory()", "factory", "star", "keyword"]),
+            ("sink(*factory()(key=keyword(), *star())[index()] if test() else alternate())",
+                vec!["sink", "test", "factory()", "factory", "star", "keyword", "index", "alternate"]),
+            ("sink((yield body()), (named := other()))", vec!["sink", "body", "other"]),
+        ] {
+            assert_eq!(semantic_trace(text), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn projection_semantic_calls_survive_opaque_and_all_render_caps() {
+        let arguments = (0..100)
+            .map(|i| format!("hidden{i}()"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let text = format!(
+            "outer([{arguments}], payload=({{key(): value()}} if test() else alternate()))"
+        );
+        let mut expected = vec!["outer".to_owned()];
+        expected.extend((0..100).map(|i| format!("hidden{i}")));
+        expected.extend(["test", "key", "value", "alternate"].map(str::to_owned));
+        assert_eq!(semantic_trace(&text), expected);
+        // No individual display reaches sixteen items here: this separately
+        // exhausts the shared eighty-node and 512-byte renderer limits.
+        let labels = (0..100)
+            .map(|i| format!("hidden{i}_{}", "x".repeat(48)))
+            .collect::<Vec<_>>();
+        let groups = (0..10)
+            .map(|group| {
+                let values = (0..10)
+                    .map(|item| format!("{}()", labels[group * 10 + item]))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("[{values}]")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut grid_expected = vec!["outer".to_owned()];
+        grid_expected.extend(labels);
+        assert_eq!(semantic_trace(&format!("outer([{groups}])")), grid_expected);
+        let nested = format!("{}last(){}", "wrapper(".repeat(20), ")".repeat(20));
+        let trace = semantic_trace(&nested);
+        assert_eq!(trace.len(), 21);
+        assert_eq!(trace.last().unwrap(), "last");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires explicitly selected trusted Python >=3.12 oracle"]
+    fn projection_semantic_call_trace_matches_trusted_ast() {
+        let python = std::path::PathBuf::from(
+            std::env::var_os("IDEOMANCER_TEST_PYTHON")
+                .expect("explicit trusted Python selection is required"),
+        );
+        assert!(python.is_absolute() && python.is_file());
+        let baseline = crate::analysis::extract_captured(&python, &[]).unwrap();
+        eprintln!("Semantic call-order oracle: {}", baseline.python_version);
+        let mut inputs: Vec<String> = [
+            "outer(key=keyword(), *star(), later=last(), **unpack())",
+            "factory()(key=keyword(), *star())",
+            "{key1(): value1(), **unpack(), key2(): value2()}",
+            "{**first(), **second()}",
+            "body() if condition() else alternate()",
+            "lambda a=pos1(), b=pos2(), *, c=kw1(), d=kw2(): body()",
+            "lambda a=pos1(), /, b=pos2(), *args, c=kw1(), d=kw2(), **kwargs: body()",
+            "[element() for receiver()[index()] in iterable() if guard() for other()[slot()] in second() if final()]",
+            "{key(): value() for receiver()[slot()] in iterable() if guard()}",
+            "(element() for receiver()[slot()] in iterable() if guard())",
+            "{element() for receiver()[slot()] in iterable() if guard()}",
+            "f'{body() if test() else alternate():{width()}.{precision()}}'",
+            "await left() ** right()",
+            "[*factory()(key=keyword(), *star())]",
+            "sink(*factory()(key=keyword(), *star())[index()] if test() else alternate())",
+            "sink((yield body()), (named := other()))",
+        ].into_iter().map(str::to_owned).collect();
+        let hidden = (0..100)
+            .map(|i| format!("hidden{i}()"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        inputs.push(format!(
+            "outer([{hidden}], payload=({{key(): value()}} if test() else alternate()))"
+        ));
+        inputs.push(format!("{}last(){}", "wrapper(".repeat(20), ")".repeat(20)));
+        // ast.unparse is used only for these synthetic simple callee names and
+        // chained calls. The traversal itself is the stdlib NodeVisitor; no
+        // candidate event order is copied into the oracle or hidden by sorting.
+        let script = r#"
+import ast, json, sys
+assert sys.version_info >= (3, 12)
+class Calls(ast.NodeVisitor):
+    def __init__(self):
+        self.names = []
+    def visit_Call(self, node):
+        self.names.append(ast.unparse(node.func))
+        self.generic_visit(node)
+traces = []
+for text in json.load(sys.stdin):
+    visitor = Calls()
+    visitor.visit(ast.parse(text, type_comments=True))
+    traces.append(visitor.names)
+json.dump(traces, sys.stdout, ensure_ascii=True)
+"#;
+        let neutral = tempfile::tempdir().unwrap();
+        let mut command = std::process::Command::new(python);
+        command
+            .args(["-I", "-S", "-c", script])
+            .current_dir(neutral.path())
+            .env_clear()
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let output =
+            crate::analysis::run_bounded(command, serde_json::to_vec(&inputs).unwrap(), "Python")
+                .unwrap();
+        let expected: Vec<Vec<String>> = serde_json::from_slice(&output).unwrap();
+        assert_eq!(inputs.len(), expected.len());
+        for (text, expected) in inputs.iter().zip(expected) {
+            assert_eq!(semantic_trace(text), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn projection_early_metadata_finalizes_spans_ids_and_rolls_back() {
+        let text = "def f():\n    probe()\n    # not definition evidence\n";
+        let result = facts(text, CandidateStatus::AcceptedFacts);
+        let declaration = result.iter().find(|fact| fact.kind == "function").unwrap();
+        assert_eq!((declaration.line, declaration.end_line), (1, 2));
+        assert_eq!(
+            declaration.id,
+            format!(
+                "fact_{:x}",
+                Sha256::digest(br#"["headers.py", "function", 1, 2, "headers.f", "f"]"#)
+            )
+        );
+        assert!(result.iter().all(|fact| fact.end_line != usize::MAX));
+        let sources = [source("from arbitrary import eval as probe\ndef f():\n    probe()\n    from nested import exec as probe\n    probe()\n")];
+        for limits in [
+            FactLimits {
+                count: 3,
+                ..FactLimits::default()
+            },
+            FactLimits {
+                working: 1024,
+                ..FactLimits::default()
+            },
+            FactLimits {
+                warnings: 1,
+                ..FactLimits::default()
+            },
+        ] {
+            let report = extract(&sources, Limits::default(), limits, |_| false).unwrap();
+            assert_eq!(report.files[0].status, CandidateStatus::ResourceLimit);
+            assert_eq!(report.facts.len(), 1);
+            assert!(report.diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn projection_definition_finalization_cancels_every_fact_id_checkpoint() {
+        let sources = [source("def f():\n    def g(): pass\n")];
+        let mut count = 0;
+        let result = extract(
+            &sources,
+            Limits::default(),
+            FactLimits::default(),
+            |phase| {
+                count += usize::from(phase == Checkpoint::FactId);
+                false
+            },
+        )
+        .unwrap();
+        assert_eq!(result.files[0].status, CandidateStatus::AcceptedFacts);
+        assert!(count > 0);
+        for stop in 1..=count {
+            let mut seen = 0;
+            let report = extract(
+                &sources,
+                Limits::default(),
+                FactLimits::default(),
+                |phase| {
+                    seen += usize::from(phase == Checkpoint::FactId);
+                    phase == Checkpoint::FactId && seen == stop
+                },
+            )
+            .unwrap();
+            assert_eq!(report.facts.len(), 1, "checkpoint {stop}");
+            assert_eq!(report.facts[0].kind, "module");
+            assert_eq!(report.files[0].status, CandidateStatus::ResourceLimit);
+            assert_eq!(
+                report.files[0].diagnostic,
+                Some(CandidateDiagnostic::Parse(DiagnosticCode::Deadline))
+            );
+            assert!(report.diagnostics.is_empty());
+        }
+    }
 
     fn source(text: impl AsRef<[u8]>) -> Source {
         Source {

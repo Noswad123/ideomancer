@@ -26,8 +26,8 @@ test:
 	$(CARGO) test --locked --offline --jobs "$(JOBS)" --target-dir "$(TARGET_DIR)" -- --test-threads="$(TEST_THREADS)"
 
 check:
-	$(CARGO) fmt --check
-	$(CARGO) clippy --locked --offline --jobs "$(JOBS)" --target-dir "$(TARGET_DIR)" --all-targets -- -D warnings
+	$(CARGO) fmt --package ideomancer --check
+	$(CARGO) clippy --locked --offline --jobs "$(JOBS)" --target-dir "$(TARGET_DIR)" --all-targets --no-deps -- -D warnings
 
 # Cache-only feature closeout: fixed project target, no bin/install/global cleanup.
 cache-status:

@@ -6,8 +6,11 @@ rust-version = "1.89"
 description = "Discover applications and explore source-grounded diagrams in manageable views"
 license = "MIT"
 repository = "https://github.com/Noswad123/ideomancer"
-# Keep local studies, contract exports, and unrelated generated assets out of crates.
-# scripts/check_package.py also enforces an exact reviewed inventory.
+# Distributed from pinned Git source, including the reviewed Ruff snapshot.
+# Registry publication is not a delivery requirement. Active source boundaries
+# are enforced by scripts/check_checkout.py and docs/source-files.txt.
+publish = false
+# Historical archive selection; not the Git checkout/consumer delivery contract.
 include = [
     "/Cargo.toml", "/Cargo.lock", "/LICENSE", "/README.md", "/ROADMAP.md", "/makefile",
     "/.gitignore", "/.github/workflows/rust.yml",
@@ -34,6 +37,11 @@ tree-sitter-typescript = "=0.23.2"
 tree-sitter-python = "=0.25.0"
 # Keep downstream resolutions on the validated Rust 1.89-compatible ABI bridge.
 tree-sitter-language = "=0.1.5"
+# Private native Python frontend. The five-crate source snapshot and narrow
+# AST-only policy patch travel with this repository; no external fork is required.
+ruff_python_parser = { path = "vendor/ruff/crates/ruff_python_parser" }
+ruff_python_ast = { path = "vendor/ruff/crates/ruff_python_ast" }
+ruff_text_size = { path = "vendor/ruff/crates/ruff_text_size" }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs", "process"] }

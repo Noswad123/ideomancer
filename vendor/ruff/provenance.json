@@ -1,0 +1,621 @@
+{
+  "files": {
+    "LICENSE": {
+      "bytes": 69789,
+      "sha256": "3209c0b7fb7257c05b16433728c1e974bac40000fef171b8e9e89f095623c954"
+    },
+    "README.md": {
+      "bytes": 4422,
+      "sha256": "9408775f0c6f8faf44d6a0206f12311529613fe4366550ccddef634685785b4b"
+    },
+    "crates/ruff_python_ast/Cargo.toml": {
+      "bytes": 972,
+      "sha256": "8a76176d451dd50a8509c8087996f341659208e458cc175c1be8775f5e3e5c81"
+    },
+    "crates/ruff_python_ast/src/comparable.rs": {
+      "bytes": 63488,
+      "sha256": "a543493a918cd0051fa7588f0aaec50678732909476c3d5633220c80677ce8f5"
+    },
+    "crates/ruff_python_ast/src/docstrings.rs": {
+      "bytes": 811,
+      "sha256": "1985716383884e9af9e0f99d4eb5149a5f302c1ce4046ce7aa6b00ca60c6ea9f"
+    },
+    "crates/ruff_python_ast/src/expression.rs": {
+      "bytes": 14370,
+      "sha256": "ceb1ac021970a89c41fe082a26dadbe20311b5fb0289e1d875eec36346922007"
+    },
+    "crates/ruff_python_ast/src/generated.rs": {
+      "bytes": 320616,
+      "sha256": "2ad20c863a762fea313e9539f6b712e166fc1e3d100555c5072113805c29c54b"
+    },
+    "crates/ruff_python_ast/src/helpers.rs": {
+      "bytes": 66932,
+      "sha256": "6456c04ffcac0a1cd50fcb4108bdd368d8edbab4061beb6ecae63c4a6565cd84"
+    },
+    "crates/ruff_python_ast/src/identifier.rs": {
+      "bytes": 7551,
+      "sha256": "79d9eaff5c4d2c034a6f1078bf5d11a0f98c4cde42c39633bc51fbcf2a044be2"
+    },
+    "crates/ruff_python_ast/src/int.rs": {
+      "bytes": 6395,
+      "sha256": "8444e915bd7dfe067b58592841b397dad6f31a921e03d395a09af5fae72fac2d"
+    },
+    "crates/ruff_python_ast/src/lib.rs": {
+      "bytes": 3600,
+      "sha256": "77484b2ed76719c955971efb07f5a5143af8234a44b106a007ca5da6c55f5d7a"
+    },
+    "crates/ruff_python_ast/src/name.rs": {
+      "bytes": 28189,
+      "sha256": "b78673a3143365c80bf096c8455702b0a5e111d59c0cefa9c2a393f8780946e8"
+    },
+    "crates/ruff_python_ast/src/node.rs": {
+      "bytes": 25756,
+      "sha256": "08c225d9ba47e96cc5cb530648b304184cbd9c06b505da663f0251790b046374"
+    },
+    "crates/ruff_python_ast/src/node_index.rs": {
+      "bytes": 2425,
+      "sha256": "585a3f9f160fa7d6f52b3f5934f57f396eb3be336cd48df5df2c52172a153554"
+    },
+    "crates/ruff_python_ast/src/nodes.rs": {
+      "bytes": 117098,
+      "sha256": "8bc63e7418e906036610789e9180d69fe4c8efcb88e0d65aac2ac056191e9c58"
+    },
+    "crates/ruff_python_ast/src/operator_precedence.rs": {
+      "bytes": 7069,
+      "sha256": "8c56a317a30a968a3e945962c222eb636e9f7aabe9c7b5a998a2cec6fc436130"
+    },
+    "crates/ruff_python_ast/src/parenthesize.rs": {
+      "bytes": 3150,
+      "sha256": "15ee2800a7b581e42f29d75e9ee2f796a2574d8adc9a53b78bc6ba584fcbab3b"
+    },
+    "crates/ruff_python_ast/src/python_version.rs": {
+      "bytes": 7009,
+      "sha256": "66551f99bf1a8f7aa8b71536fb194f41fbbea2f3088b5673c6ec9875349860a4"
+    },
+    "crates/ruff_python_ast/src/relocate.rs": {
+      "bytes": 4493,
+      "sha256": "7a6d3414e2f78f1301b40795bb15bb58ba43b5f5ebca7966ed5c9a7ea69b47c4"
+    },
+    "crates/ruff_python_ast/src/script.rs": {
+      "bytes": 4749,
+      "sha256": "c7078b673ead57ab6ccbf45fc00e79dc6224251c7053fac7e255a223359b07e3"
+    },
+    "crates/ruff_python_ast/src/statement_visitor.rs": {
+      "bytes": 3219,
+      "sha256": "cb7f6a577719ca12626f30965f0a25ecbfffa2c722e31b9a97c8eef7083fc802"
+    },
+    "crates/ruff_python_ast/src/stmt_if.rs": {
+      "bytes": 1448,
+      "sha256": "4e9b0b0073fe76e4a50e916cb47a916b64d7f58b5f2156824aaf55b9fb27a64c"
+    },
+    "crates/ruff_python_ast/src/str.rs": {
+      "bytes": 6903,
+      "sha256": "30e24a18981d2c5e3f7aa01787749cf7b6c5150802eab3696f8f08a1ba4b264a"
+    },
+    "crates/ruff_python_ast/src/str_prefix.rs": {
+      "bytes": 7555,
+      "sha256": "9591bf970447bba5992f572cb04d0acf5d8557608676fd3f0842c92c0e37eff4"
+    },
+    "crates/ruff_python_ast/src/traversal.rs": {
+      "bytes": 2775,
+      "sha256": "5835330fe61adbb0d7d4c55cf3948c3a49398c18b175ff7fb5053adea5460df5"
+    },
+    "crates/ruff_python_ast/src/types.rs": {
+      "bytes": 105,
+      "sha256": "2be416cd19d5fc516be60570668710f8015bdfbf8e318dba04057b0add3ef640"
+    },
+    "crates/ruff_python_ast/src/visitor.rs": {
+      "bytes": 26985,
+      "sha256": "a6fb5cf1c65b93866276631bc3cef64a9d58c807189ef2b1b680303c9911175e"
+    },
+    "crates/ruff_python_ast/src/visitor/source_order.rs": {
+      "bytes": 18181,
+      "sha256": "c16d213691206cb935b8684ab10c2312bfb2fe23a197e301117b719df16630f9"
+    },
+    "crates/ruff_python_ast/src/visitor/transformer.rs": {
+      "bytes": 27030,
+      "sha256": "4a36721bc89de7fbc00a049d1c6f663da85ba0d95e804eaa759d59e91253b316"
+    },
+    "crates/ruff_python_ast/src/whitespace.rs": {
+      "bytes": 1378,
+      "sha256": "15e593a1ad8ddcdf704f82ec45ba27fb1dc67e61d12462c22ab811a71fd99469"
+    },
+    "crates/ruff_python_parser/Cargo.toml": {
+      "bytes": 975,
+      "sha256": "6b9e384120782776c65e67292bf1a851f4e6937b6e14e28e62c477e9af9102e5"
+    },
+    "crates/ruff_python_parser/src/error.rs": {
+      "bytes": 40515,
+      "sha256": "4d90f522d79ab237799c62a650c7b9da9b94d40974348992c6f720ccc411b69d"
+    },
+    "crates/ruff_python_parser/src/lexer.rs": {
+      "bytes": 93221,
+      "sha256": "6033d74e02e4f5a0e0bda5fda66269ca7c1fa3bb8c3e1b0beb15383b132c790d"
+    },
+    "crates/ruff_python_parser/src/lexer/cursor.rs": {
+      "bytes": 5574,
+      "sha256": "7631cb23110d75273be440da6d1de187f9ec62fc2d796bf2ddde09f1ce037c47"
+    },
+    "crates/ruff_python_parser/src/lexer/indentation.rs": {
+      "bytes": 4870,
+      "sha256": "79be3c355b4e6c26d64938ecacb7ef37cf9ce69d8d76f404efffa3b3e1bf17a5"
+    },
+    "crates/ruff_python_parser/src/lexer/interpolated_string.rs": {
+      "bytes": 5292,
+      "sha256": "b47b9cffaebfd681fc679c757d73dfe07cd10f81f0b5a376fc88e9285ae1588d"
+    },
+    "crates/ruff_python_parser/src/lib.rs": {
+      "bytes": 39503,
+      "sha256": "0736ac25bfaea70a38ee32f3402a6851c3a4e203461f66d4493993fa0c667acf"
+    },
+    "crates/ruff_python_parser/src/parser/expression.rs": {
+      "bytes": 111507,
+      "sha256": "c79561ea157ae483f50a809d9ae667871640125de0865a95d59861fa4dee5ded"
+    },
+    "crates/ruff_python_parser/src/parser/helpers.rs": {
+      "bytes": 4434,
+      "sha256": "df3ca52620bee5ba5cfc18a999c15b1ddfab0599fd48b89066bad7e73082e4f8"
+    },
+    "crates/ruff_python_parser/src/parser/mod.rs": {
+      "bytes": 57860,
+      "sha256": "e3b29f498c4c4be41182864af79ed3312f633bc16212f7d7e667bb3ccf429a7e"
+    },
+    "crates/ruff_python_parser/src/parser/options.rs": {
+      "bytes": 2025,
+      "sha256": "9aae4bfecf678023dc9bb49159d96318ec956f208d4e72e9b54e4a8e728ae1cf"
+    },
+    "crates/ruff_python_parser/src/parser/pattern.rs": {
+      "bytes": 29529,
+      "sha256": "cc00902680f518dc8d59375039a82f033cd761417e756b2adbc298fef40aa885"
+    },
+    "crates/ruff_python_parser/src/parser/progress.rs": {
+      "bytes": 1454,
+      "sha256": "3d4ec92e9041221df5e62495f93685f3c41652eaa8b0f21ef232f0baf3d7f1bb"
+    },
+    "crates/ruff_python_parser/src/parser/recovery.rs": {
+      "bytes": 7752,
+      "sha256": "9ed829ddc74180393658a42991ffd067f68f1cd7c2ee4ead29c16477cda2bd5a"
+    },
+    "crates/ruff_python_parser/src/parser/statement.rs": {
+      "bytes": 143429,
+      "sha256": "1a5056abbb77d103d4f4ee72d42cf9a4693e0959154b5dae065aa246b2db6d7a"
+    },
+    "crates/ruff_python_parser/src/semantic_errors.rs": {
+      "bytes": 67809,
+      "sha256": "e9ae491cde8a0535e136f167b222f013b47e738487b048a25d24ce6ec82c3df4"
+    },
+    "crates/ruff_python_parser/src/string.rs": {
+      "bytes": 39010,
+      "sha256": "c03d20aa37a64d3410afd477c091dc0ff761723d9269307effb1fab261287f5b"
+    },
+    "crates/ruff_python_parser/src/token.rs": {
+      "bytes": 29844,
+      "sha256": "0df311c3c1dbbfc3f461d81c5c4477e564f2b6e8ada126b045c4b7d9cc3dc7d5"
+    },
+    "crates/ruff_python_parser/src/token_set.rs": {
+      "bytes": 1241,
+      "sha256": "b9e0b92f7bbd24636ab6a7675e36371370a518f0f471a9b2ac969ee32c449ffe"
+    },
+    "crates/ruff_python_parser/src/token_source.rs": {
+      "bytes": 7466,
+      "sha256": "6596adc98c218aa9a8da1821818bb9dea1808fddd37d967f700ce4fa455a5b07"
+    },
+    "crates/ruff_python_parser/src/typing.rs": {
+      "bytes": 3073,
+      "sha256": "39c53600f0416d7a6061f6cc7984a2bfeee9a69307e8e53135e754fbd30c1eba"
+    },
+    "crates/ruff_python_trivia/Cargo.toml": {
+      "bytes": 737,
+      "sha256": "8893b190c98cac13bbb87e0d306c0c1af7b8e23b75d28720c3e4cd8a2b098bef"
+    },
+    "crates/ruff_python_trivia/src/comment_ranges.rs": {
+      "bytes": 7919,
+      "sha256": "1cfae8f94302f964f2b14c5c86594d26575070afd290bc42645b8f046b0a691c"
+    },
+    "crates/ruff_python_trivia/src/comments.rs": {
+      "bytes": 4142,
+      "sha256": "ea3d936c856f3c0fadd38640cb36ea5f388817d9040996edeb28ea7881d1ca67"
+    },
+    "crates/ruff_python_trivia/src/cursor.rs": {
+      "bytes": 5378,
+      "sha256": "47092b2f553ef118673807d2a1ab0fedb3121b9132c7dcdd76be7cc07d78e5b0"
+    },
+    "crates/ruff_python_trivia/src/lib.rs": {
+      "bytes": 253,
+      "sha256": "da69f0fcbc79f49d9550da8596d0117998d7eb8ed97c4f0fd3ef55a869187ac6"
+    },
+    "crates/ruff_python_trivia/src/pragmas.rs": {
+      "bytes": 1400,
+      "sha256": "955c51e4757ed5a292e55cdc2a8b77910f7e9d5247b543345cc00cb4003f1f69"
+    },
+    "crates/ruff_python_trivia/src/textwrap.rs": {
+      "bytes": 11747,
+      "sha256": "49f98c3b7bbacd934a76bcd08232f7a98d2c6d89de7a8c7e04032438aa5cb70c"
+    },
+    "crates/ruff_python_trivia/src/tokenizer.rs": {
+      "bytes": 29060,
+      "sha256": "f114ea5e55148267f5f217a127334ead28cf13cc9b7e00b42ee4ce8566620857"
+    },
+    "crates/ruff_python_trivia/src/whitespace.rs": {
+      "bytes": 2816,
+      "sha256": "5cd518fbede25934307a1637c23f0ff16fcb59058b98c9bf6513aaba0f978080"
+    },
+    "crates/ruff_source_file/Cargo.toml": {
+      "bytes": 686,
+      "sha256": "3cfc3d503055871554ea62da856f912e374d2da8990e02076a60a56bbfa9a772"
+    },
+    "crates/ruff_source_file/src/lib.rs": {
+      "bytes": 8664,
+      "sha256": "8c2a88079c4962ea241788aac6d71a3d7f1e18a3df1a568a01c22eace149d6cb"
+    },
+    "crates/ruff_source_file/src/line_index.rs": {
+      "bytes": 30959,
+      "sha256": "e83e7553e0e60053051f4d668b2bb2209c74ff60185d6f6daaf3d6f3133b8bc6"
+    },
+    "crates/ruff_source_file/src/line_ranges.rs": {
+      "bytes": 13677,
+      "sha256": "9bc746e93292064f1c2ea731c4756df6cc6e3fd9bcda6cf8ca9fca84437041b3"
+    },
+    "crates/ruff_source_file/src/newlines.rs": {
+      "bytes": 13287,
+      "sha256": "5aefabf5b417d897f341ad958485f3eecfda8556f1fac0bbf06c814e8a06ac91"
+    },
+    "crates/ruff_text_size/Cargo.toml": {
+      "bytes": 631,
+      "sha256": "c380e525a0f612e4f59c9cc4b47af99d8f23dc4822729aa714ea93e1ab91b125"
+    },
+    "crates/ruff_text_size/src/lib.rs": {
+      "bytes": 1305,
+      "sha256": "5818d42f6c51b95216b293fd5c2d219ee56127662bf53bbfb836bd4ec608621e"
+    },
+    "crates/ruff_text_size/src/range.rs": {
+      "bytes": 15187,
+      "sha256": "897a9a6920dda4d459e61ffa2349012621c1dd3e8207e948aee110444a42dba9"
+    },
+    "crates/ruff_text_size/src/schemars_impls.rs": {
+      "bytes": 1203,
+      "sha256": "f00c70868806e6814fbc49b6c4ecb0f769790accf2419356ce74205b22f2608b"
+    },
+    "crates/ruff_text_size/src/serde_impls.rs": {
+      "bytes": 1189,
+      "sha256": "55f62df0d9fe3bbca8188b4c974b3d7545fbbfa624a74c696769977efa9bbd2f"
+    },
+    "crates/ruff_text_size/src/size.rs": {
+      "bytes": 4990,
+      "sha256": "dd14418c2bff74f5bdd6d67487e2e2587217479dd1f35ea2a61784682fc8dbed"
+    },
+    "crates/ruff_text_size/src/traits.rs": {
+      "bytes": 2063,
+      "sha256": "3aef3ac8ac0f1dad4cfa1ccbe1469b2b4a1fcf684f97a985bbe88a0a3d2b0fb3"
+    },
+    "notices/README.md": {
+      "bytes": 986,
+      "sha256": "cde588d3fa9cd75fa9c92b5befc1b5e9ca5d9f398b47d5db55e37f529fa147a8"
+    },
+    "notices/unicode_names2-1.3.0/LICENSE-APACHE": {
+      "bytes": 10847,
+      "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    "notices/unicode_names2-1.3.0/LICENSE-MIT": {
+      "bytes": 1054,
+      "sha256": "6d3a9431e65e69c73a8923e6517b889d17549b23db406b9ec027710d16af701f"
+    },
+    "notices/unicode_names2-1.3.0/data/LICENSE-UNICODE": {
+      "bytes": 1975,
+      "sha256": "f858d5fab15f87699a92876e78d7699a92bdb116b57bf64bf6778c374b5cb0fe"
+    },
+    "patches/ast-only-policy.patch": {
+      "bytes": 1867,
+      "sha256": "f0ae3914b2120579fb1d8d30d879c9010c1fa4cc0f0ace01d15ab1f123ab3636"
+    },
+    "upstream/Cargo.lock": {
+      "bytes": 114898,
+      "sha256": "ccc843838d16f203d18a3410dd120e72e750a89ee42164145ae9cbf181fb6f47"
+    },
+    "upstream/crates/ruff_python_ast/Cargo.toml": {
+      "bytes": 1266,
+      "sha256": "a23f056691b520001a35125c973425eb13d3b357b54944b59269e15dd82fd18b"
+    },
+    "upstream/crates/ruff_python_parser/Cargo.toml": {
+      "bytes": 1179,
+      "sha256": "45dea8477955dc64a9aa5b28e214afa2fe41add05e46e7b3108f18015ff71c55"
+    },
+    "upstream/crates/ruff_python_trivia/Cargo.toml": {
+      "bytes": 502,
+      "sha256": "790aca5bfca5f7e2dcfab84c93542fdc01c987eb50ac9a580c9b1bf19a38ce47"
+    },
+    "upstream/crates/ruff_source_file/Cargo.toml": {
+      "bytes": 544,
+      "sha256": "ec36937c3f94a7eb10f806e2e891505ae481b9c214b5612449b5514e39f77c1f"
+    },
+    "upstream/crates/ruff_text_size/Cargo.toml": {
+      "bytes": 645,
+      "sha256": "79ae410f3dc20da0283a17b6184bf768574c851ea1075cba3dc2ec81961f369f"
+    },
+    "upstream/workspace.Cargo.toml": {
+      "bytes": 9697,
+      "sha256": "c63031c42b75ce1bd4eb249981ce091ccb7a7381a26177542e3a49a9dd7512d4"
+    }
+  },
+  "policy": {
+    "crates/ruff_python_parser/src/parser/expression.rs": {
+      "original_sha256": "03ae509e54716aa3ea7c5a5ad525e1033785782ed531a47c0e8c44093d86378e",
+      "patched_sha256": "c79561ea157ae483f50a809d9ae667871640125de0865a95d59861fa4dee5ded"
+    },
+    "crates/ruff_python_parser/src/parser/options.rs": {
+      "original_sha256": "7ab7642d2075fa098837cc7f9fb65b8bd145b7139e7376a6503e168b22d48640",
+      "patched_sha256": "9aae4bfecf678023dc9bb49159d96318ec956f208d4e72e9b54e4a8e728ae1cf"
+    }
+  },
+  "pristine_sources": {
+    "crates/ruff_python_ast/src/comparable.rs": {
+      "bytes": 63488,
+      "sha256": "a543493a918cd0051fa7588f0aaec50678732909476c3d5633220c80677ce8f5"
+    },
+    "crates/ruff_python_ast/src/docstrings.rs": {
+      "bytes": 811,
+      "sha256": "1985716383884e9af9e0f99d4eb5149a5f302c1ce4046ce7aa6b00ca60c6ea9f"
+    },
+    "crates/ruff_python_ast/src/expression.rs": {
+      "bytes": 14370,
+      "sha256": "ceb1ac021970a89c41fe082a26dadbe20311b5fb0289e1d875eec36346922007"
+    },
+    "crates/ruff_python_ast/src/generated.rs": {
+      "bytes": 320616,
+      "sha256": "2ad20c863a762fea313e9539f6b712e166fc1e3d100555c5072113805c29c54b"
+    },
+    "crates/ruff_python_ast/src/helpers.rs": {
+      "bytes": 66932,
+      "sha256": "6456c04ffcac0a1cd50fcb4108bdd368d8edbab4061beb6ecae63c4a6565cd84"
+    },
+    "crates/ruff_python_ast/src/identifier.rs": {
+      "bytes": 7551,
+      "sha256": "79d9eaff5c4d2c034a6f1078bf5d11a0f98c4cde42c39633bc51fbcf2a044be2"
+    },
+    "crates/ruff_python_ast/src/int.rs": {
+      "bytes": 6395,
+      "sha256": "8444e915bd7dfe067b58592841b397dad6f31a921e03d395a09af5fae72fac2d"
+    },
+    "crates/ruff_python_ast/src/lib.rs": {
+      "bytes": 3600,
+      "sha256": "77484b2ed76719c955971efb07f5a5143af8234a44b106a007ca5da6c55f5d7a"
+    },
+    "crates/ruff_python_ast/src/name.rs": {
+      "bytes": 28189,
+      "sha256": "b78673a3143365c80bf096c8455702b0a5e111d59c0cefa9c2a393f8780946e8"
+    },
+    "crates/ruff_python_ast/src/node.rs": {
+      "bytes": 25756,
+      "sha256": "08c225d9ba47e96cc5cb530648b304184cbd9c06b505da663f0251790b046374"
+    },
+    "crates/ruff_python_ast/src/node_index.rs": {
+      "bytes": 2425,
+      "sha256": "585a3f9f160fa7d6f52b3f5934f57f396eb3be336cd48df5df2c52172a153554"
+    },
+    "crates/ruff_python_ast/src/nodes.rs": {
+      "bytes": 117098,
+      "sha256": "8bc63e7418e906036610789e9180d69fe4c8efcb88e0d65aac2ac056191e9c58"
+    },
+    "crates/ruff_python_ast/src/operator_precedence.rs": {
+      "bytes": 7069,
+      "sha256": "8c56a317a30a968a3e945962c222eb636e9f7aabe9c7b5a998a2cec6fc436130"
+    },
+    "crates/ruff_python_ast/src/parenthesize.rs": {
+      "bytes": 3150,
+      "sha256": "15ee2800a7b581e42f29d75e9ee2f796a2574d8adc9a53b78bc6ba584fcbab3b"
+    },
+    "crates/ruff_python_ast/src/python_version.rs": {
+      "bytes": 7009,
+      "sha256": "66551f99bf1a8f7aa8b71536fb194f41fbbea2f3088b5673c6ec9875349860a4"
+    },
+    "crates/ruff_python_ast/src/relocate.rs": {
+      "bytes": 4493,
+      "sha256": "7a6d3414e2f78f1301b40795bb15bb58ba43b5f5ebca7966ed5c9a7ea69b47c4"
+    },
+    "crates/ruff_python_ast/src/script.rs": {
+      "bytes": 4749,
+      "sha256": "c7078b673ead57ab6ccbf45fc00e79dc6224251c7053fac7e255a223359b07e3"
+    },
+    "crates/ruff_python_ast/src/statement_visitor.rs": {
+      "bytes": 3219,
+      "sha256": "cb7f6a577719ca12626f30965f0a25ecbfffa2c722e31b9a97c8eef7083fc802"
+    },
+    "crates/ruff_python_ast/src/stmt_if.rs": {
+      "bytes": 1448,
+      "sha256": "4e9b0b0073fe76e4a50e916cb47a916b64d7f58b5f2156824aaf55b9fb27a64c"
+    },
+    "crates/ruff_python_ast/src/str.rs": {
+      "bytes": 6903,
+      "sha256": "30e24a18981d2c5e3f7aa01787749cf7b6c5150802eab3696f8f08a1ba4b264a"
+    },
+    "crates/ruff_python_ast/src/str_prefix.rs": {
+      "bytes": 7555,
+      "sha256": "9591bf970447bba5992f572cb04d0acf5d8557608676fd3f0842c92c0e37eff4"
+    },
+    "crates/ruff_python_ast/src/traversal.rs": {
+      "bytes": 2775,
+      "sha256": "5835330fe61adbb0d7d4c55cf3948c3a49398c18b175ff7fb5053adea5460df5"
+    },
+    "crates/ruff_python_ast/src/types.rs": {
+      "bytes": 105,
+      "sha256": "2be416cd19d5fc516be60570668710f8015bdfbf8e318dba04057b0add3ef640"
+    },
+    "crates/ruff_python_ast/src/visitor.rs": {
+      "bytes": 26985,
+      "sha256": "a6fb5cf1c65b93866276631bc3cef64a9d58c807189ef2b1b680303c9911175e"
+    },
+    "crates/ruff_python_ast/src/visitor/source_order.rs": {
+      "bytes": 18181,
+      "sha256": "c16d213691206cb935b8684ab10c2312bfb2fe23a197e301117b719df16630f9"
+    },
+    "crates/ruff_python_ast/src/visitor/transformer.rs": {
+      "bytes": 27030,
+      "sha256": "4a36721bc89de7fbc00a049d1c6f663da85ba0d95e804eaa759d59e91253b316"
+    },
+    "crates/ruff_python_ast/src/whitespace.rs": {
+      "bytes": 1378,
+      "sha256": "15e593a1ad8ddcdf704f82ec45ba27fb1dc67e61d12462c22ab811a71fd99469"
+    },
+    "crates/ruff_python_parser/src/error.rs": {
+      "bytes": 40515,
+      "sha256": "4d90f522d79ab237799c62a650c7b9da9b94d40974348992c6f720ccc411b69d"
+    },
+    "crates/ruff_python_parser/src/lexer.rs": {
+      "bytes": 93221,
+      "sha256": "6033d74e02e4f5a0e0bda5fda66269ca7c1fa3bb8c3e1b0beb15383b132c790d"
+    },
+    "crates/ruff_python_parser/src/lexer/cursor.rs": {
+      "bytes": 5574,
+      "sha256": "7631cb23110d75273be440da6d1de187f9ec62fc2d796bf2ddde09f1ce037c47"
+    },
+    "crates/ruff_python_parser/src/lexer/indentation.rs": {
+      "bytes": 4870,
+      "sha256": "79be3c355b4e6c26d64938ecacb7ef37cf9ce69d8d76f404efffa3b3e1bf17a5"
+    },
+    "crates/ruff_python_parser/src/lexer/interpolated_string.rs": {
+      "bytes": 5292,
+      "sha256": "b47b9cffaebfd681fc679c757d73dfe07cd10f81f0b5a376fc88e9285ae1588d"
+    },
+    "crates/ruff_python_parser/src/lib.rs": {
+      "bytes": 39503,
+      "sha256": "0736ac25bfaea70a38ee32f3402a6851c3a4e203461f66d4493993fa0c667acf"
+    },
+    "crates/ruff_python_parser/src/parser/expression.rs": {
+      "bytes": 111481,
+      "sha256": "03ae509e54716aa3ea7c5a5ad525e1033785782ed531a47c0e8c44093d86378e"
+    },
+    "crates/ruff_python_parser/src/parser/helpers.rs": {
+      "bytes": 4434,
+      "sha256": "df3ca52620bee5ba5cfc18a999c15b1ddfab0599fd48b89066bad7e73082e4f8"
+    },
+    "crates/ruff_python_parser/src/parser/mod.rs": {
+      "bytes": 57860,
+      "sha256": "e3b29f498c4c4be41182864af79ed3312f633bc16212f7d7e667bb3ccf429a7e"
+    },
+    "crates/ruff_python_parser/src/parser/options.rs": {
+      "bytes": 1456,
+      "sha256": "7ab7642d2075fa098837cc7f9fb65b8bd145b7139e7376a6503e168b22d48640"
+    },
+    "crates/ruff_python_parser/src/parser/pattern.rs": {
+      "bytes": 29529,
+      "sha256": "cc00902680f518dc8d59375039a82f033cd761417e756b2adbc298fef40aa885"
+    },
+    "crates/ruff_python_parser/src/parser/progress.rs": {
+      "bytes": 1454,
+      "sha256": "3d4ec92e9041221df5e62495f93685f3c41652eaa8b0f21ef232f0baf3d7f1bb"
+    },
+    "crates/ruff_python_parser/src/parser/recovery.rs": {
+      "bytes": 7752,
+      "sha256": "9ed829ddc74180393658a42991ffd067f68f1cd7c2ee4ead29c16477cda2bd5a"
+    },
+    "crates/ruff_python_parser/src/parser/statement.rs": {
+      "bytes": 143429,
+      "sha256": "1a5056abbb77d103d4f4ee72d42cf9a4693e0959154b5dae065aa246b2db6d7a"
+    },
+    "crates/ruff_python_parser/src/semantic_errors.rs": {
+      "bytes": 67809,
+      "sha256": "e9ae491cde8a0535e136f167b222f013b47e738487b048a25d24ce6ec82c3df4"
+    },
+    "crates/ruff_python_parser/src/string.rs": {
+      "bytes": 39010,
+      "sha256": "c03d20aa37a64d3410afd477c091dc0ff761723d9269307effb1fab261287f5b"
+    },
+    "crates/ruff_python_parser/src/token.rs": {
+      "bytes": 29844,
+      "sha256": "0df311c3c1dbbfc3f461d81c5c4477e564f2b6e8ada126b045c4b7d9cc3dc7d5"
+    },
+    "crates/ruff_python_parser/src/token_set.rs": {
+      "bytes": 1241,
+      "sha256": "b9e0b92f7bbd24636ab6a7675e36371370a518f0f471a9b2ac969ee32c449ffe"
+    },
+    "crates/ruff_python_parser/src/token_source.rs": {
+      "bytes": 7466,
+      "sha256": "6596adc98c218aa9a8da1821818bb9dea1808fddd37d967f700ce4fa455a5b07"
+    },
+    "crates/ruff_python_parser/src/typing.rs": {
+      "bytes": 3073,
+      "sha256": "39c53600f0416d7a6061f6cc7984a2bfeee9a69307e8e53135e754fbd30c1eba"
+    },
+    "crates/ruff_python_trivia/src/comment_ranges.rs": {
+      "bytes": 7919,
+      "sha256": "1cfae8f94302f964f2b14c5c86594d26575070afd290bc42645b8f046b0a691c"
+    },
+    "crates/ruff_python_trivia/src/comments.rs": {
+      "bytes": 4142,
+      "sha256": "ea3d936c856f3c0fadd38640cb36ea5f388817d9040996edeb28ea7881d1ca67"
+    },
+    "crates/ruff_python_trivia/src/cursor.rs": {
+      "bytes": 5378,
+      "sha256": "47092b2f553ef118673807d2a1ab0fedb3121b9132c7dcdd76be7cc07d78e5b0"
+    },
+    "crates/ruff_python_trivia/src/lib.rs": {
+      "bytes": 253,
+      "sha256": "da69f0fcbc79f49d9550da8596d0117998d7eb8ed97c4f0fd3ef55a869187ac6"
+    },
+    "crates/ruff_python_trivia/src/pragmas.rs": {
+      "bytes": 1400,
+      "sha256": "955c51e4757ed5a292e55cdc2a8b77910f7e9d5247b543345cc00cb4003f1f69"
+    },
+    "crates/ruff_python_trivia/src/textwrap.rs": {
+      "bytes": 11747,
+      "sha256": "49f98c3b7bbacd934a76bcd08232f7a98d2c6d89de7a8c7e04032438aa5cb70c"
+    },
+    "crates/ruff_python_trivia/src/tokenizer.rs": {
+      "bytes": 29060,
+      "sha256": "f114ea5e55148267f5f217a127334ead28cf13cc9b7e00b42ee4ce8566620857"
+    },
+    "crates/ruff_python_trivia/src/whitespace.rs": {
+      "bytes": 2816,
+      "sha256": "5cd518fbede25934307a1637c23f0ff16fcb59058b98c9bf6513aaba0f978080"
+    },
+    "crates/ruff_source_file/src/lib.rs": {
+      "bytes": 8664,
+      "sha256": "8c2a88079c4962ea241788aac6d71a3d7f1e18a3df1a568a01c22eace149d6cb"
+    },
+    "crates/ruff_source_file/src/line_index.rs": {
+      "bytes": 30959,
+      "sha256": "e83e7553e0e60053051f4d668b2bb2209c74ff60185d6f6daaf3d6f3133b8bc6"
+    },
+    "crates/ruff_source_file/src/line_ranges.rs": {
+      "bytes": 13677,
+      "sha256": "9bc746e93292064f1c2ea731c4756df6cc6e3fd9bcda6cf8ca9fca84437041b3"
+    },
+    "crates/ruff_source_file/src/newlines.rs": {
+      "bytes": 13287,
+      "sha256": "5aefabf5b417d897f341ad958485f3eecfda8556f1fac0bbf06c814e8a06ac91"
+    },
+    "crates/ruff_text_size/src/lib.rs": {
+      "bytes": 1305,
+      "sha256": "5818d42f6c51b95216b293fd5c2d219ee56127662bf53bbfb836bd4ec608621e"
+    },
+    "crates/ruff_text_size/src/range.rs": {
+      "bytes": 15187,
+      "sha256": "897a9a6920dda4d459e61ffa2349012621c1dd3e8207e948aee110444a42dba9"
+    },
+    "crates/ruff_text_size/src/schemars_impls.rs": {
+      "bytes": 1203,
+      "sha256": "f00c70868806e6814fbc49b6c4ecb0f769790accf2419356ce74205b22f2608b"
+    },
+    "crates/ruff_text_size/src/serde_impls.rs": {
+      "bytes": 1189,
+      "sha256": "55f62df0d9fe3bbca8188b4c974b3d7545fbbfa624a74c696769977efa9bbd2f"
+    },
+    "crates/ruff_text_size/src/size.rs": {
+      "bytes": 4990,
+      "sha256": "dd14418c2bff74f5bdd6d67487e2e2587217479dd1f35ea2a61784682fc8dbed"
+    },
+    "crates/ruff_text_size/src/traits.rs": {
+      "bytes": 2063,
+      "sha256": "3aef3ac8ac0f1dad4cfa1ccbe1469b2b4a1fcf684f97a985bbe88a0a3d2b0fb3"
+    }
+  },
+  "schema_version": 1,
+  "upstream": {
+    "archive_sha256": "e4613ad9fe6f7293510586649aab788e10610ab80fe9dd509ba7ac2364413631",
+    "archive_url": "https://codeload.github.com/astral-sh/ruff/tar.gz/87f0feb21a1af67195bebf94d811770393f9f447",
+    "commit": "87f0feb21a1af67195bebf94d811770393f9f447",
+    "lock_sha256": "ccc843838d16f203d18a3410dd120e72e750a89ee42164145ae9cbf181fb6f47",
+    "repository": "https://github.com/astral-sh/ruff",
+    "tag": "0.12.0"
+  }
+}

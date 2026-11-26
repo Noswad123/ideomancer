@@ -49,13 +49,19 @@ the remaining generic inventory and production migration gates stay open.
 An integrated larger batch adds structural matching, Python 3.12 generic declarations
 and type aliases, broad call-free headers, and reviewed import/layout forms together.
 A further lexical batch adds redacted escaped strings/bytes, numeric-boundary
-validation and f-string descendant traversal. Parser feasibility remains a separate
-explicit blocker; no grammar fork or replacement has been adopted.
+validation and f-string descendant traversal. A maintained vendored Ruff 0.12.0
+syntax frontend is now selected privately, not as a production fact backend.
+`src/analysis/python_ruff.rs` classifies captured bytes with explicit PY312 and
+AST-only options, checking both parse and unsupported-version errors. It publishes
+no AST, facts, literals or source excerpts. CPython compatibility and fact lowering
+remain Pending; the Tree-sitter fact candidate remains regression coverage until
+future Ruff lowering. Byte/token/depth gates and cooperative before/after deadlines
+are not a hard timeout, RSS bound or complete parser-recursion proof.
 See the [Python parity gates](docs/python-analysis.md#native-migration-parity-foundation).
 Release/history review remains separate—not a reason to add codebase-specific
 rules to the engine or claim complete application understanding.
-See the [release/package checklist](docs/releasing.md) for the enforced crate
-inventory and the separate historical, asset, dependency, and publication gates.
+See the [Git delivery checklist](docs/releasing.md) for the reviewed source closure,
+vendored dependencies, independent consumer and separate history/approval gates.
 The [readiness review](docs/release-readiness.md) records hosted baseline evidence
 and the remaining release/owner decisions; local acceptance is not release approval.
 This is a [source-only fresh baseline](docs/lineage.md), not a continuation of
@@ -84,12 +90,18 @@ existing, separately authorized agent workflow commands.
 See the [engine API contract](docs/engine-api.md) and
 [serialization schema](docs/engine-api.schema.json). This library API is currently
 local development work; do not assume an older published Git revision contains
-it. Consumers can start with an explicit local path, then pin an approved upstream
-revision or internal mirror after publication. Ideomancer is available under the
+it. Consumers can start with an explicit local path, then pin the full actual Git
+revision of an approved upstream checkout or internal mirror once available.
+Personal/company Git-based distribution is the approved delivery model; no
+crates.io/registry publication is required (`publish = false`). The five local
+Ruff source crates, notices and policy patch travel in `vendor/ruff` with that
+checkout: no external fork, submodule or published Ruff version is needed.
+Ideomancer is available under the
 [MIT License](LICENSE); copies and substantial portions must retain its notices.
 The scoped [native-parser third-party notices](docs/third-party-notices.md) are
-included in the source package; binary distribution still needs a complete
-target/feature-specific dependency and notice review.
+included in the reviewed source closure together with [Ruff's upstream license](vendor/ruff/LICENSE)
+and vendored notices. Binary distribution still needs an actual target/feature-specific
+dependency and notice review; these scoped collections are not a legal audit.
 
 ## Explore In Waves
 
@@ -443,7 +455,7 @@ runtime/grammars. The declared minimum Rust version is **1.89**; full supported
 toolchain/platform validation remains a release gate:
 
 ```sh
-cargo install --path . --locked
+RUSTUP_AUTO_INSTALL=0 cargo install --path . --locked --jobs 2
 ```
 
 Rendered `diagram` views, default `analyze`, and standalone `render` need external
@@ -459,8 +471,9 @@ Python >=3.12 interpreter (default `python3.12`); other operating systems fail
 explicitly rather than use an unsafe filesystem fallback.
 JS/TS inspection also requires Unix, but uses compiled-in Tree-sitter and requires
 neither Node nor Python. Parse/traversal limits are cooperative, not a hard memory
-sandbox. Python still uses its trusted Python >=3.12 AST helper; Python and Rust
-Tree-sitter backends are roadmap work, and Rust source analysis is not implemented.
+sandbox. Python still uses its trusted Python >=3.12 AST helper; Python's
+native fact-backend migration remains pending despite the private Ruff syntax
+frontend, and Rust source analysis is not implemented.
 Optional SVG rendering still needs external `mmdc` and its Node/Chromium toolchain.
 `discover`, `catalog`, and explicit source views are local. A workflow selected without `--view` or
 explicit `analyze` opts into sending evidence through Djinn or a protocol-compatible
@@ -887,7 +900,7 @@ belong outside it, and known study files block cleanup.
 
 ```sh
 RUSTUP_AUTO_INSTALL=0 cargo test --locked --offline --jobs 2 --lib analysis::python_native -- --test-threads=2
-RUSTUP_AUTO_INSTALL=0 cargo fmt --check
+RUSTUP_AUTO_INSTALL=0 cargo fmt --package ideomancer --check
 RUSTUP_AUTO_INSTALL=0 cargo clippy --locked --offline --all-targets --jobs 2 -- -D warnings
 # Broader regression gate when warranted, not after every edit:
 RUSTUP_AUTO_INSTALL=0 cargo test --locked --offline --jobs 2 -- --test-threads=2
@@ -906,9 +919,12 @@ for the workflow tests; they skip Python-dependent cases when it is unavailable.
 JS/TS extraction tests use the compiled-in pinned grammars, not an external
 Node/compiler installation. CI defines Linux/macOS jobs for Rust 1.89.0 and current
 stable, with pinned action revisions, Python, Rustfmt, Clippy, tests, reviewed
-package inventory/package verification, a fresh independent package consumer,
+Git-source inventory/vendor verification, a fresh independent checkout consumer,
 and the release build; it installs no Node/TypeScript prerequisite. Workflow
-configuration is not evidence of a successful hosted run. Optional member
+configuration is not evidence of a successful hosted run; current hosted results
+remain unknown. Never use `cargo fmt --all`: it recursively formats vendored path
+dependencies whose upstream source must stay pristine except for the reviewed patch.
+Optional member
 rendering validation requires existing `mmdc` and Chromium, with no downloads:
 
 ```sh
@@ -968,7 +984,7 @@ cargo test --locked --lib render::presentation::tests::local_mmdc_accepts_both_a
 ```
 
 CI sets up Python 3.12 in each Rust/platform lane. Tests do not exercise production
-provider credentials. See the [release checks](docs/releasing.md) for local package
+provider credentials. See the [release checks](docs/releasing.md) for local checkout
 and independent-consumer commands and their limits.
 
 `make` (or `make build`) performs a locked release build and copies only the

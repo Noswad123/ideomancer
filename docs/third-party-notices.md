@@ -18,6 +18,48 @@ cover every dependency in Cargo.lock (including the rest of the regex dependency
 graph), prove which code is linked, or authorize binary release by itself.
 Distributors must retain applicable notices with their artifacts.
 
+## Maintained Vendored Ruff Frontend
+
+The private Python syntax frontend also includes selected Ruff **0.12.0** source
+from https://github.com/astral-sh/ruff at exact revision
+`87f0feb21a1af67195bebf94d811770393f9f447`. Unlike the registry sources below,
+its provenance is recorded in the checkout's
+[`vendor/ruff/provenance.json`](../vendor/ruff/provenance.json). The five source
+crates, adapted manifests, policy patch and upstream notices travel with Ideomancer
+Git source; there is no separate fork/submodule or registry publication requirement.
+
+- The complete [upstream LICENSE](../vendor/ruff/LICENSE) retains Charles Marsh's
+  MIT terms, the RustPython Team 2020 MIT attribution and upstream's other notices.
+  Retain the complete file, not only the root MIT heading.
+- [`vendor/ruff/notices/`](../vendor/ruff/notices/) preserves baseline
+  `unicode_names2 1.3.0` notices; it embeds Unicode 16 name/alias data.
+- The actual merged root selection is `unicode-ident 1.0.24` (Unicode 17),
+  `unicode_names2 1.3.0` (Unicode 16) and `unicode-normalization 0.1.24`
+  (Unicode 16). PY312 parser targeting does **not** establish Unicode 15 identifier
+  admission or CPython compatibility. Registry dependency sources are not vendored
+  here; preserve applicable notices for actual selected versions in binary bundles.
+
+There are 65 selected Rust source files in an 85-file vendor snapshot totaling
+1,878,654 bytes. Only two upstream source files carry the reviewed AST-only policy
+change: duplicate call/class-header keyword validation can be omitted via an
+explicit option that defaults to false. Adapted manifests disable optional features
+and upstream tests. The root lock merge adds five local and thirty registry packages
+while retaining prior product selections; the upstream lock is provenance, not the
+actual product closure. These facts do not constitute a whole-graph license audit.
+
+Maintenance gate: `python3.12 -B scripts/check_ruff_vendor.py` verifies anchored
+provenance, hashes, manifest/notices policy and reversal to pristine source. See
+[snapshot maintenance](../vendor/ruff/README.md) and [Git delivery](releasing.md).
+Keep vendored source pristine except for that patch; format only root product code
+with `RUSTUP_AUTO_INSTALL=0 cargo fmt --package ideomancer --check`, never `--all`.
+
+The private frontend publishes only captured-byte syntax classification, not an
+AST, facts, literals or source excerpts. Production Python remains the trusted
+>=3.12 AST helper; CPython compatibility and fact lowering remain Pending. Source
+distribution must retain these notices; executable distribution additionally needs
+actual target/feature, transitive, native and toolchain review and a notice-bearing
+bundle. `make install` copies only the executable and is not license clearance.
+
 ## Sources and Pinned Revisions
 
 Versions below are the reviewed Cargo.lock versions. Revisions and repository

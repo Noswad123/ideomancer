@@ -10,6 +10,8 @@ mod fstring_batch;
 mod generic_batch;
 #[path = "python_parity/literal_batch.rs"]
 mod literal_batch;
+#[path = "python_parity/projection_batch.rs"]
+mod projection_batch;
 #[path = "python_parity/structure_batch.rs"]
 mod structure_batch;
 
@@ -34,7 +36,7 @@ fn selected_oracle(selection: Option<std::ffi::OsString>) -> Result<PathBuf, Str
     Ok(path)
 }
 
-fn oracle() -> PathBuf {
+pub(super) fn oracle() -> PathBuf {
     selected_oracle(std::env::var_os(ORACLE_ENV)).unwrap_or_else(|e| panic!("{ORACLE_ENV}: {e}"))
 }
 
