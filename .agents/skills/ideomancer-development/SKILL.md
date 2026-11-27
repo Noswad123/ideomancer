@@ -73,9 +73,11 @@ guidance for coding agents, not an interpretation prompt for analyzed applicatio
       -- --ignored --nocapture --test-threads=2
    ```
 
-  The Ruff filter already selects the new ignored
-  `analysis::python_ruff::facts::ruff_facts_batch` oracle, not selected by
-  `analysis::python_parity`. The three existing native ignored gates remain under
+  The Ruff filter selects the ignored
+  `analysis::python_ruff::facts::ruff_facts_batch`, acceptance and new
+  `literals::tests::method_preimages_match_exhaustive_trusted_stdlib` oracles, not selected by
+  `analysis::python_parity`. All existing native/Tree-sitter reference gates remain
+  required; the three existing native ignored gates remain under
   `analysis::python_native`. Shared ordinary unit tests now live under
   `analysis::python_facts`, `analysis::python_projection` and
   `analysis::python_scalars`; the old native filter does not select them.
@@ -115,20 +117,25 @@ guidance for coding agents, not an interpretation prompt for analyzed applicatio
 The maintained Ruff 0.12.0 snapshot at
 `87f0feb21a1af67195bebf94d811770393f9f447` is a private syntax frontend, not a
 production fact backend. It now also has private generic fact candidate policy
-`python-ruff-private-facts-2`; facts-1 remains the first cross-family checkpoint,
-not the current exclusion list. CPython compatibility remains Pending. Production
+`python-ruff-private-facts-3`; facts-1 and facts-2 remain historical cross-family
+checkpoints, not the current exclusion list. CPython compatibility remains Pending. Production
 `python-static-8-generic-facts`, the trusted Python >=3.12 AST helper, public API,
 evidence, CLI and default are unchanged. No new vendor/dependency changes are needed.
 
 ### API / Interfaces
 
 `parse_batch` remains classification-only. `extract_fact_candidates` returns bounded
-generic facts/IDs/diagnostics and per-file status with a module baseline; no AST,
-literal payload or source excerpt is published. `analysis/python_facts.rs` supplies
+generic facts/IDs/diagnostics and per-file status with a module baseline, not an AST
+or source-excerpt dump. Literal retention is limited to existing bounded API
+path/prefix/method metadata; tags, options, descriptions and all other literal
+payloads remain redacted. `analysis/python_facts.rs` supplies
 common Fact/Warning records, IDs, signature/import/warning helpers and a transactional
 bounded sink. Projection/scalars are declared once in `analysis.rs`. Tree-sitter
 private policy 15 uses common records/IDs/signatures but retains its CST-specific
 collector, finalization and import encoder; this is not complete backend unification.
+Generic `CallObservation` owns an optional preceding fact with an ASCII payload;
+shared `Projection` has no framework fields. The old CST collector still supplies
+`None` and retains its original admission rules.
 
 ### Data Flow
 
@@ -137,7 +144,9 @@ PY312 and `with_ast_only(true)`. Both parse and unsupported-version diagnostics 
 be empty before a callback consumes the validated borrowed AST. No reparse or AST
 escape is allowed. Bounded normalization separates render and visit edges, preserving
 descendant calls even through opaque/clipped shapes and helper-order alias effects:
-return-annotation calls follow body imports, not source order. Function type-parameter
+decorator calls replay after the body, before return annotations/type-parameter
+bounds, while decorator metadata emits early, before function signatures/class
+bases. Return-annotation calls follow body imports, not source order. Function type-parameter
 bound calls replay after body/return annotations; class bounds replay after the body.
 Observations stay unresolved until replay, so body imports affect resolution;
 constraints use tuple bounds. The observation-only header helper avoids rendering
@@ -149,11 +158,14 @@ mutations are invented. File emission is
 transactional. Source working regions are scoped per statement/expression; persistent
 projection maps charge retained aliases, including overwrite-shrink adjustments.
 Existing node/edge accounting, including class-pattern wrappers, remains in force.
+An `include_router` preceding fact emits at replay immediately before its call,
+using the replay owner; captured scopes/nodes are not retained. A token keyword
+index corrects Ruff's decorator-inclusive declaration ranges, including async defs.
 
 ### Edge Cases
 
 - Admitted: functions/async functions/classes/nested owners, full signatures,
-  annotations/defaults/bases/class keywords and non-decorator header calls; relative,
+  annotations/defaults/bases/class keywords and header/decorator calls; relative,
   star and future imports; Assign/AnnAssign/class attributes/chained/destructured
   writes; ordinary control flow, try, async for/with, raise/assert/augmented writes/
   deletion; all Python 3.12 generic expression families, including lambdas,
@@ -161,14 +173,30 @@ Existing node/edge accounting, including class-pattern wrappers, remains in forc
   forms with case guards/bodies, type aliases and function/async-function/class type
   parameters. AST-only top-level return/jumps are allowed when the parser accepts
   them, not executed or compile-validated.
-- Excluded: decorators, Python 3.13 type-parameter defaults,
+- G3: helper-compatible decorator facts and function/async-function CLI/job/API
+  route metadata/diagnostics; class decorators emit facts/calls only, no discovery.
+  FastAPI host/APIRouter prefix assignments, `include_router` preludes and
+  multi-target mutations are supported. Unknown/dynamic properties emit helper-null,
+  `supported: false` and diagnostics as applicable, not whole-file exclusions.
+- Excluded: Python 3.13 type-parameter defaults,
   raw non-ASCII identifiers (even those normalizing to ASCII), all type comments
   including ignores, and active named Unicode escapes. Raw/bytes/escaped-backslash
   text is allowed. Nonzero decimal integers over 4300 digits exclude underscores
   from the count; all-zero, base-prefixed, float and imaginary forms are exempt.
-- Constructor/include_router/router-mutation guards reject the whole file as
-  unsupported where G3 metadata is missing. Generic redacted shapes need no literal
-  payload retention. Effective encoding cookies and invalid UTF-8 remain unsupported;
+- Source-backed `TextPart` decoding admits ordinary/u/raw/triple/adjacent text,
+  escapes and newline normalization, preserving surrogates as Python code points.
+  Do not use Ruff's decoded strings: they replace lone surrogates. Routes retain at
+  most 2048 Python code points; prefixes at most 128, with the exact nonempty
+  `(?:/[a-z0-9_{}-]+){1,8}` grammar (empty/root handling remains caller policy).
+  Bytes, f-strings and non-direct constants produce dynamic metadata, not file
+  exclusions. `AsciiJson.points` encodes inner JSON; existing ID outer escaping
+  remains intact, with no global Fact/String change.
+- HTTP methods use a fixed seven-byte buffer and ASCII plus Unicode 15's four
+  preimages: dotless i, long s and the two ST ligatures. Exhaustive trusted CPython
+  3.12.11/Unicode 15 checks cover all `0x110000` code points, including no empty
+  uppercase mappings; no full UnicodeData download is needed.
+- Active `\N` text escapes/names data remain gated. Effective encoding cookies and
+  invalid UTF-8 remain unsupported;
   UTF-8 BOM source hashes cover original bytes.
 - Class patterns such as `Record()`, `FastAPI()` and `APIRouter()` are syntax, not
   constructor calls. MatchValue f-strings are admitted, but a bare f-string mapping
@@ -191,21 +219,29 @@ Existing node/edge accounting, including class-pattern wrappers, remains in forc
 For developer validation, use the existing `--lib analysis::python_ruff -- --ignored`
 oracle command above with a trusted Python 3.12 interpreter. Keep the existing active
 Rust 1.89 compiler, `RUSTUP_AUTO_INSTALL=0`, two jobs/threads and package-only formatting.
-There is no new public CLI/backend selector. The recorded facts-2 focused checkpoint
+There is no new public CLI/backend selector. The historical facts-2 focused checkpoint
 is 31 Ruff tests, including 77 complete-array/raw-order cases on trusted Python
 3.12.11: 75 base fixtures plus two metadata/BOM cases, preserving the old 51 and
 adding 26 structured cases. The 18-case acceptance oracle (previously 16) checks
 both new CPython/Ruff admission disagreements against the fact guard; the bare
 mapping-key gap separately asserts zero callbacks and is not a matching case.
-Focused checks are not final acceptance; record actual broader results per batch.
+The current facts-3 checkpoint passed 117 complete facts/IDs/diagnostics/raw-trace
+cases (all previous 77 plus 40 G3 cases). The corrected count fixture explicitly
+passed with 603 final deduplicated facts versus 604 raw observations. Literal-decoder
+unit checks and the exhaustive HTTP-method oracle passed. Product package formatting
+and Clippy `-D warnings` passed after the `StringLiteralFlags` API fix; the 19
+unmodified vendor compiler warnings remain outside product `--no-deps` Clippy policy.
+These supplied focused results are not a final aggregate pass; broader root/source
+counts and results still need recording by the coordinating owner.
 The coordinating owner owns broad gates and ROADMAP/Python-ledger/source-inventory
-updates. This batch adds no source paths, manifests, vendor or dependency changes;
-the 215-source/85-vendor closure and reviewed two-file AST-only patch are unchanged.
+updates. New `literals.rs` and `metadata.rs` paths are registered by that owner in
+the current 217-source closure (previously 215); the 85-vendor closure, reviewed
+two-file AST-only patch, manifests and dependencies are unchanged.
 
 ### Related files
 
 See `docs/python-analysis.md` for the completion ledger and historical Tree-sitter/
-Ruff probes; `src/analysis/python_ruff/{facts,expressions}.rs` for the candidate;
+Ruff probes; `src/analysis/python_ruff/{facts,expressions,metadata,literals}.rs` for the candidate;
 `src/analysis/python_facts.rs` and `src/analysis/python_native/{projection,scalars}.rs`
 for shared primitives. Keep fixtures generic; consumer-private source/paths stay out.
 

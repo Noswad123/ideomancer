@@ -12,8 +12,11 @@ use ruff_python_ast::{self as ast, Expr, Mod, Stmt};
 use ruff_python_parser::Parsed;
 use ruff_text_size::{Ranged, TextRange};
 
-const FACT_POLICY: &str = "python-ruff-private-facts-2";
+const FACT_POLICY: &str = "python-ruff-private-facts-3";
 const OUTPUT: usize = 32 * 1024 * 1024;
+
+#[path = "metadata.rs"]
+mod metadata;
 
 #[derive(Debug, Serialize)]
 pub(in crate::analysis) struct CandidateReport<'a> {
@@ -100,6 +103,8 @@ fn fact_identity<F: FnMut(Checkpoint) -> bool>(cancel: &mut Cancellation<F>) -> 
         include_bytes!("../python_ruff.rs").as_slice(),
         include_bytes!("facts.rs").as_slice(),
         include_bytes!("expressions.rs").as_slice(),
+        include_bytes!("metadata.rs").as_slice(),
+        include_bytes!("literals.rs").as_slice(),
         include_bytes!("../python_facts.rs").as_slice(),
         include_bytes!("../python_native/projection.rs").as_slice(),
         include_bytes!("../python_native/scalars.rs").as_slice(),
@@ -219,11 +224,13 @@ fn extract_impl<'a, F: FnMut(Checkpoint) -> bool>(
             let trace_mark = trace.as_ref().map_or(0, |t| t.len());
             let mut driver = Driver {
                 source: &sources[index],
+                source_text: text,
                 sink: &mut sink,
                 check,
                 arena: Vec::new(),
                 lines: Vec::new(),
                 pairs: Vec::new(),
+                keywords: Vec::new(),
                 projection: Projection::default(),
                 scope: ScopeId::default(),
                 owners: Vec::new(),
@@ -329,11 +336,13 @@ pub(super) enum Observation {
 
 pub(super) struct Driver<'a> {
     source: &'a Source,
+    source_text: &'a str,
     pub(super) sink: &'a mut shared::FactSink,
     pub(super) check: &'a mut dyn FnMut() -> bool,
     pub(super) arena: Vec<Node>,
     lines: Vec<usize>,
     pairs: Vec<Paren>,
+    keywords: Vec<(TokenKind, TextRange)>,
     projection: Projection,
     scope: ScopeId,
     owners: Vec<(String, bool)>,
@@ -485,6 +494,10 @@ impl Driver<'_> {
             let range = token.range();
             let raw = &text[range.start().to_usize()..range.end().to_usize()];
             match token.kind() {
+                TokenKind::Def | TokenKind::Class | TokenKind::Async => {
+                    self.charge(4 * std::mem::size_of::<(TokenKind, TextRange)>())?;
+                    self.keywords.push((token.kind(), range));
+                }
                 TokenKind::Name if !raw.is_ascii() => {
                     return Err(Error::Unsupported("non-ASCII identifier"))
                 }
@@ -745,11 +758,13 @@ impl Driver<'_> {
         let value = self.render(id)?;
         let callee = self.render(func)?;
         let (line, end) = self.span(self.arena[id].range);
+        let preceding = self.include_metadata(id)?;
         Ok(CallObservation {
             line,
             end,
             value,
             callee,
+            preceding,
         })
     }
 
@@ -777,12 +792,8 @@ impl Driver<'_> {
             }
         }
         let terminal = resolved.rsplit('.').next().unwrap_or("");
-        if resolved == "fastapi.FastAPI"
-            || resolved == "fastapi.APIRouter"
-            || (alias.is_none() && matches!(terminal, "FastAPI" | "APIRouter"))
-            || call.callee.ends_with(".include_router")
-        {
-            return Err(Error::Unsupported("framework metadata"));
+        if let Some(fact) = call.preceding {
+            self.emit_lines(fact.kind, call.line, call.end, fact.value, None)?;
         }
         self.emit_lines("call", call.line, call.end, call.value, None)?;
         if matches!(
@@ -869,11 +880,25 @@ impl Driver<'_> {
         })
     }
 
-    fn mutation_expression(&mut self, expr: &Expr, depth: usize) -> Result<()> {
+    fn mutation_expressions(
+        &mut self,
+        targets: &[Expr],
+        range: TextRange,
+        depth: usize,
+    ) -> Result<()> {
         self.arena_scope(|driver| {
-            let id = driver.normalize(expr, depth + 1)?;
-            driver.mutation(id)?;
-            driver.visits(id, None)
+            driver.charge_arena(targets.len() * std::mem::size_of::<usize>())?;
+            let mut ids = Vec::with_capacity(targets.len());
+            for target in targets {
+                ids.push(driver.normalize(target, depth + 1)?);
+            }
+            for &id in &ids {
+                driver.mutation(id, range)?;
+            }
+            for id in ids {
+                driver.visits(id, None)?;
+            }
+            Ok(())
         })
     }
 
@@ -929,13 +954,11 @@ impl Driver<'_> {
                 depth,
             )?,
             Stmt::AugAssign(n) => {
-                self.mutation_expression(&n.target, depth)?;
+                self.mutation_expressions(std::slice::from_ref(&*n.target), stmt.range(), depth)?;
                 self.expression(&n.value, depth)?;
             }
             Stmt::Delete(n) => {
-                for e in &n.targets {
-                    self.mutation_expression(e, depth)?;
-                }
+                self.mutation_expressions(&n.targets, stmt.range(), depth)?;
             }
             Stmt::Expr(n) => self.expression(&n.value, depth)?,
             Stmt::Return(n) => self.optional(n.value.as_deref(), depth)?,
@@ -1172,17 +1195,15 @@ impl Driver<'_> {
         Ok(())
     }
 
-    fn mutation(&mut self, id: usize) -> Result<()> {
+    fn mutation(&mut self, id: usize, range: TextRange) -> Result<()> {
         if let Shape::Attribute(_, attr) = &self.arena[id].shape {
-            if matches!(attr.as_str(), "router" | "prefix") {
-                return Err(Error::Unsupported("framework mutation"));
-            }
+            let direct = matches!(attr.as_str(), "router" | "prefix");
             let shape = self.render(id)?;
-            let mutation = shape.contains(".router.");
-            self.drop_text(shape)?;
-            if mutation {
-                return Err(Error::Unsupported("framework mutation"));
+            if direct || shape.contains(".router.") {
+                let value = self.json_pairs(&[("target", &shape)])?;
+                self.emit("router_mutation", range, value, None)?;
             }
+            self.drop_text(shape)?;
         }
         Ok(())
     }
@@ -1291,7 +1312,10 @@ impl Driver<'_> {
             }
         }
         for &id in &ids {
-            self.mutation(id)?;
+            self.mutation(id, range)?;
+        }
+        if let Some(value) = value {
+            self.constructor_metadata(&ids, value, range)?;
         }
         if value.is_some() {
             for &id in ids.iter().rev() {
@@ -1473,10 +1497,8 @@ impl Driver<'_> {
     }
 
     fn function(&mut self, n: &ast::StmtFunctionDef, depth: usize) -> Result<()> {
-        if !n.decorator_list.is_empty() {
-            return Err(Error::Unsupported("decorator"));
-        }
         let previous = self.enter(n.name.as_str(), false)?;
+        let range = self.definition_range(n.range(), n.name.range(), false, n.is_async)?;
         let value = self.text(n.name.as_str())?;
         self.emit(
             if n.is_async {
@@ -1484,10 +1506,12 @@ impl Driver<'_> {
             } else {
                 "function"
             },
-            n.range(),
+            range,
             value,
             None,
         )?;
+        let mut schedule = HeaderSchedule::default();
+        self.decorators(&n.decorator_list, &mut schedule, true, depth)?;
         let p = &n.parameters;
         self.node(depth + 1)?;
         let mut positional = Vec::new();
@@ -1515,8 +1539,7 @@ impl Driver<'_> {
             &mut || (self.check)(),
         )?;
         self.sink.release(2 * 16384 + 17 - signature.capacity());
-        self.emit("signature", n.range(), signature, None)?;
-        let mut schedule = HeaderSchedule::default();
+        self.emit("signature", range, signature, None)?;
         use HeaderGroup::*;
         for arg in &p.posonlyargs {
             self.parameter(
@@ -1577,13 +1600,12 @@ impl Driver<'_> {
     }
 
     fn class(&mut self, n: &ast::StmtClassDef, depth: usize) -> Result<()> {
-        if !n.decorator_list.is_empty() {
-            return Err(Error::Unsupported("decorator"));
-        }
         let previous = self.enter(n.name.as_str(), true)?;
+        let range = self.definition_range(n.range(), n.name.range(), true, false)?;
         let value = self.text(n.name.as_str())?;
-        self.emit("class", n.range(), value, None)?;
+        self.emit("class", range, value, None)?;
         let mut schedule = HeaderSchedule::default();
+        self.decorators(&n.decorator_list, &mut schedule, false, depth)?;
         if let Some(args) = &n.arguments {
             for expr in &args.args {
                 let shape =

@@ -5,6 +5,7 @@ use ruff_text_size::{Ranged, TextRange};
 
 pub(super) enum Shape {
     Name(String),
+    Text(Vec<TextPart>),
     Attribute(usize, String),
     Call {
         func: usize,
@@ -16,6 +17,11 @@ pub(super) enum Shape {
     Binary(usize, &'static str, usize),
     Starred(usize),
     Opaque(&'static str),
+}
+
+pub(super) struct TextPart {
+    pub(super) range: TextRange,
+    pub(super) raw: bool,
 }
 
 pub(super) struct Node {
@@ -92,9 +98,6 @@ impl Driver<'_> {
                 self.arena_text(n.attr.as_str())?,
             ),
             Expr::Call(n) => {
-                if matches!(&*n.func, Expr::Attribute(a) if a.attr.as_str() == "include_router") {
-                    return Err(Error::Unsupported("framework metadata"));
-                }
                 let func = self.child(&mut children, &n.func, depth)?;
                 let mut args = Vec::new();
                 let mut keywords = Vec::new();
@@ -258,8 +261,19 @@ impl Driver<'_> {
                 }
                 Shape::Opaque("<Slice>")
             }
-            Expr::StringLiteral(_)
-            | Expr::BytesLiteral(_)
+            Expr::StringLiteral(n) => {
+                let mut parts = Vec::new();
+                for part in n.value.iter() {
+                    self.tick()?;
+                    self.charge_arena(4 * std::mem::size_of::<TextPart>())?;
+                    parts.push(TextPart {
+                        range: part.content_range(),
+                        raw: part.flags.prefix().is_raw(),
+                    });
+                }
+                Shape::Text(parts)
+            }
+            Expr::BytesLiteral(_)
             | Expr::NumberLiteral(_)
             | Expr::BooleanLiteral(_)
             | Expr::NoneLiteral(_)
@@ -332,6 +346,7 @@ fn render(
     let mut child = |id| render(arena, id, depth + 1, budget, check);
     match &arena[id].shape {
         Shape::Name(n) => append(&mut out, n),
+        Shape::Text(_) => append(&mut out, "<literal>"),
         Shape::Opaque(n) => append(&mut out, n),
         Shape::Attribute(value, name) => {
             append(&mut out, &child(*value)?);

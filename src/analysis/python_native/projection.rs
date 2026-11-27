@@ -213,12 +213,19 @@ pub(super) enum Phase {
     TypeParameters,
 }
 
+pub(super) struct CallFact {
+    pub(super) kind: &'static str,
+    pub(super) value: String,
+}
+
 pub(super) struct CallObservation {
     pub(super) line: usize,
     pub(super) end: usize,
     pub(super) value: String,
     // Deliberately unresolved until the scheduled visit, under its owner.
     pub(super) callee: String,
+    // Emitted at this call's span under the replay owner, never a capture snapshot.
+    pub(super) preceding: Option<CallFact>,
 }
 
 pub(super) struct Shape {
@@ -321,10 +328,21 @@ impl HeaderSchedule {
         if count >= limit || call.value.len() > 512 || call.callee.len() > 512 {
             return Err(Error::WorkingLimit);
         }
+        let preceding = if let Some(fact) = &call.preceding {
+            if fact.value.capacity() > 32 * 1024 {
+                return Err(Error::WorkingLimit);
+            }
+            fact.value.capacity() + std::mem::size_of::<CallFact>()
+        } else {
+            0
+        };
         // Incoming text is already charged by lowering; this additional fixed
         // allowance conservatively double-charges its bounded retained strings.
+        // The producer must precharge payload construction. The old 1024-byte
+        // allowance does not cover metadata; charge its capacity/control separately.
         let charge = (4 * std::mem::size_of::<CallObservation>())
             .checked_add(1024)
+            .and_then(|n| n.checked_add(preceding))
             .ok_or(Error::WorkingLimit)?;
         work(charge)?;
         self.visits[group.index()].push(call);
@@ -627,7 +645,104 @@ mod tests {
             end: group + 1,
             value: format!("group{group}()"),
             callee: "probe".into(),
+            preceding: None,
         }
+    }
+
+    #[test]
+    fn call_preludes_move_through_drains_and_capture_failure_is_atomic() {
+        use HeaderGroup::{PositionalDefaults, ReturnAnnotation};
+        let mut schedule = HeaderSchedule::default();
+        for group in [PositionalDefaults, ReturnAnnotation] {
+            let mut call = observation(group);
+            // Producers precharge before creating this owned payload. Capture's
+            // extra capacity charge is conservative, not construction permission.
+            let mut value = String::with_capacity(96);
+            value.push_str(r#"{"value":"bounded"}"#);
+            let capacity = value.capacity();
+            call.preceding = Some(CallFact {
+                kind: "metadata",
+                value,
+            });
+            let mut charged = 0;
+            schedule
+                .capture_visit(group, call, 4, &mut |bytes| {
+                    charged += bytes;
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(
+                charged,
+                4 * std::mem::size_of::<CallObservation>()
+                    + 1024
+                    + capacity
+                    + std::mem::size_of::<CallFact>()
+            );
+        }
+        let mut rejected = observation(PositionalDefaults);
+        rejected.preceding = Some(CallFact {
+            kind: "metadata",
+            value: "x".repeat(32 * 1024 + 1),
+        });
+        assert_eq!(
+            schedule.capture_visit(PositionalDefaults, rejected, 4, &mut unlimited),
+            Err(Error::WorkingLimit)
+        );
+        let mut rejected = observation(PositionalDefaults);
+        rejected.preceding = Some(CallFact {
+            kind: "metadata",
+            value: String::with_capacity(32 * 1024 + 1),
+        });
+        assert_eq!(
+            schedule.capture_visit(PositionalDefaults, rejected, 4, &mut unlimited),
+            Err(Error::WorkingLimit)
+        );
+        assert_eq!(
+            schedule.capture_visit(
+                PositionalDefaults,
+                observation(PositionalDefaults),
+                4,
+                &mut |bytes| if bytes == 0 {
+                    Ok(())
+                } else {
+                    Err(Error::WorkingLimit)
+                },
+            ),
+            Err(Error::WorkingLimit)
+        );
+        assert_eq!(schedule.visits.iter().map(Vec::len).sum::<usize>(), 2);
+        let mut trace = Vec::new();
+        for (after, owner) in [(false, "before.body"), (true, "after.body")] {
+            let mut emit = |event| {
+                let HeaderEvent::Visit(call) = event else {
+                    panic!("unexpected metadata event")
+                };
+                let fact = call.preceding.unwrap();
+                trace.push((owner, call.line, call.end, fact.kind, fact.value));
+                Ok(())
+            };
+            if after {
+                schedule.after(DefinitionKind::Function, &mut || Ok(()), &mut emit)
+            } else {
+                schedule.before(DefinitionKind::Function, &mut || Ok(()), &mut emit)
+            }
+            .unwrap();
+        }
+        assert_eq!(trace.len(), 2);
+        for (i, group) in [PositionalDefaults, ReturnAnnotation]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(
+                trace[i].0,
+                if i == 0 { "before.body" } else { "after.body" }
+            );
+            assert_eq!(trace[i].1, group.index() + 1);
+            assert_eq!(trace[i].2, group.index() + 1);
+            assert_eq!(trace[i].3, "metadata");
+            assert_eq!(trace[i].4, r#"{"value":"bounded"}"#);
+        }
+        assert!(schedule.visits.iter().all(Vec::is_empty));
     }
 
     #[test]

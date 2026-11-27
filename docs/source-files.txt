@@ -75,6 +75,8 @@ src/analysis/python_parity/ruff_facts_batch.rs
 src/analysis/python_ruff.rs
 src/analysis/python_ruff/expressions.rs
 src/analysis/python_ruff/facts.rs
+src/analysis/python_ruff/literals.rs
+src/analysis/python_ruff/metadata.rs
 src/analyze.rs
 src/catalog.rs
 src/cli.rs

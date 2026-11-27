@@ -54,15 +54,24 @@ syntax frontend is now selected privately, not as a production fact backend.
 `src/analysis/python_ruff.rs` retains classification-only `parse_batch`; a separate
 private `extract_fact_candidates` now lowers a validated borrowed AST within the
 same single Ruff parse, only after both parse/version diagnostic channels are empty.
-Policy `python-ruff-private-facts-2` emits bounded generic facts, IDs and diagnostics
-with a module baseline, not an AST, literal payloads or source excerpts. The facts-1
+Current private policy `python-ruff-private-facts-3` emits bounded generic facts, IDs
+and diagnostics with a module baseline, not an AST or source-excerpt dump. Literal
+retention is limited to the existing bounded API path/prefix/method metadata contract;
+tags, options, descriptions and other literal payloads remain redacted. The facts-1
 checkpoint covered declarations/signatures, non-decorator header calls,
 imports, assignments, ordinary suites and Python 3.12 generic expression families;
-opaque or clipped shapes still expose descendant calls. Facts-2 adds all eight match
+opaque or clipped shapes still expose descendant calls. The facts-2 checkpoint added all eight match
 pattern forms, case guards/bodies, type aliases and function/async-function/class
 type parameters, without inventing capture bindings, generic scopes or alias-map
 mutations. Class-pattern syntax such as `Record()` is not a constructor call.
-Decorators and G3 constructors/include/router mutations remain blocked. Known
+Facts-3 adds helper-compatible decorator facts, function/async-function CLI/job/API
+route metadata and diagnostics, FastAPI host/APIRouter prefix assignments,
+`include_router` preludes and multi-target mutations. Class decorators emit facts
+and calls only, not discovery. Unknown/dynamic G3 properties produce null/unsupported
+metadata and diagnostics, not whole-file exclusions. A bounded source-backed text
+decoder preserves Python code points (including lone surrogates); HTTP methods use
+ASCII plus four exhaustively checked Unicode 15 uppercase preimages. These are G3
+outputs, not new private application rules. Known
 compatibility gaps include bare f-string mapping-pattern keys (CPython AST accepts,
 Ruff rejects without recovery) and Python 3.13 type-parameter defaults (explicitly
 rejected by the fact driver even where Ruff's PY312 diagnostics miss them).

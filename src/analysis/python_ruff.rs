@@ -3,6 +3,7 @@
 
 mod expressions;
 mod facts;
+mod literals;
 pub(super) use facts::CandidateReport;
 
 pub(super) fn extract_fact_candidates(

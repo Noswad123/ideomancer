@@ -1121,6 +1121,21 @@ impl Collector<'_, '_> {
             .last()
             .map_or(&self.sources[self.index].module, |f| &f.symbol)
             .clone();
+        if let Some(fact) = call.preceding {
+            if !self.reserve_work(size, cancel) {
+                self.pending -= size;
+                return;
+            }
+            self.add(
+                fact.kind,
+                call.line,
+                call.end,
+                owner.clone(),
+                fact.value,
+                cancel,
+            );
+            self.pending -= size;
+        }
         self.add("call", call.line, call.end, owner, call.value, cancel);
         if !self.unsupported && self.limited.is_none() && !cancel.expired.get() {
             self.warn_call(&call.callee, call.line, cancel);
@@ -1837,6 +1852,7 @@ impl Collector<'_, '_> {
                     end,
                     value,
                     callee,
+                    preceding: None,
                 };
                 if capture {
                     let body = self.body.as_mut().unwrap();

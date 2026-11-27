@@ -73,8 +73,8 @@ The finite completion ledger is:
 | Gate | Outcome and required acceptance | State |
 | --- | --- | --- |
 | P1-G1 | Generic expression and ordinary-body coverage: containers/operators/indexing, call-free defaults, conditions, loops and context managers; hidden calls/warnings, owner restoration, spans and one counted walk remain exact. | Implemented and locally validated for the bounded G1 subset below |
-| P1-G2 | Close the generic visitor inventory: remaining statements, targets/writes/imports, arbitrary callees/splats, comprehensions/lambdas/generators, await/yield/walrus, all headers and literal/identifier forms. Every target-version node has a normalization/traversal rule and cross-family oracle cases. | In progress: Ruff facts-2 covers structural patterns, type aliases and generic declarations; decorator traversal and full literal/identifier compatibility remain open, with parser gaps explicit |
-| P1-G3 | Preserve every existing discovery/framework side output: decorators, CLI/job/API entry facts, route diagnostics and FastAPI host/prefix/include/mutation metadata, including aliases and literal-retention limits. | Pending |
+| P1-G2 | Close the generic visitor inventory: remaining statements, targets/writes/imports, arbitrary callees/splats, comprehensions/lambdas/generators, await/yield/walrus, all headers and literal/identifier forms. Every target-version node has a normalization/traversal rule and cross-family oracle cases. | In progress: Ruff facts-3 includes decorator traversal and source-backed metadata literals; full literal/identifier admission and explicit parser gaps remain |
+| P1-G3 | Preserve every existing discovery/framework side output: decorators, CLI/job/API entry facts, route diagnostics and FastAPI host/prefix/include/mutation metadata, including aliases and literal-retention limits. | Implemented privately in facts-3 for the finite admitted profile; broader language/failure and operational acceptance remain gated |
 | P1-G4 | Close grammar/version/encoding/failure differences: original-byte digests, decoding/cookies, physical layout and exact observable parse diagnostics. No unexplained valid-file rejection or invalid-file acceptance in the approved compatibility suite. | Open: private Ruff syntax frontend integrated; CPython admission, normalization/decoding/failure and resource closure remain; production helper retained |
 | P1-G5 | Integrate distinct native identity, evidence/snapshots, CLI/library dispatch, workflow revalidation and capabilities. Preserve old-save reading/rendering; rediscovery invalidates stale claims. Native operation must not probe Python. | Pending; public migration design required |
 | P1-G6 | Existing-engine usefulness and operational/cutover acceptance: class/callable/API/network/services views, adapter proofs, saved-source reuse, supported platforms/toolchain/package/resource checks, then explicit replacement approval. | Pending |
@@ -1242,11 +1242,144 @@ were added or renamed; manifests, dependency locks and vendor patches are unchan
 The consumer attests its reviewed source snapshot, not an immutable Git commit or
 Ruff production fact dispatch.
 
-**Next:** implement decorator/discovery/framework side outputs and their bounded
-literal retention, then close versioned identifier/literal, type-comment/encoding,
-parser-gap and failure/resource compatibility before public integration. Source
-selection and Git-based delivery do not require another parser-selection exercise
-or registry publication.
+**Boundary at that checkpoint:** decorator/discovery/framework side outputs and
+their bounded literal retention were next; the following batch implements them.
+Versioned identifier/literal, type-comment/encoding, parser-gap and failure/resource
+compatibility still precede public integration. Source selection and Git-based
+delivery do not require another parser-selection exercise or registry publication.
+
+#### Existing decorator/discovery/framework outputs: private facts-3
+
+Private policy **`python-ruff-private-facts-3`** adds the helper's existing G3
+outputs: decorator facts, CLI/job entrypoint candidates, API routes/diagnostics,
+FastAPI hosts, router prefixes, includes and mutations. Their previous whole-file
+guards are removed only alongside these implementations. These are the existing
+public framework syntax contracts—not new organization-specific inference or
+proof of runtime activation. Production helper/identity/defaults, public request
+types and saved-state capabilities are unchanged; compatibility stays `Pending`.
+
+**Literal correctness and privacy.** Ordinary/u/raw/triple/adjacent text literals
+normalize into source-part ranges/flags, not decoded payloads. Retained values are
+decoded from the same BOM-stripped captured source that Ruff parsed. Ruff's decoded
+string values are never used for metadata, because they replace lone surrogates.
+`python_ruff/literals.rs` streams checked code points, preserving separate surrogate
+escapes, unknown escapes, physical newline normalization and part boundaries.
+No arbitrary constant evaluation, full bigint conversion or Unicode-name database
+is introduced. Active named Unicode escapes remain a whole-file exclusion.
+
+Only the existing bounded contracts retain text: direct route paths at most 2048
+Python code points, restricted router prefixes at most 128, and whitelist method
+recognition. Invalid/nonconstant/bytes/f-string values yield the helper's dynamic
+or unsupported metadata, not invented literal values. Oversize text discards its
+payload while continuing decoding/cancellation checks; actual decoder errors fail
+closed rather than becoming silently valid metadata. Tags, options, descriptions,
+configuration and unrelated string bodies remain redacted.
+
+Closed typed writers emit compact sorted ASCII metadata directly from code points.
+Lone surrogates become inner JSON escapes stored in an ordinary Rust `String`,
+which the existing fact-ID writer escapes again. No `serde_json::Value` or Rust
+Unicode-scalar string round-trip alters retained code points. One non-BMP point
+and two explicit surrogate points can encode identically but cross different
+Python-length limits; eligibility is decided before encoding.
+
+**Methods and prefixes.** A fixed seven-byte method recognizer implements the
+Python-3.12/Unicode-15 uppercase preimages relevant to the eight HTTP words. An
+exhaustive trusted stdlib oracle checked every code point through U+10FFFF,
+including surrogates: the only relevant non-ASCII mappings are U+0131 → `I`,
+U+017F → `S`, and U+FB05/U+FB06 → `ST`; there are no empty uppercase mappings.
+ASCII uppercase plus these four property facts exactly determine whitelist
+membership without Rust case folding/NFKC or unbounded decoded method strings.
+The added ignored oracle independently checks this profile; it does not establish
+general Unicode identifier/name compatibility. Applicable Unicode terms remain
+in the existing notice collection.
+
+Prefixes use the helper's complete ASCII grammar `(?:/[a-z0-9_{}-]+){1,8}` and
+128-point limit. Braces are allowed characters, not a new template parser. Explicit
+empty prefixes are invalid; missing include prefixes use the helper's valid empty
+default. Missing APIRouter prefixes instead remain unknown/unsupported metadata.
+
+**Metadata and visitation order.** Definitions push their owner and emit the
+declaration, decorator facts and function discovery before signature/base metadata.
+Class decorators deliberately emit no entrypoint/API discovery. Token-indexed
+`def`/`async`/`class` starts correct Ruff's decorator-inclusive declaration ranges,
+without regex, reparse or source rewriting. Decorator expressions retain their
+own spans excluding `@`; generic calls replay after the body and before return/
+type-bound calls. Body imports therefore affect delayed decorator diagnostics but
+do not retroactively change early route metadata.
+
+Path selection counts explicit `path=` keywords plus the first positional value;
+it requires exactly one bounded empty/slash-prefixed direct text value. Extra
+positional arguments after the first do not erase an otherwise valid path. Called
+verb decorators use their fixed method; `route`/`api_route` require one literal
+list/tuple/set of whitelist strings. Empty containers are valid, methods deduplicate
+and sort, and invalid method collections do not retain partial valid subsets.
+Path diagnostics precede methods diagnostics, then the route fact. Ordinary body
+`client.get(...)` calls remain ordinary calls.
+
+Assign/AnnAssign metadata follows helper order: class annotation, all direct target
+mutations, host/prefix metadata, reverse-target bindings, then generic children.
+Only direct name targets within the existing limit receive constructor host/prefix
+facts. Rendered constructor aliases resolve once at the nearest owner prefix, with
+terminal fallback only when no alias exists. Constructor calls elsewhere are
+ordinary calls, not newly inferred assignments. Invalid/dynamic prefixes, extra
+arguments/keywords and unpacking preserve the helper's null/`supported:false`
+metadata instead of excluding the file.
+
+Shared call observations now have one optional generic preceding fact, not a
+framework-specific field or an arbitrary event framework. Include metadata is
+captured as charged owned ASCII and emitted at replay immediately before its call
+under the replay-time owner; no arena ID/AST reference or captured owner survives.
+This works inside decorators, defaults, return annotations and type bounds.
+The Tree-sitter reference supplies `None` and keeps its conservative admission.
+
+Mutations inspect only direct attribute targets and the helper's clipped rendered
+shape. Delete emits **all target mutations before any target child calls**.
+A parenthesized tuple is one target and receives no recursively inferred mutation
+facts, while its descendant calls remain. Tests distinguish both forms. Same-line
+identical include facts deduplicate only at finalization; raw occurrence traces
+still preserve each scheduled visit.
+
+**Resource discipline.** Source-part/keyword-index slots, capped literal boxes,
+metadata encoders and preceding-fact capacities are charged before growth. The
+existing call allowance is not assumed to cover extra metadata. Storage drops
+before refunds; live header preludes remain owned across bodies. A 600-call body
+with decorator/default/return/type-bound includes exercises bounded repetition,
+distinct raw/final duplicate counts, low working limits and cancellation. The
+one-parse/both-channel gate, baseline/file transactions and parser/destruction
+limitations remain unchanged. This is not a hard stack/RSS/timeout sandbox.
+
+The full oracle retains all 77 previous matching cases and adds 40 G3 cases:
+**117 complete fact/ID/diagnostic arrays and 117 duplicate-preserving raw traces**
+match the trusted helper. Cases include Unicode casing, literal escapes,
+surrogate/length boundaries, dynamic diagnostics, duplicate keywords/unpacks,
+multiline/async/BOM declarations, class discovery exclusions, alias fallback,
+prefix/include support flags and hidden/clipped descendants. The independent
+uppercase-property oracle also passed with trusted Python 3.12.11/Unicode 15.
+
+Completed local regression gates passed **633 ordinary library tests** (177
+opt-in tests ignored by that invocation), **18 adapter + 8 engine** tests and
+**171 explicitly selected Python oracle tests**. The last count includes the
+existing reference/native gates, Ruff acceptance, the 117-case matching gate and
+the new exhaustive uppercase-property gate. Product formatting/Clippy with warnings
+denied passed; the same 19 preserved vendor lifetime-style warnings remain visible.
+Existing Rust 1.89.0/macOS arm64 was used; hosted matrix/production cutover are not
+claimed. Review caught an incorrect tuple-delete fixture, and execution caught a
+raw-versus-deduplicated include-count expectation; tests now assert both semantics.
+All **180** Python script tests passed, source integrity verified **217** reviewed
+paths, and vendor verification confirmed the unchanged **85-file** snapshot and
+two-file policy patch. The independent exported-checkout consumer passed fresh
+offline lock resolution, locked compilation and its native JS/TS public-API test.
+That is source/build regression acceptance, not Ruff production dispatch or an
+immutable Git revision. No vendor, dependency-manifest or lockfile change was
+required. New source paths are the private literal and metadata modules only.
+
+**Remaining:** raw Unicode identifier/name admission, active named escapes,
+recognized type comments, encoding-cookie support, exact failures/diagnostics and
+parser/resource gaps still need G4 closure. Type-parameter defaults retain their
+all-variant PY312 guard and bare f-string mapping keys retain their explicit parser
+gap. G3 output implementation is no longer merely planned, but full replacement
+parity and G2/G4–G6 acceptance remain separate. No public native selector, saved
+evidence upgrade or fabricated interpreter version is introduced here.
 
 P1 has a **private captured-source AST parity harness**, a native parse-only
 front-end and bounded class/function/header/body/import candidates, not a production native Python

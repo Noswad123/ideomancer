@@ -93,6 +93,326 @@ fn fixtures() -> Vec<String> {
     ]
 }
 
+// These are also fed, without filtering, through BOTH existing helper gates:
+// final arrays/IDs and raw duplicate-preserving fact/warning visit order.
+fn g3_fixtures() -> Vec<String> {
+    vec![
+        "@task\n@task()\n@worker.task()\n@worker.job()\n@worker.scheduled_job()\n@cli.command()\ndef f(): body()\n".into(),
+        "@worker.task\n@job\n@command\n@get('/not-a-route')\n@client.getBody('/not-a-route')\ndef f(): client.get('/ordinary')\n".into(),
+        "@cli.command()\n@api.get('/class')\nclass C(base()):\n    @task\n    @api.post('/method')\n    def method(self): body()\n".into(),
+        "from early import eval as probe\n@probe()\n@api.route(path=path(), methods=methods())\ndef f[T: probe()](a=probe()) -> probe():\n    from late import exec as probe\n    probe()\n".into(),
+        "@api.get('/a', extra(), methods=unknown())\n@api.post(path='')\n@api.put('/c')\n@api.patch('/d')\n@api.delete('/e')\n@api.options('/f')\n@api.head('/g')\n@api.trace('/h')\ndef f(): pass\n".into(),
+        "@api.route(path='/' 'adjacent', methods=['post', 'GET', 'get'])\n@api.api_route('/tuple', methods=('head', 'trace'))\n@api.route('/set', methods={'put', 'patch'})\n@api.route('', methods=[])\ndef f(): pass\n".into(),
+        "@api.route(path=unknown, methods=['get', unknown])\n@api.route('/a', path='/b', methods=['post'], methods=['get'])\n@api.route(methods='get')\n@api.route('/ok')\ndef f(): pass\n".into(),
+        "@api.route('/a', methods=[*items])\n@api.route('/b', methods={**mapping})\n@api.route(*args, **options)\n@api.route(path=('/' + 'x'), methods=[f'get'])\n@api.route(path=b'/bytes', methods=[b'get'])\ndef f(): pass\n".into(),
+        "@api.route('/unicode', methods=['opt\\u0131ons', 'po\\u017ft', 'po\\ufb05', 'po\\ufb06'])\ndef f(): pass\n".into(),
+        "@api.route('/a', methods=['get', 'po\\u0130t'])\n@api.route('/b', methods=['\\u00df'])\n@api.route('/c', methods=['get '])\n@api.route('/d', methods=[''])\ndef f(): pass\n".into(),
+        "@api.get('/\\ud800/\\udfff/\\U0010ffff/\\0/\\x01/\\t/\\n/\\r/\\b/\\f/\\v/\\a')\ndef f(): pass\n".into(),
+        "@api.get(r'/raw\\n\\N{name}\\u0041')\n@api.get(u'/u\\101\\777\\q\\x42\\u0043\\U0001f600')\ndef f(): pass\n".into(),
+        "@api.get(\n    '/first' # separate token\n    r'/raw\\n'\n    '''/triple\nline'''\n)\ndef f(): pass\n".into(),
+        "@api.get('/continued\\\ntext')\n@api.get('''/physical\r\nline\rfinal''')\n@api.get('/\u{e9}/\u{1f600}')\ndef f(): pass\n".into(),
+        format!("@api.get('/{}')\ndef f(): pass\n", "\\U0001f600".repeat(2047)),
+        format!("@api.get('/{}')\ndef f(): pass\n", "\\U0001f600".repeat(2048)),
+        format!("@api.get('/{}x')\n@api.get('/{}')\ndef f(): pass\n", "\\ud83d\\ude00".repeat(1023), "\\ud83d\\ude00".repeat(1024)),
+        "\u{feff}@(\r\n    api.get('/wrapped')\r\n) # decorator tail\r\nasync \\\r\ndef f():\r\n    @task\r\n    def nested(): pass\r\n    # trailing comment\r\nafter()\r\n".into(),
+        "a = b = FastAPI()\nr: Type = APIRouter(prefix='/v1', tags=secret())\nreceiver.field = FastAPI()\na, b = APIRouter(prefix='/ignored')\n".into(),
+        "class C:\n    field: annotation() = APIRouter(prefix='/a')\n    self.router: annotation() = FastAPI()\n    cls.router.child = factory()\n".into(),
+        "import fastapi as framework\nfrom fastapi import APIRouter as Router, FastAPI as Host\na = framework.FastAPI()\nb = Router(prefix='/b')\nc = Host()\n".into(),
+        "from other import APIRouter\na = APIRouter(prefix='/no')\nfrom other import object as fastapi\nb = fastapi.FastAPI()\nc = unrelated.APIRouter(prefix='/yes')\n".into(),
+        "import fastapi as first\nimport first as second\na = second.APIRouter(prefix='/no')\nb = first.APIRouter(prefix='/yes')\n".into(),
+        "def repeat():\n    from fastapi import APIRouter as Router\ndef repeat():\n    a = Router(prefix='/persistent')\nclass repeat:\n    b = Router(prefix='/new-kind')\n".into(),
+        format!("{} = FastAPI()\n{} = APIRouter(prefix='/ok')\n{} = FastAPI()\n{} = APIRouter(prefix='/ok')\n", "a".repeat(128), "b".repeat(128), "c".repeat(129), "d".repeat(129)),
+        "a = APIRouter()\nb = APIRouter(prefix='')\nc = APIRouter(prefix='/a', prefix='/b')\nd = APIRouter(prefix=unknown)\ne = APIRouter(prefix=f'/dynamic{call()}')\n".into(),
+        "a = APIRouter(prefix='/a', unknown=secret())\nb = APIRouter(prefix='/b', tags={'REDACTION_PAYLOAD_71': secret()})\nc = APIRouter(positional(), prefix='/c')\nd = APIRouter(prefix='/d', **options())\n".into(),
+        "a = APIRouter(prefix='/a/b/c/d/e/f/g/h')\nb = APIRouter(prefix='/a/b/c/d/e/f/g/h/i')\nc = APIRouter(prefix='/UPPER')\nd = APIRouter(prefix='/\\u00e9')\ne = APIRouter(prefix='/{literal}_-9')\nf = APIRouter(prefix='/')\n".into(),
+        format!("a = APIRouter(prefix='/{}')\nb = APIRouter(prefix='/{}')\nc = APIRouter(prefix='/{}')\n", "x".repeat(126), "x".repeat(127), "x".repeat(128)),
+        "app.include_router()\napp.include_router(router)\napp.include_router(first, second)\napp.include_router(holder.router)\napp.include_router(factory())\n".into(),
+        "app.include_router(router, prefix='')\napp.include_router(router, prefix='/ok')\napp.include_router(router, prefix='/a', prefix='/b')\napp.include_router(router, prefix=unknown)\napp.include_router(router, prefix='/ok', unknown=value())\napp.include_router(router, **options())\n".into(),
+        "from early import eval as probe\n@app.include_router(router, prefix='/decorator')\ndef f[T: app.include_router(router)](a=app.include_router(router, prefix='/default')) -> app.include_router(probe()):\n    from late import exec as probe\n    body()\n".into(),
+        "@app.include_router(router)\nclass C[T: app.include_router(router)](app.include_router(router), metaclass=app.include_router(router)):\n    body()\n".into(),
+        "receiver().prefix = other().router = rhs()\nreceiver().router.child: annotation() = rhs()\nreceiver().prefix += rhs()\ndel receiver().prefix, other().router.child, tail()[key()]\n".into(),
+        "del (\n    receiver().prefix,\n    other().router.child\n)\nself.router, cls.prefix = rhs()\nreceiver[probe()].prefix: Type\n".into(),
+        format!("target({}, app.include_router(router, prefix='/hidden'))\n@api.get('/path', tags=[{}])\ndef f(): pass\n", vec!["safe()"; 90].join(","), vec!["child()"; 20].join(",")),
+        "type Alias[T: FastAPI()] = receiver.include_router(router)\nmatch subject():\n    case f'{receiver.include_router(router)}' if FastAPI():\n        receiver.prefix = value\n".into(),
+        "@api.get(f'/dynamic{unknown_symbol}')\n@api.route('/ok', methods=[unknown_symbol])\ndef f():\n    open('/not/a/real/output', 'w').write('REDACTION_PAYLOAD_71')\n    exec('REDACTION_PAYLOAD_71')\n".into(),
+        "@task\nasync def outer():\n    @(cli.command())\n    async def inner(): pass\n    @api.get('/nested')\n    class Nested: pass\n".into(),
+        "@api.get('/quotes\\\"/slash\\\\/\\ud83d\\ude00')\n@api.route('/ok', methods=['g' # comment\n'et', r'po' 'st'])\ndef f(): pass\n".into(),
+    ]
+}
+
+#[test]
+fn ruff_facts_g3_metadata_candidates_are_admitted_and_redacted() {
+    let cases = g3_fixtures();
+    assert_eq!(cases.len(), 40);
+    for (index, text) in cases.iter().enumerate() {
+        let sources = [source(text)];
+        let report = extract_fact_candidates(&sources).unwrap();
+        assert_eq!(
+            report.files[0].status,
+            FactStatus::AcceptedFacts,
+            "G3 case {index}: {:?}",
+            report.files[0]
+        );
+        assert!(!serde_json::to_string(&report)
+            .unwrap()
+            .contains("REDACTION_PAYLOAD_71"));
+    }
+}
+
+#[test]
+fn ruff_facts_g3_scalar_json_and_diagnostic_order_are_exact() {
+    let sources = [source("@api.get('/\\ud800')\n@api.route(path=unknown, methods=['get', unknown])\ndef f(): body()\n")];
+    let mut trace = Vec::new();
+    let report = extract_impl(
+        &sources,
+        |_| false,
+        SemanticLimits::default(),
+        Some(&mut trace),
+    )
+    .unwrap();
+    assert_eq!(report.files[0].status, FactStatus::AcceptedFacts);
+    let routes: Vec<_> = trace
+        .iter()
+        .filter_map(|event| match event {
+            Observation::Fact { fact } if fact.kind == "api_route" => Some(fact.value.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        routes,
+        [
+            r#"{"methods":["GET"],"path":"/\ud800","pathIsFragment":true,"receiver":"api"}"#,
+            r#"{"methods":[],"path":null,"pathIsFragment":true,"receiver":"api"}"#,
+        ]
+    );
+    let warnings: Vec<_> = trace
+        .iter()
+        .filter_map(|event| match event {
+            Observation::Warning { warning } => Some(warning.message.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        warnings,
+        [
+            "line 2: route path is not a bounded direct slash-prefixed string; prefix not inferred",
+            "line 2: route methods are not a literal HTTP whitelist; methods unknown",
+        ]
+    );
+    assert!(report.diagnostics[0].message.contains("methods"));
+    let declaration = report.facts.iter().find(|f| f.kind == "function").unwrap();
+    assert_eq!((declaration.line, declaration.end_line), (3, 3));
+}
+
+#[test]
+fn ruff_facts_g3_header_preludes_replay_before_calls_under_the_live_owner() {
+    let sources = [source("from early import eval as probe\n@app.include_router(probe(), prefix='/decorator')\ndef f[T: app.include_router(router)](a=app.include_router(router, prefix='/default')) -> app.include_router(router, prefix='/return'):\n    from late import exec as probe\n    body()\n")];
+    let mut trace = Vec::new();
+    let report = extract_impl(
+        &sources,
+        |_| false,
+        SemanticLimits::default(),
+        Some(&mut trace),
+    )
+    .unwrap();
+    assert_eq!(report.files[0].status, FactStatus::AcceptedFacts);
+    let includes: Vec<_> = trace
+        .iter()
+        .enumerate()
+        .filter_map(|(i, event)| match event {
+            Observation::Fact { fact } if fact.kind == "router_include" => Some((i, fact)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(includes.len(), 4);
+    for &(index, include) in &includes {
+        let Observation::Fact { fact: call } = &trace[index + 1] else {
+            panic!("missing call after prelude");
+        };
+        assert_eq!(call.kind, "call");
+        assert_eq!(
+            (&include.symbol, include.line, include.end_line),
+            (&call.symbol, call.line, call.end_line)
+        );
+        assert_eq!(include.symbol, "unit.f");
+    }
+    assert!(includes[0].1.value.contains("/default"));
+    assert!(includes[1].1.value.contains("/decorator"));
+    assert!(includes[2].1.value.contains("/return"));
+    assert!(includes[3].1.value.contains(r#""prefix":"""#));
+    let body = trace.iter().position(|event| matches!(event, Observation::Fact { fact } if fact.kind == "call" && fact.value == "body()")).unwrap();
+    assert!(includes[0].0 < body && body < includes[1].0);
+    assert_eq!(report.diagnostics.len(), 1);
+    assert_eq!(
+        report.diagnostics[0].message,
+        "line 2: late.exec; runtime targets are not inferred"
+    );
+}
+
+#[test]
+fn ruff_facts_g3_delete_emits_all_mutations_before_any_target_children() {
+    let sources = [source(
+        "del receiver().prefix, \\\n    other().router.child\n",
+    )];
+    let mut trace = Vec::new();
+    let report = extract_impl(
+        &sources,
+        |_| false,
+        SemanticLimits::default(),
+        Some(&mut trace),
+    )
+    .unwrap();
+    assert_eq!(report.files[0].status, FactStatus::AcceptedFacts);
+    let facts: Vec<_> = trace
+        .iter()
+        .filter_map(|event| match event {
+            Observation::Fact { fact } => Some(fact),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        facts.iter().map(|f| f.kind.as_str()).collect::<Vec<_>>(),
+        ["router_mutation", "router_mutation", "call", "call"]
+    );
+    assert_eq!((facts[0].line, facts[0].end_line), (1, 2));
+    assert_eq!((facts[1].line, facts[1].end_line), (1, 2));
+    assert_eq!(facts[0].value, r#"{"target":"receiver().prefix"}"#);
+    assert_eq!(facts[1].value, r#"{"target":"other().router.child"}"#);
+    // Parentheses instead make one tuple target. The helper does not recursively
+    // infer mutation metadata for that target, but it still visits both calls.
+    let sources = [source(
+        "del (\n    receiver().prefix,\n    other().router.child\n)\n",
+    )];
+    let mut trace = Vec::new();
+    let report = extract_impl(
+        &sources,
+        |_| false,
+        SemanticLimits::default(),
+        Some(&mut trace),
+    )
+    .unwrap();
+    assert_eq!(report.files[0].status, FactStatus::AcceptedFacts);
+    let kinds: Vec<_> = trace
+        .iter()
+        .filter_map(|event| match event {
+            Observation::Fact { fact } => Some(fact.kind.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(kinds, ["call", "call"]);
+}
+
+#[test]
+fn ruff_facts_g3_assignment_metadata_precedes_lifo_bindings_and_generic_calls() {
+    let sources = [source("a = receiver().router = b = FastAPI()\nclass C:\n    field: annotation() = APIRouter(prefix='/a')\n")];
+    let mut trace = Vec::new();
+    let report = extract_impl(
+        &sources,
+        |_| false,
+        SemanticLimits::default(),
+        Some(&mut trace),
+    )
+    .unwrap();
+    assert_eq!(report.files[0].status, FactStatus::AcceptedFacts);
+    let facts: Vec<_> = trace
+        .iter()
+        .filter_map(|event| match event {
+            Observation::Fact { fact } => Some(fact),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        facts.iter().map(|f| f.kind.as_str()).collect::<Vec<_>>(),
+        [
+            "router_mutation",
+            "router_host",
+            "router_host",
+            "binding",
+            "binding",
+            "call",
+            "call",
+            "class",
+            "attribute_annotation",
+            "router_prefix",
+            "binding",
+            "call",
+            "call",
+        ]
+    );
+    assert_eq!(facts[1].value, r#"{"constructor":"FastAPI","target":"a"}"#);
+    assert_eq!(facts[2].value, r#"{"constructor":"FastAPI","target":"b"}"#);
+    assert_eq!(facts[3].value, r#"{"source":"FastAPI()","target":"b"}"#);
+    assert_eq!(facts[4].value, r#"{"source":"FastAPI()","target":"a"}"#);
+}
+
+#[test]
+fn ruff_facts_g3_metadata_regions_preserve_live_headers_and_bound_repetition() {
+    assert_eq!(SemanticLimits::default().working, 32 * 1024 * 1024);
+    assert_eq!(OUTPUT, 32 * 1024 * 1024);
+    let body = "    app.include_router(router, prefix='/body')\n".repeat(600);
+    let sources = [source(format!("@app.include_router(router, prefix='/decorator')\ndef owner[T: app.include_router(router)](a=app.include_router(router, prefix='/default')) -> app.include_router(router):\n{body}"))];
+    let mut trace = Vec::new();
+    let report = extract_impl(
+        &sources,
+        |_| false,
+        SemanticLimits {
+            working: 4 * 1024 * 1024,
+            ..SemanticLimits::default()
+        },
+        Some(&mut trace),
+    )
+    .unwrap();
+    assert_eq!(
+        report.files[0].status,
+        FactStatus::AcceptedFacts,
+        "{:?}",
+        report.files[0]
+    );
+    assert_eq!(
+        report
+            .facts
+            .iter()
+            .filter(|f| f.kind == "router_include")
+            .count(),
+        603
+    );
+    // Return and type-bound includes occupy the same line and produce the same
+    // final ID, but both observations must survive until final fact deduplication.
+    assert_eq!(
+        trace
+            .iter()
+            .filter(|event| matches!(event,
+        Observation::Fact { fact } if fact.kind == "router_include"))
+            .count(),
+        604
+    );
+    let limited = extract_impl(
+        &sources,
+        |_| false,
+        SemanticLimits {
+            working: 2048,
+            ..SemanticLimits::default()
+        },
+        None,
+    )
+    .unwrap();
+    assert_eq!(limited.files[0].status, FactStatus::ResourceLimit);
+    assert_eq!(limited.facts.len(), 1);
+    assert!(limited.diagnostics.is_empty());
+    let mut checks = 0;
+    let cancelled = extract_with(&sources, |at| {
+        if at == Checkpoint::Semantic {
+            checks += 1;
+        }
+        checks == 100
+    })
+    .unwrap();
+    assert_eq!(checks, 100);
+    assert_eq!(cancelled.facts.len(), 1);
+    assert!(cancelled.diagnostics.is_empty());
+    assert_eq!(cancelled.files[0].status, FactStatus::ResourceLimit);
+}
+
 #[test]
 fn ruff_facts_cross_family_candidate_is_not_parse_only() {
     let cases = fixtures();
@@ -119,29 +439,12 @@ fn ruff_facts_cross_family_candidate_is_not_parse_only() {
 #[test]
 fn ruff_facts_whole_file_exclusions_are_transactional() {
     for text in [
-        "before()\n@decorator\ndef f(): pass\n",
-        "eval()\nmatch value:\n    case _:\n        @decorator\n        def f[T](): pass\n",
-        "eval()\nmatch value:\n    case _ if FastAPI(): pass\n",
-        "eval()\nmatch value:\n    case f'{receiver.include_router(router)}': pass\n",
-        "eval()\nmatch value:\n    case _: receiver.prefix = value\n",
-        "eval()\ntype Alias[T: FastAPI()] = int\n",
-        "eval()\ntype Alias = receiver.include_router(router)\n",
-        "eval()\ndef f[T: FastAPI()](): pass\n",
-        "eval()\nclass C[T: receiver.include_router(router)]: pass\n",
         "eval()\nmatch value:\n    case [\u{212a}]: pass\n",
         "eval()\ntype Alias[\u{212a}] = int\n",
         "eval()\ntype Alias = int # type: ignore\n",
         "eval()\nmatch value:\n    case _: pass # type: int\n",
         "eval()\ntype Alias[T: '\\N{LATIN CAPITAL LETTER A}'] = int\n",
         "eval()\nmatch value:\n    case '\\N{LATIN CAPITAL LETTER A}': pass\n",
-        "before()\napp = FastAPI()\n",
-        "before()\nfrom fastapi import APIRouter as constructor\nr = constructor()\n",
-        "before()\nimport fastapi as framework\nr = framework.APIRouter()\n",
-        "before()\nreceiver.include_router(router)\n",
-        "before()\nreceiver.prefix = value\n",
-        "before()\nreceiver.router.child: Type\n",
-        "before()\nreceiver.router += value\n",
-        "before()\ndel receiver.prefix\n",
         "before()\nvalue = \u{212a}\n",
         "before()\npass # type: ignore\n",
         "before()\npass #type: int\n",
@@ -170,7 +473,7 @@ fn ruff_facts_whole_file_exclusions_are_transactional() {
 }
 
 #[test]
-fn ruff_facts_hidden_framework_guards_and_calls_survive_render_clips() {
+fn ruff_facts_hidden_framework_metadata_and_calls_survive_render_clips() {
     for hidden in ["FastAPI()", "receiver.include_router(router)"] {
         for text in [
             format!(
@@ -183,8 +486,19 @@ fn ruff_facts_hidden_framework_guards_and_calls_survive_render_clips() {
         ] {
             let sources = [source(text)];
             let report = extract_fact_candidates(&sources).unwrap();
-            assert_eq!(report.files[0].status, FactStatus::UnsupportedSyntax);
-            assert_eq!(report.facts.len(), 1);
+            assert_eq!(report.files[0].status, FactStatus::AcceptedFacts);
+            assert!(report
+                .facts
+                .iter()
+                .any(|f| f.kind == "call" && f.value == hidden));
+            assert_eq!(
+                report
+                    .facts
+                    .iter()
+                    .filter(|f| f.kind == "router_include")
+                    .count(),
+                usize::from(hidden.contains("include_router"))
+            );
         }
     }
     let sources = [source(format!(
@@ -246,7 +560,7 @@ fn ruff_facts_decimal_and_byte_admission_is_explicit() {
 fn ruff_facts_file_isolation_resources_and_latched_cancellation() {
     let mut sources = [
         source("from arbitrary import eval as probe\nprobe()\n"),
-        source("before()\n@bad\ndef f(): pass\n"),
+        source("before()\nvalue = '\\N{SPACE}'\n"),
         source("def f[T: bound()]() -> result():\n    match subject():\n        case Record(child=[head, *tail]):\n            type Alias[U: other()] = rhs()\n"),
     ];
     for (i, s) in sources.iter_mut().enumerate() {
@@ -513,7 +827,7 @@ fn ruff_facts_structural_neutral_nodes_and_depth_are_bounded_per_file() {
 }
 
 #[test]
-fn ruff_facts_structural_hidden_guards_remain_transactional_beyond_shape_caps() {
+fn ruff_facts_structural_hidden_metadata_survives_shape_caps() {
     let wide = vec!["safe()"; 90].join(",");
     let long = "identifier".repeat(80);
     for hidden in ["FastAPI()", "receiver.include_router(router)"] {
@@ -533,13 +847,20 @@ fn ruff_facts_structural_hidden_guards_remain_transactional_beyond_shape_caps() 
                 Some(&mut trace),
             )
             .unwrap();
+            assert_eq!(report.files[0].status, FactStatus::AcceptedFacts, "{text}");
+            assert!(report
+                .facts
+                .iter()
+                .any(|f| f.kind == "call" && f.value == hidden));
             assert_eq!(
-                report.files[0].status,
-                FactStatus::UnsupportedSyntax,
-                "{text}"
+                report
+                    .facts
+                    .iter()
+                    .filter(|f| f.kind == "router_include")
+                    .count(),
+                usize::from(hidden.contains("include_router"))
             );
-            assert_eq!(report.facts.len(), 1);
-            assert!(report.diagnostics.is_empty() && trace.is_empty());
+            assert!(!trace.is_empty());
         }
     }
     for text in [
@@ -650,6 +971,7 @@ fn ruff_facts_header_schedule_reverses_capture_not_helper_replay() {
                     end: group.index(),
                     value: format!("group{}()", group.index()),
                     callee: "unresolved".into(),
+                    preceding: None,
                 },
                 20,
                 &mut |_| Ok(()),
@@ -686,19 +1008,20 @@ fn ruff_facts_header_schedule_reverses_capture_not_helper_replay() {
 }
 
 #[test]
-fn ruff_facts_alias_dependent_constructor_guards_run_at_header_replay() {
+fn ruff_facts_ordinary_header_constructors_do_not_invent_assignment_metadata() {
     for (text, expected) in [
-        ("from safe import read as probe\ndef f() -> probe():\n    from fastapi import APIRouter as probe\n", FactStatus::UnsupportedSyntax),
+        ("from safe import read as probe\ndef f() -> probe():\n    from fastapi import APIRouter as probe\n", FactStatus::AcceptedFacts),
         ("from fastapi import APIRouter as probe\ndef f() -> probe():\n    from safe import read as probe\n", FactStatus::AcceptedFacts),
-        ("from fastapi import APIRouter as probe\ndef f(a=probe()):\n    from safe import read as probe\n", FactStatus::UnsupportedSyntax),
-        ("from safe import read as probe\ndef f[T: probe()]():\n    from fastapi import APIRouter as probe\n", FactStatus::UnsupportedSyntax),
+        ("from fastapi import APIRouter as probe\ndef f(a=probe()):\n    from safe import read as probe\n", FactStatus::AcceptedFacts),
+        ("from safe import read as probe\ndef f[T: probe()]():\n    from fastapi import APIRouter as probe\n", FactStatus::AcceptedFacts),
         ("from fastapi import APIRouter as probe\ndef f[T: probe()]():\n    from safe import read as probe\n", FactStatus::AcceptedFacts),
-        ("from safe import read as probe\nclass C[T: probe()]:\n    from fastapi import APIRouter as probe\n", FactStatus::UnsupportedSyntax),
+        ("from safe import read as probe\nclass C[T: probe()]:\n    from fastapi import APIRouter as probe\n", FactStatus::AcceptedFacts),
         ("from fastapi import APIRouter as probe\nclass C[T: probe()]:\n    from safe import read as probe\n", FactStatus::AcceptedFacts),
     ] {
         let sources = [source(text)];
         let report = extract_fact_candidates(&sources).unwrap();
         assert_eq!(report.files[0].status, expected, "{text}");
+        assert!(!report.facts.iter().any(|f| matches!(f.kind.as_str(), "router_prefix" | "router_host")));
     }
 }
 
@@ -845,11 +1168,13 @@ fn ruff_facts_work_regions_keep_only_live_file_state_and_owner_high_water() {
         &mut |_, text, parsed, check| {
             let mut driver = Driver {
                 source: &sources[0],
+                source_text: text,
                 sink: &mut sink,
                 check,
                 arena: Vec::new(),
                 lines: Vec::new(),
                 pairs: Vec::new(),
+                keywords: Vec::new(),
                 projection: Projection::default(),
                 scope: ScopeId::default(),
                 owners: Vec::new(),
@@ -866,7 +1191,8 @@ fn ruff_facts_work_regions_keep_only_live_file_state_and_owner_high_water() {
             assert_eq!(driver.arena_work, 0);
             assert_eq!(driver.owner_slots, 2);
             let file_indexes = (text.len() + 1) * std::mem::size_of::<usize>()
-                + driver.pairs.len() * 4 * std::mem::size_of::<Paren>();
+                + driver.pairs.len() * 4 * std::mem::size_of::<Paren>()
+                + driver.keywords.len() * 4 * std::mem::size_of::<(TokenKind, TextRange)>();
             assert_eq!(
                 driver.sink.working(),
                 initial + file_indexes + driver.persistent_work
@@ -888,7 +1214,8 @@ fn ruff_facts_work_regions_keep_only_live_file_state_and_owner_high_water() {
 #[ignore = "requires explicitly selected trusted Python >=3.12; Ruff complete facts and raw observation order"]
 fn ruff_facts_complete_arrays_and_raw_trace_match_trusted_ast_oracle() {
     let python = crate::analysis::python_parity::oracle();
-    let texts = fixtures();
+    let mut texts = fixtures();
+    texts.extend(g3_fixtures());
     let mut sources: Vec<_> = texts.iter().map(source).collect();
     let mut metadata = source("class C:\n    field: Type = factory()\n");
     metadata.path = "caf\u{e9}/unit.py".into();

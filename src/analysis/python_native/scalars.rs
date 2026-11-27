@@ -10,6 +10,10 @@ pub(super) struct CodePoint(u32);
 pub(super) struct InvalidCodePoint;
 
 impl CodePoint {
+    pub(super) fn value(self) -> u32 {
+        self.0
+    }
+
     #[allow(dead_code)] // Checked seam for a future decoder, not syntax admission.
     pub(super) fn new(value: u32) -> Result<Self, InvalidCodePoint> {
         if value <= 0x10ffff {
@@ -134,7 +138,7 @@ pub(super) enum TextLimit {
 }
 
 impl TextLimit {
-    fn points(self) -> usize {
+    pub(super) fn points(self) -> usize {
         match self {
             Self::Route => 2048,
             Self::Prefix => 128,
