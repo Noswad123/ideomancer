@@ -23,7 +23,7 @@ or that a whole application is understood. There are no promised dates.
 | I2 | Read-only facts and validated class-model augmentation | Synthetic integration and a bounded real-source explicit-configuration slice accepted | Preserve immutability, identity checks and provenance; broader framework/runtime interpretation remains separate |
 | I3 | Harden and release the consumable engine | **Next: release and history review** | An approved immutable release works as an upstream or mirrored dependency |
 | P0 | Shared parser backend and native JS/TS Tree-sitter migration | Scoped source/facts, rendered-diagram usefulness and external explicit-configuration boundary accepted; release gates separate | Preserve fact/proof/output contracts; no Node discovery prerequisite; package/consumer checks and supported-platform release validation |
-| P1 | Native Python backend | Ruff facts-3 adds existing decorator/discovery/FastAPI outputs with bounded source-backed literals; language/failure/resource compatibility and public integration gates remain open; production AST helper retained | Complete the [Python completion gates](docs/python-analysis.md#completion-contract-and-remaining-gates); retain the AST helper until parity, compatibility, integration and cutover acceptance pass |
+| P1 | Native Python backend | Private Ruff frontend-2/facts-4 implements finite Unicode-15, named-escape, contextual type-comment and UTF-8/Latin-1 compatibility; all 75 Ruff tests, broader tests, final formatting/type-comment/Clippy reruns and exported-checkout consumer passed; closeout status in Python ledger; production AST helper retained | Complete the [Python completion gates](docs/python-analysis.md#completion-contract-and-remaining-gates); retain the AST helper until parity, compatibility, integration and cutover acceptance pass |
 | P2 | Rust Tree-sitter backend and language facts | Next parser milestone; Rust analysis not implemented | Model Rust structs, enums, traits, impls, functions and modules honestly; no build scripts or macro execution |
 | I4 | Broader language/model capabilities | Later | Independent use cases justify each extension without weakening the boundary |
 
@@ -44,8 +44,65 @@ generic traversal; **G3** existing discovery/FastAPI metadata; **G4** grammar,
 encoding and failure compatibility; **G5** native identity/product integration;
 **G6** existing-engine usefulness, operations and approved cutover. See the
 [contract, inventory and blockers](docs/python-analysis.md#completion-contract-and-remaining-gates).
-Development uses an explicitly selected Python 3.12 comparison lane; production's
-Python >=3.12 contract is unchanged. Test counts do not establish completion.
+Development's Unicode generation/check and CI oracle use exact CPython 3.12.11 /
+Unicode 15.0.0; this oracle pin does not narrow production's trusted Python >=3.12
+contract. Test counts do not establish completion.
+
+The current uncommitted integrated batch is `python-ruff-private-facts-4` with
+frontend policy `python-ruff-private-2-py312-versioned-compatibility`. Raw identifiers
+are gated to static Unicode-15 XID data before Ruff whole-name NFKC, not compiler or
+latest-Unicode admission. Named escapes include 473 aliases and algorithmic
+CJK/Hangul names, preserving surrogates and redaction. Contextual type comments,
+including ignores, use a bounded compatibility prepass and span correction;
+actual type comments in f-string replacement fields and parameter-internal comments
+with lexically active lambda/if/else/for/async/yield prefixes remain unsupported.
+The latter uses a constant-space cancellable token scan; closed complex
+subexpressions, completed annotations before defaults, trailing comments and
+ignores do not trigger that exclusion. Source
+decoding admits UTF-8/BOM/eligible cookies and finite Latin-1 aliases, hashes original
+bytes, and bounds decoded text at 2 MiB/file and 32 MiB/run in addition to original
+1 MiB/file and 16 MiB/run caps. Router targets count 128 normalized Python characters.
+Other codecs, strict UTF-8 physical-line versus PEG opening-line differences,
+malformed UTF-8 comment admission, format-spec exception taxonomy, exact failures
+and resource closure remain open. Invalid named escapes now use ordinary token
+opening lines or matching f-string closing lines, preserving nested-failure
+precedence. G2/G4–G6 are not closed.
+
+Four Ruff source files now carry the maintained patch: default-false AST-only
+duplicate-keyword policy, bare f-string mapping keys only in AST-only mode, and
+TypeVarTuple/ParamSpec default version checks matching TypeVar (PY312 errors with
+either AST-only setting, PY313 accepted). The five local crates and Git delivery
+with `publish = false` are unchanged. Current provenance is 85 vendor files / 65
+source files / 1,881,065 bytes; the source inventory is 235 paths, including pinned
+Unicode inputs, generated data, notices and generation/check tooling.
+
+**Current integrated evidence:** all 75 Ruff tests (including nine opt-in tests)
+passed, with 188 complete positive fact/ID/diagnostic/raw-order comparisons and
+32 matching negative failure-line cases (16 new multiline named-escape cases).
+The contextual oracle passed 787 asserted outcomes, including finite exclusions;
+four strict-UTF-8 differences are asserted separately (two multiline locations,
+two comment-byte admission cases). Exhaustive Unicode checks covered 1,114,112
+membership points and 190,293 name probes; source and HTTP-method oracles passed.
+The library passed 660 tests (183 ignored), adapter/engine targets passed 18/8,
+and explicit reference/native gates passed 165/3. Together with Ruff's nine
+opt-in tests, 177 explicit tests passed, including known-difference assertions;
+this is not an all-parity count. Scripts passed 192 tests; exhaustive data,
+85-file/65-source/1,881,065-byte vendor and 235-path source checks, and product
+formatting passed. Historical facts-3 results remain separate.
+
+**Final reruns:** after the equivalent type-comment boolean simplification,
+product formatting, all eight type-comment tests (including the 787-case oracle)
+and all-target product Clippy with `--no-deps -- -D warnings` passed.
+The first broad command timed out at 200 seconds; processes were checked stopped
+and exact owned temporary data removed. The ten-minute rerun completed all tests
+before the now-resolved Clippy finding—there was no test failure. The exported
+checkout consumer passed offline fresh 105-package lock resolution and one full
+independent native TypeScript public-API test, with five contained Ruff crates,
+ABI 0.1.5 and source-hash rechecks. Its configured owned scratch was cleaned.
+This was a source-snapshot check, not a Git-commit attestation or validation of
+later documentation bytes. See the [Python ledger](docs/python-analysis.md#current-ruff-compatibility-batch-frontend-2--private-facts-4)
+for the tested snapshot hash and guarded cache-cleanup record. No production cutover
+is claimed.
 
 - Pin Tree-sitter 0.25.10, JavaScript grammar 0.25.0 and TypeScript/TSX grammar
   0.23.2 exactly, plus language ABI bridge 0.1.5 directly for downstream Rust 1.89

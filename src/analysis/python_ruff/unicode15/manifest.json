@@ -1,0 +1,55 @@
+{
+  "aliases_count": 473,
+  "continue_count": 139463,
+  "inputs": {
+    "DerivedCoreProperties.txt": {
+      "bytes": 1053943,
+      "sha256": "d367290bc0867e6b484c68370530bdd1a08b6b32404601b8c7accaf83e05628d",
+      "url": "https://www.unicode.org/Public/15.0.0/ucd/DerivedCoreProperties.txt"
+    },
+    "LICENSE.txt": {
+      "bytes": 1995,
+      "sha256": "e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96",
+      "url": "https://www.unicode.org/license.txt"
+    },
+    "NameAliases.txt": {
+      "bytes": 16248,
+      "sha256": "3e39509e8fae3e5d50ba73759d0b97194501d14a9c63107a6372a46b38be18e8",
+      "url": "https://www.unicode.org/Public/15.0.0/ucd/NameAliases.txt"
+    },
+    "ReadMe.txt": {
+      "bytes": 635,
+      "sha256": "53672c0d0b5185e3cf04c8e970d544c3af81ae7c8eeba0b9cf6d355aa954ae1f",
+      "url": "https://www.unicode.org/Public/15.0.0/ucd/ReadMe.txt"
+    },
+    "UnicodeData.txt": {
+      "bytes": 1913704,
+      "sha256": "806e9aed65037197f1ec85e12be6e8cd870fc5608b4de0fffd990f689f376a73",
+      "url": "https://www.unicode.org/Public/15.0.0/ucd/UnicodeData.txt"
+    }
+  },
+  "max_name_record_bytes": 95,
+  "membership_sha256": "9f40c2d1d6da73889efd15982c55dc4ede677584a07bf0aa8908c9124c7fdb72",
+  "names_count": 35296,
+  "oracle": "CPython 3.12.11 / unicodedata 15.0.0; isolated stdlib",
+  "start_count": 136323,
+  "tables": {
+    "cjk.tsv": {
+      "bytes": 126,
+      "sha256": "5b263c76c24d0d4fe459a70a40dd28fab671524987e05f0bebc0120be028d766"
+    },
+    "continue.tsv": {
+      "bytes": 10850,
+      "sha256": "3450720d38cf19f2227e65c5fa29d9e97a11d01c850935a4e71e5bbaac56051c"
+    },
+    "names.tsv": {
+      "bytes": 1130168,
+      "sha256": "e253b72cb380c601852936f118a00857c7cd10d24ce5805c573493da07667ba4"
+    },
+    "start.tsv": {
+      "bytes": 9338,
+      "sha256": "e4e8fcb73f908e67dee0fc98d72d3affc5d7511def2da20bf84096313b9523cb"
+    }
+  },
+  "unicode_version": "15.0.0"
+}

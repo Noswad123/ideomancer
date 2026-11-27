@@ -143,7 +143,7 @@ impl Metadata<'_> {
 fn literal_error(error: literals::Error) -> Error {
     match error {
         literals::Error::Cancelled => Error::Cancelled,
-        literals::Error::UnsupportedNamedEscape => Error::Unsupported("named Unicode escape"),
+        literals::Error::InvalidNamedEscape => Error::Unsupported("literal validation invariant"),
         _ => Error::Unsupported("literal decoding"),
     }
 }
@@ -324,7 +324,7 @@ impl Driver<'_> {
             for &id in targets {
                 self.tick()?;
                 if let Shape::Name(name) = &self.arena[id].shape {
-                    if name.len() <= 128 {
+                    if name.chars().take(129).count() <= 128 {
                         let target = self.render(id)?;
                         let value = self.encode_metadata(&Metadata::Host {
                             constructor: &callee,
@@ -343,7 +343,7 @@ impl Driver<'_> {
             for &id in targets {
                 self.tick()?;
                 if let Shape::Name(name) = &self.arena[id].shape {
-                    if name.len() <= 128 {
+                    if name.chars().take(129).count() <= 128 {
                         let target = self.render(id)?;
                         let value = self.encode_metadata(&Metadata::Prefix {
                             constructor: &callee,
@@ -368,6 +368,7 @@ impl Driver<'_> {
         class: bool,
         asynchronous: bool,
     ) -> Result<TextRange> {
+        let range = self.corrected_range(type_comments::NodeKind::Statement, range);
         let end = self
             .keywords
             .partition_point(|(_, r)| r.start() < name.start());

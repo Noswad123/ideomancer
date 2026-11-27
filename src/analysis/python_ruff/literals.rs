@@ -19,7 +19,7 @@ pub(super) struct Part<'a> {
 pub(super) enum Error {
     InvalidSyntax,
     OutOfRange,
-    UnsupportedNamedEscape,
+    InvalidNamedEscape,
     Cancelled,
 }
 
@@ -56,7 +56,45 @@ fn normalized(chars: &mut Peekable<Chars<'_>>, ch: char) -> char {
     }
 }
 
-fn escaped(chars: &mut Peekable<Chars<'_>>, ch: char) -> Result<CodePoint, Error> {
+fn escaped(
+    chars: &mut Peekable<Chars<'_>>,
+    ch: char,
+    check: &mut dyn FnMut() -> bool,
+) -> Result<CodePoint, Error> {
+    if ch == 'N' {
+        if chars.next() != Some('{') {
+            return Err(Error::InvalidNamedEscape);
+        }
+        let mut name = [0u8; 95];
+        let mut length = 0usize;
+        let mut invalid = false;
+        loop {
+            if check() {
+                return Err(Error::Cancelled);
+            }
+            match chars.next() {
+                Some('}') => break,
+                Some(ch) => {
+                    if ch.is_ascii() && length < name.len() {
+                        name[length] = ch as u8;
+                        length += 1;
+                    } else {
+                        invalid = true;
+                    }
+                }
+                None => return Err(Error::InvalidNamedEscape),
+            }
+        }
+        if invalid {
+            return Err(Error::InvalidNamedEscape);
+        }
+        return super::unicode15::lookup_name_15(
+            std::str::from_utf8(&name[..length]).expect("ASCII name"),
+            check,
+        )
+        .map_err(|_| Error::Cancelled)?
+        .ok_or(Error::InvalidNamedEscape);
+    }
     let digits = match ch {
         'x' => 2,
         'u' => 4,
@@ -93,7 +131,6 @@ fn escaped(chars: &mut Peekable<Chars<'_>>, ch: char) -> Result<CodePoint, Error
             't' => 9,
             'v' => 11,
             '\\' | '\'' | '"' => ch as u32,
-            'N' => return Err(Error::UnsupportedNamedEscape),
             _ => unreachable!("unknown escapes are emitted as two events"),
         }
     };
@@ -150,7 +187,7 @@ where
                     self.pending = Some(CodePoint::from(ch));
                     Ok(CodePoint::from('\\'))
                 }
-                Some(ch) => escaped(chars, ch),
+                Some(ch) => escaped(chars, ch, &mut self.cancelled),
             };
             if result.is_err() {
                 self.stopped = true;
@@ -366,10 +403,28 @@ mod tests {
             points(r"\uD800\U0010FFFF", false),
             Ok(vec![0xd800, 0x10ffff])
         );
+        assert_eq!(points(r"\N{SPACE}", false), Ok(vec![32]));
         assert_eq!(
-            points(r"\N{SPACE}", false),
-            Err(Error::UnsupportedNamedEscape)
+            points(r"\N{NULL}\ud800\N{latin capital letter a}", false),
+            Ok(vec![0, 0xd800, 65])
         );
+        assert_eq!(
+            points(
+                r"\N{CJK UNIFIED IDEOGRAPH-4E00}\N{HANGUL SYLLABLE GA}",
+                false
+            ),
+            Ok(vec![0x4e00, 0xac00])
+        );
+        for content in [
+            r"\N",
+            r"\N{",
+            r"\N{}",
+            r"\N{NOT A NAME}",
+            r"\N{KEYCAP DIGIT ONE}",
+            r"\N{CUNEIFORM SIGN KALAM}",
+        ] {
+            assert_eq!(points(content, false), Err(Error::InvalidNamedEscape));
+        }
     }
 
     #[test]
@@ -403,7 +458,7 @@ mod tests {
             }
             for (suffix, error) in [
                 (r"\xzz", Error::InvalidSyntax),
-                (r"\N{SPACE}", Error::UnsupportedNamedEscape),
+                (r"\N{NOT A UNICODE NAME}", Error::InvalidNamedEscape),
                 (r"\U00110000", Error::OutOfRange),
             ] {
                 let content = format!("{}{suffix}", "x".repeat(cap + 1));

@@ -18,8 +18,11 @@ not part of a build. No local crate needs a build script or external generated i
 manifests as provenance, not ancestor Cargo configuration. `LICENSE` is the complete
 upstream license, including RustPython attribution. `provenance.json` records the
 immutable pin, retrieval hashes, pristine source hashes and closed file inventory.
-`patches/ast-only-policy.patch` is the only source change. Adapted manifests are
-reviewed local changes, not upstream originals.
+`patches/ast-only-policy.patch` contains the only source changes: the reviewed
+four-file AST-only/target-version compatibility patch in parser `options.rs`,
+`expression.rs`, `statement.rs` and `pattern.rs`. Adapted manifests are reviewed
+local changes, not upstream originals. Reversing the exact patch restores all 65
+pristine source hashes; no fuzzy application or additional source edits are allowed.
 
 Run `python3.12 -B scripts/check_ruff_vendor.py` from the repository root for
 read-only integrity, path, metadata, manifest and policy checks. The verifier
@@ -48,10 +51,19 @@ crate, optional serialization/schema feature or upstream dev dependency is enabl
 
 ## Narrow Parser Policy
 
-`ParseOptions::with_ast_only(true)` only omits duplicate call/class-header keyword
-validation before its diagnostic is emitted. It defaults to false in both option
-constructors. It is not a general Python AST-versus-compiler semantic mode.
-Generator, argument-order and other syntax validation remain unchanged.
+`ParseOptions::with_ast_only(true)` omits duplicate call/class-header keyword
+validation before its diagnostic is emitted and admits bare f-string mapping-pattern
+keys through the existing literal/string parser, matching the CPython AST contract
+rather than compiled-code validation. It defaults to false in both option
+constructors; default-false mapping-key and duplicate-keyword behavior is unchanged.
+The shared pattern token sets are unchanged; this entry path does not admit t-strings.
+It is not a general Python AST-versus-compiler semantic mode. Generator,
+argument-order and other syntax validation remain unchanged.
+
+TypeVarTuple and ParamSpec defaults now use the same unsupported-version diagnostic
+and `=`-through-default range as TypeVar defaults, independently of AST-only policy.
+Python 3.12 rejects all three defaults through that channel; Python 3.13 allows valid
+defaults. Python 3.12 type parameters without defaults remain allowed.
 
 Consumers must select the intended Python version and require BOTH `errors()` and
 `unsupported_syntax_errors()` to be empty before inspecting a tree, equivalently

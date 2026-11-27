@@ -52,6 +52,7 @@ require separate explicit authorization.
 | --- | --- | --- |
 | Rust behavior | Affected unit filter / integration target | Format, Clippy and broader affected regressions once |
 | Python extraction | Focused parser/candidate tests | Explicit trusted Python oracle; ignored cases are not acceptance |
+| Python Unicode data | Review pinned inputs, generator, tables, manifest and notices | `python3.12 -B scripts/check_python_unicode15.py` with exact CPython 3.12.11 / Unicode 15.0.0 |
 | Scripts/guidance | Focused script tests; review-only for prose changes | All script tests for script behavior changes; applicable policy checks |
 | Source paths | Review exact additions in `docs/source-files.txt` | `python3.12 -B scripts/check_checkout.py` |
 | Vendored Ruff | Review pin, pristine source, policy diff, manifests and notices together | `python3.12 -B scripts/check_ruff_vendor.py` |
@@ -73,8 +74,11 @@ Never use `cargo fmt --all`, which recursively touches local path dependencies.
 Scope Clippy to product code with `--all-targets --no-deps -- -D warnings`.
 The preserved Ruff sources are verified by hash and patch provenance instead of
 product formatting/Clippy policy; upstream compiler warnings remain visible.
-Vendored source stays pristine except for the reviewed two-file AST-only policy
-patch; adapted manifests disable optional features and upstream tests.
+Vendored source stays pristine except for the reviewed four-source-file policy
+patch (`options.rs`, `expression.rs`, `pattern.rs`, `statement.rs`). It adds the
+default-false duplicate-keyword/AST-only mapping-key policy and completes the
+TypeVarTuple/ParamSpec default version guards independently of AST-only mode.
+Adapted manifests disable optional features and upstream tests.
 
 ## Data Flow
 
@@ -85,6 +89,12 @@ the exported vendor tree, then performs locked public-API validation and compare
 source hashes before/after. The receipt is a working-tree content snapshot, not a
 Git-commit attestation. Pin a full actual authorized Git revision only once available.
 
+The source closure also retains pinned Unicode-15 inputs, generated tables,
+manifest and `src/analysis/python_ruff/unicode15/PROVENANCE.md`, including
+`inputs/LICENSE.txt`. Keep those permission notices with the data and derived
+tables; they are not relicensed as product code. Review their independent hash
+anchors together, not by blindly regenerating the inventory or manifest.
+
 ## Example usage
 
 For source/distribution changes, before final cache cleanup:
@@ -92,8 +102,15 @@ For source/distribution changes, before final cache cleanup:
 ```sh
 python3.12 -B scripts/check_checkout.py --source-dir .
 python3.12 -B scripts/check_ruff_vendor.py
+python3.12 -B scripts/check_python_unicode15.py
 RUSTUP_AUTO_INSTALL=0 python3.12 -B scripts/check_checkout_consumer.py --source-dir . --target-dir target --offline
 ```
+
+The Unicode checker requires installed trusted exact **CPython 3.12.11 / Unicode
+15.0.0**, also pinned in CI. Offline table reproduction is
+`python3.12 -B scripts/generate_python_unicode15.py` without `--fetch`; do not
+silently refresh pinned inputs/notices. This oracle/data gate does not narrow
+production's trusted Python >=3.12 prerequisite or authorize tool installation.
 
 Use a verified disk-backed, unique owned run under
 `${XDG_CACHE_HOME:-$HOME/.cache}/agent-test-runs` for `TMPDIR`, check free space
@@ -113,11 +130,26 @@ produce a usable registry crate via `cargo package`. See [releasing.md](releasin
 The Linux/macOS × Rust 1.89.0/stable CI configuration is not a hosted result; current
 results remain unknown. No compiler/toolchain installation is implied by any gate.
 
-Private Ruff parsing uses explicit PY312 and AST-only options on captured bytes,
-checks both parse/version error channels and publishes classification only. Entire
-CPython compatibility and fact lowering remain Pending; Python production remains
-the trusted >=3.12 AST helper. Preparse byte/token/depth limits and cooperative
+Private Ruff parsing uses explicit PY312 and AST-only options on captured bytes
+and checks both parse/version error channels. `parse_batch` is classification-only;
+the separate `extract_fact_candidates` implements bounded private generic fact
+lowering, helper-order metadata and finite Unicode/type-comment/UTF-8/Latin-1
+compatibility. It is not public Evidence or production dispatch. Full CPython
+compatibility remains Pending, including finite contextual exclusions, strict-UTF-8
+differences, format-spec exception taxonomy and exact failure/resource closure.
+Passing known-difference assertions is not parity. Python production remains the
+trusted >=3.12 AST helper. Preparse byte/token/depth limits and cooperative
 before/after deadlines are not hard timeout/RSS or complete recursion guarantees.
+See the [current Python validation ledger](python-analysis.md#current-ruff-compatibility-batch-frontend-2--private-facts-4)
+for completed gates and the guarded cache-cleanup record. Final product
+formatting, all eight type-comment tests (including the 787-case oracle) and
+all-target product Clippy passed after the equivalent boolean simplification.
+The offline exported-checkout consumer passed fresh 105-package resolution and its
+one independent native TypeScript public-API test, including Ruff containment,
+ABI 0.1.5 and source-hash rechecks. Its explicitly configured owned cache scratch
+was cleaned. These results attest a tested content snapshot, not an actual Git
+commit or later documentation bytes; workflow commands themselves are not evidence
+of completion.
 
 ## Cleanup commands
 
@@ -181,6 +213,8 @@ closeout instead.
 
 - [Release review](releasing.md), [third-party notices](third-party-notices.md).
 - [Ruff snapshot maintenance](../vendor/ruff/README.md), `scripts/check_ruff_vendor.py`.
+- `scripts/check_python_unicode15.py`, `scripts/generate_python_unicode15.py`,
+  `src/analysis/python_ruff/unicode15/PROVENANCE.md`: static data, notices and oracle.
 - `scripts/check_checkout.py`, `scripts/check_checkout_consumer.py`, `docs/source-files.txt`.
 - `AGENTS.md`, `.agents/skills/ideomancer-development/SKILL.md`,
   `.agents/skills/ideomancer-feature-closeout/SKILL.md`, `scripts/feature_cache.py`.

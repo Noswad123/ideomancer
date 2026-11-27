@@ -4,6 +4,9 @@
 mod expressions;
 mod facts;
 mod literals;
+mod source;
+mod type_comments;
+mod unicode15;
 pub(super) use facts::CandidateReport;
 
 pub(super) fn extract_fact_candidates(
@@ -22,7 +25,7 @@ use std::io::{self, Write};
 use std::time::Instant;
 
 const COMMIT: &str = "87f0feb21a1af67195bebf94d811770393f9f447";
-const POLICY: &str = "python-ruff-private-1-py312-ast-only-duplicate-keywords";
+const POLICY: &str = "python-ruff-private-2-py312-versioned-compatibility";
 const MAX_METADATA: usize = 4096;
 const MAX_REPORT: usize = 1024 * 1024;
 const MAX_TOKENS: usize = 200_000;
@@ -59,6 +62,8 @@ pub(super) struct Capabilities {
     pub(super) encoding_parity: CompatibilityStatus,
     pub(super) literal_and_span_normalization: CompatibilityStatus,
     pub(super) fact_lowering: CompatibilityStatus,
+    pub(super) source_profile: &'static str,
+    pub(super) fact_compatibility_profile: &'static str,
     pub(super) resource_policy: &'static str,
 }
 
@@ -77,6 +82,8 @@ impl Default for Capabilities {
             encoding_parity: CompatibilityStatus::Pending,
             literal_and_span_normalization: CompatibilityStatus::Pending,
             fact_lowering: CompatibilityStatus::Pending,
+            source_profile: "strict-utf8-and-latin1; eligible-cookies-and-bom; codec-registry-and-invalid-comment-bytes-pending",
+            fact_compatibility_profile: "fact-candidate-only-raw-unicode15-and-named-escapes; bounded-type-comment-attachment; parse-only-guards-pending",
             resource_policy: "preparse-bytes-and-lexical-tokens; cooperative-before-after-parser; no-hard-timeout-or-rss-bound",
         }
     }
@@ -91,6 +98,7 @@ pub(super) struct FileReport<'a> {
     pub(super) admission: Admission,
     pub(super) syntax: RuffSyntax,
     pub(super) diagnostic: Option<Diagnostic>,
+    pub(super) failure_reason: Option<&'static str>,
     pub(super) syntax_errors: usize,
     pub(super) unsupported_version_errors: usize,
     pub(super) error_counts_capped: bool,
@@ -104,6 +112,7 @@ pub(super) struct FileReport<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(super) enum Admission {
     Admitted,
+    InvalidSource,
     UnsupportedEncoding,
     ResourceLimit,
 }
@@ -120,7 +129,9 @@ pub(super) enum RuffSyntax {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(super) enum Diagnostic {
     EncodingCookieUnsupported,
-    InvalidUtf8,
+    SourceSyntax,
+    UnresolvedCodec,
+    DecodedLimit,
     Deadline,
     TokenLimit,
     DepthLimit,
@@ -234,11 +245,7 @@ fn identity<F: FnMut(Checkpoint) -> bool>(cancel: &mut Cancellation<F>) -> Parse
         target: "PY312",
         policy: POLICY,
         provenance_sha256: digest(PROVENANCE, cancel, Checkpoint::Identity),
-        implementation_sha256: digest(
-            include_bytes!("python_ruff.rs"),
-            cancel,
-            Checkpoint::Identity,
-        ),
+        implementation_sha256: implementation_digest(cancel),
         dependency_lock_sha256: digest(
             include_bytes!("../../Cargo.lock"),
             cancel,
@@ -249,6 +256,45 @@ fn identity<F: FnMut(Checkpoint) -> bool>(cancel: &mut Cancellation<F>) -> Parse
     let pins = serde_json::to_vec(&identity).expect("fixed identity serialization");
     identity.sha256 = digest(&pins, cancel, Checkpoint::Identity);
     identity
+}
+
+fn implementation_digest<F: FnMut(Checkpoint) -> bool>(cancel: &mut Cancellation<F>) -> String {
+    let mut hash = Sha256::new();
+    for (name, bytes) in [
+        (
+            "python_ruff.rs",
+            include_bytes!("python_ruff.rs").as_slice(),
+        ),
+        (
+            "source.rs",
+            include_bytes!("python_ruff/source.rs").as_slice(),
+        ),
+        (
+            "type_comments.rs",
+            include_bytes!("python_ruff/type_comments.rs").as_slice(),
+        ),
+    ]
+    .into_iter()
+    .chain(unicode15::identity_inputs().iter().copied())
+    {
+        hash_frame(&mut hash, name, bytes, cancel);
+    }
+    format!("{:x}", hash.finalize())
+}
+
+fn hash_frame<F: FnMut(Checkpoint) -> bool>(
+    hash: &mut Sha256,
+    name: &str,
+    bytes: &[u8],
+    cancel: &mut Cancellation<F>,
+) {
+    hash.update((name.len() as u64).to_be_bytes());
+    hash.update(name.as_bytes());
+    hash.update((bytes.len() as u64).to_be_bytes());
+    for chunk in bytes.chunks(4096) {
+        cancel.at(Checkpoint::Identity);
+        hash.update(chunk);
+    }
 }
 
 struct CountWriter {
@@ -285,6 +331,7 @@ fn file_report(source: &Source) -> FileReport<'_> {
         admission: Admission::ResourceLimit,
         syntax: RuffSyntax::NotParsed,
         diagnostic: Some(Diagnostic::Deadline),
+        failure_reason: None,
         syntax_errors: 0,
         unsupported_version_errors: 0,
         error_counts_capped: false,
@@ -383,6 +430,7 @@ fn run_context<'a, F: FnMut(Checkpoint) -> bool>(
         worst.admission = Admission::UnsupportedEncoding;
         worst.syntax = RuffSyntax::SyntaxAndUnsupportedVersion;
         worst.diagnostic = Some(Diagnostic::EncodingCookieUnsupported);
+        worst.failure_reason = Some(source::BOM_CONFLICT);
         worst.syntax_errors = usize::MAX;
         worst.unsupported_version_errors = usize::MAX;
         worst.syntax_error_line = Some(LogicalLine(usize::MAX));
@@ -395,6 +443,7 @@ fn run_context<'a, F: FnMut(Checkpoint) -> bool>(
             .filter(|&count| count <= limits.report)
             .ok_or(FrontEndError::ReportLimit)?;
     }
+    let mut decoded_total = 0usize;
     for (index, source) in sources.iter().enumerate() {
         let mut file = file_report(source);
         file.sha256 = digest(&source.bytes, cancel, Checkpoint::Hash);
@@ -403,6 +452,7 @@ fn run_context<'a, F: FnMut(Checkpoint) -> bool>(
                 &source.bytes,
                 &mut file,
                 limits,
+                &mut decoded_total,
                 cancel,
                 &mut |text, parsed, check| {
                     consumer(index, text, parsed, check);
@@ -420,6 +470,7 @@ fn run_context<'a, F: FnMut(Checkpoint) -> bool>(
             file.admission = Admission::ResourceLimit;
             file.syntax = RuffSyntax::NotParsed;
             file.diagnostic = Some(Diagnostic::Deadline);
+            file.failure_reason = None;
             file.syntax_errors = 0;
             file.unsupported_version_errors = 0;
             file.error_counts_capped = false;
@@ -435,21 +486,53 @@ fn classify<F: FnMut(Checkpoint) -> bool>(
     raw: &[u8],
     file: &mut FileReport<'_>,
     limits: Limits,
+    decoded_total: &mut usize,
     cancel: &mut Cancellation<F>,
     consume: &mut ValidatedFileConsumer<'_>,
 ) {
-    let bytes = raw.strip_prefix(b"\xef\xbb\xbf").unwrap_or(raw);
-    // Cookie detection precedes UTF-8 validation, including BOM/cookie conflicts.
-    if encoding_cookie(bytes) {
-        file.admission = Admission::UnsupportedEncoding;
-        file.diagnostic = Some(Diagnostic::EncodingCookieUnsupported);
-        return;
-    }
-    let Ok(text) = std::str::from_utf8(bytes) else {
-        file.admission = Admission::UnsupportedEncoding;
-        file.diagnostic = Some(Diagnostic::InvalidUtf8);
-        return;
+    // Cumulative reservations remain live until invocation end, even on failure.
+    let decoded = match source::decode(
+        raw,
+        2 * 1024 * 1024,
+        &mut |bytes| {
+            let next = decoded_total
+                .checked_add(bytes)
+                .filter(|&total| total <= 32 * 1024 * 1024)
+                .ok_or(source::Error::ResourceLimit)?;
+            *decoded_total = next;
+            Ok(())
+        },
+        &mut || cancel.at(Checkpoint::Decode),
+    ) {
+        Ok(decoded) => decoded,
+        Err(error) => {
+            match error {
+                source::Error::Syntax { line, reason } => {
+                    file.admission = Admission::InvalidSource;
+                    file.diagnostic = Some(Diagnostic::SourceSyntax);
+                    file.failure_reason = Some(reason);
+                    file.syntax_error_line = Some(LogicalLine(line));
+                }
+                source::Error::UnsupportedCodec | source::Error::UnresolvedCodec => {
+                    file.admission = Admission::UnsupportedEncoding;
+                    file.diagnostic = Some(if error == source::Error::UnresolvedCodec {
+                        Diagnostic::UnresolvedCodec
+                    } else {
+                        Diagnostic::EncodingCookieUnsupported
+                    });
+                }
+                source::Error::ResourceLimit => file.diagnostic = Some(Diagnostic::DecodedLimit),
+                source::Error::Cancelled => {}
+            }
+            return;
+        }
     };
+    debug_assert_eq!(
+        decoded.allocation_bytes == 0,
+        decoded.encoding == source::Encoding::Utf8
+    );
+    let text = decoded.text.as_ref();
+    let bytes = text.as_bytes();
     if let Err(diagnostic) = lexical_gate(text, file, limits, cancel) {
         file.diagnostic = Some(diagnostic);
         return;
@@ -489,6 +572,7 @@ fn classify<F: FnMut(Checkpoint) -> bool>(
     // AST references never escape the callback. Destruction, like parsing, has no
     // interrupt hook; this is cooperative accounting, not a stack/RSS sandbox.
     drop(parsed);
+    drop(decoded);
     cancel.at(Checkpoint::PostDrop);
 }
 
@@ -563,45 +647,6 @@ fn logical_line(bytes: &[u8], offset: usize) -> LogicalLine {
     LogicalLine(line)
 }
 
-// Same effective-cookie boundary as the private reference lane: first two
-// physical lines, second eligible only after a blank/comment first line.
-fn encoding_cookie(bytes: &[u8]) -> bool {
-    fn physical_line(bytes: &[u8]) -> (&[u8], &[u8]) {
-        let Some(end) = bytes.iter().position(|&byte| matches!(byte, b'\r' | b'\n')) else {
-            return (bytes, &[]);
-        };
-        let width = 1 + usize::from(bytes[end] == b'\r' && bytes.get(end + 1) == Some(&b'\n'));
-        (&bytes[..end], &bytes[end + width..])
-    }
-    fn trim(line: &[u8]) -> &[u8] {
-        &line[line
-            .iter()
-            .take_while(|&&byte| matches!(byte, b' ' | b'\t' | 0x0c))
-            .count()..]
-    }
-    fn cookie(line: &[u8]) -> bool {
-        let line = trim(line);
-        line.first() == Some(&b'#')
-            && line.windows(6).enumerate().any(|(index, window)| {
-                if window != b"coding" || !matches!(line.get(index + 6), Some(b':' | b'=')) {
-                    return false;
-                }
-                let rest = &line[index + 7..];
-                let skip = rest
-                    .iter()
-                    .take_while(|&&byte| matches!(byte, b' ' | b'\t'))
-                    .count();
-                rest.get(skip).is_some_and(|byte| {
-                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
-                })
-            })
-    }
-    let (first, rest) = physical_line(bytes);
-    let first = trim(first);
-    cookie(first)
-        || ((first.is_empty() || first.first() == Some(&b'#')) && cookie(physical_line(rest).0))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -633,7 +678,10 @@ mod tests {
         );
         assert_eq!(
             report.identity.implementation_sha256,
-            super::super::hash(include_bytes!("python_ruff.rs"))
+            implementation_digest(&mut Cancellation {
+                expired: false,
+                check: |_| false
+            })
         );
         assert_eq!(
             report.identity.dependency_lock_sha256,
@@ -691,6 +739,63 @@ mod tests {
                 assert!(!parsed.errors().is_empty(), "{text}");
             }
             assert_eq!(syntax(text), RuffSyntax::AcceptedByRuff, "{text}");
+        }
+    }
+
+    #[test]
+    fn version_defaults_reject_py312_and_accept_py313_in_both_parser_modes() {
+        for parameter in ["T = int", "*Ts = *tuple[int]", "**P = [int]"] {
+            for text in [
+                format!("type Alias[{parameter}] = int\n"),
+                format!("def f[{parameter}](): pass\n"),
+                format!("async def f[{parameter}](): pass\n"),
+                format!("class C[{parameter}]: pass\n"),
+            ] {
+                for ast_only in [false, true] {
+                    for constructor in [
+                        ParseOptions::from(Mode::Module),
+                        ParseOptions::from(ruff_python_ast::PySourceType::Python),
+                    ] {
+                        let parsed = parse_unchecked(
+                            &text,
+                            constructor
+                                .with_target_version(PythonVersion::PY312)
+                                .with_ast_only(ast_only),
+                        );
+                        assert!(parsed.errors().is_empty(), "{text}");
+                        assert!(!parsed.unsupported_syntax_errors().is_empty(), "{text}");
+                    }
+                    let parsed = parse_unchecked(
+                        &text,
+                        ParseOptions::from(Mode::Module)
+                            .with_target_version(PythonVersion::PY313)
+                            .with_ast_only(ast_only),
+                    );
+                    assert!(parsed.errors().is_empty(), "{text}");
+                    assert!(parsed.unsupported_syntax_errors().is_empty(), "{text}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bare_fstring_mapping_key_is_ast_only_and_malformed_patterns_stay_invalid() {
+        let text = "match value:\n    case {f'{key()}': capture}: body()\n";
+        for constructor in [
+            ParseOptions::from(Mode::Module),
+            ParseOptions::from(ruff_python_ast::PySourceType::Python),
+        ] {
+            let parsed =
+                parse_unchecked(text, constructor.with_target_version(PythonVersion::PY312));
+            assert!(!parsed.errors().is_empty());
+        }
+        assert_eq!(syntax(text), RuffSyntax::AcceptedByRuff);
+        for text in [
+            "match value:\n    case {f'{key()}' capture}: body()\n",
+            "match value:\n    case {f'{key()}':}: body()\n",
+            "match value:\n    case {f'{key()}': capture, **}: body()\n",
+        ] {
+            assert_eq!(syntax(text), RuffSyntax::StructuredSyntax);
         }
     }
 
@@ -763,17 +868,14 @@ mod tests {
         ] {
             let inputs = [source(bytes)];
             let report = parse_batch(&inputs).unwrap();
-            assert_eq!(report.files[0].admission, Admission::UnsupportedEncoding);
-            assert_eq!(
-                report.files[0].diagnostic,
-                Some(Diagnostic::EncodingCookieUnsupported)
-            );
-            assert_eq!(report.files[0].syntax, RuffSyntax::NotParsed);
+            assert_eq!(report.files[0].admission, Admission::Admitted);
+            assert_eq!(report.files[0].diagnostic, None);
+            assert_eq!(report.files[0].syntax, RuffSyntax::AcceptedByRuff);
         }
         let inputs = [source(b"x='\xff'\n")];
         assert_eq!(
             parse_batch(&inputs).unwrap().files[0].diagnostic,
-            Some(Diagnostic::InvalidUtf8)
+            Some(Diagnostic::SourceSyntax)
         );
         assert_eq!(syntax("x=1\n# coding: utf-8\n"), RuffSyntax::AcceptedByRuff);
         let bytes = "\u{03bb}=1\r\nx=2\ry=3\nz=4".as_bytes();
@@ -1025,10 +1127,8 @@ mod tests {
             ("f(x for x in xs, 1)\n".into(), false, false),
             ("def f(:\n".into(), false, false),
             ("type Alias[T = int] = T\n".into(), false, false),
-            // The pinned parser omits version errors in these two branches.
-            // Fact lowering has an explicit all-variant default exclusion.
-            ("def f[*Ts = *tuple[int]](): pass\n".into(), false, true),
-            ("class C[**P = [int]]: pass\n".into(), false, true),
+            ("def f[*Ts = *tuple[int]](): pass\n".into(), false, false),
+            ("class C[**P = [int]]: pass\n".into(), false, false),
             // Explicit, required differences, not unexplained matching cases.
             (format!("x={}\n", "1".repeat(4301)), false, true),
             ("\u{1c89}=1\n".into(), false, true),

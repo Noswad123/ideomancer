@@ -12,7 +12,7 @@ use ruff_python_ast::{self as ast, Expr, Mod, Stmt};
 use ruff_python_parser::Parsed;
 use ruff_text_size::{Ranged, TextRange};
 
-const FACT_POLICY: &str = "python-ruff-private-facts-3";
+const FACT_POLICY: &str = "python-ruff-private-facts-4";
 const OUTPUT: usize = 32 * 1024 * 1024;
 
 #[path = "metadata.rs"]
@@ -34,6 +34,11 @@ pub(in crate::analysis) struct CandidateFile<'a> {
     pub(in crate::analysis) sha256: String,
     pub(in crate::analysis) status: FactStatus,
     pub(in crate::analysis) reason: Option<&'static str>,
+    pub(in crate::analysis) failure_line: Option<usize>,
+    pub(in crate::analysis) compatibility_nodes: usize,
+    pub(in crate::analysis) compatibility_work: usize,
+    pub(in crate::analysis) compatibility_depth: usize,
+    pub(in crate::analysis) type_ignores: usize,
     pub(in crate::analysis) nodes: usize,
     pub(in crate::analysis) edges: usize,
 }
@@ -49,6 +54,7 @@ pub(in crate::analysis) enum FactStatus {
 
 #[derive(Debug)]
 pub(super) enum Error {
+    Syntax { line: usize, reason: &'static str },
     Unsupported(&'static str),
     Resource,
     Cancelled,
@@ -99,23 +105,45 @@ fn fact_identity<F: FnMut(Checkpoint) -> bool>(cancel: &mut Cancellation<F>) -> 
     let mut hash = Sha256::new();
     // Length framing prevents ambiguous concatenation. This is deliberately a
     // development/root-lock fingerprint, not an arbitrary consumer graph claim.
-    for bytes in [
-        include_bytes!("../python_ruff.rs").as_slice(),
-        include_bytes!("facts.rs").as_slice(),
-        include_bytes!("expressions.rs").as_slice(),
-        include_bytes!("metadata.rs").as_slice(),
-        include_bytes!("literals.rs").as_slice(),
-        include_bytes!("../python_facts.rs").as_slice(),
-        include_bytes!("../python_native/projection.rs").as_slice(),
-        include_bytes!("../python_native/scalars.rs").as_slice(),
-        PROVENANCE,
-        include_bytes!("../../../Cargo.lock").as_slice(),
-    ] {
-        hash.update((bytes.len() as u64).to_be_bytes());
-        for chunk in bytes.chunks(4096) {
-            cancel.at(Checkpoint::Identity);
-            hash.update(chunk);
-        }
+    for (name, bytes) in [
+        (
+            "python_ruff.rs",
+            include_bytes!("../python_ruff.rs").as_slice(),
+        ),
+        ("facts.rs", include_bytes!("facts.rs").as_slice()),
+        (
+            "expressions.rs",
+            include_bytes!("expressions.rs").as_slice(),
+        ),
+        ("metadata.rs", include_bytes!("metadata.rs").as_slice()),
+        ("literals.rs", include_bytes!("literals.rs").as_slice()),
+        ("source.rs", include_bytes!("source.rs").as_slice()),
+        (
+            "type_comments.rs",
+            include_bytes!("type_comments.rs").as_slice(),
+        ),
+        (
+            "python_facts.rs",
+            include_bytes!("../python_facts.rs").as_slice(),
+        ),
+        (
+            "projection.rs",
+            include_bytes!("../python_native/projection.rs").as_slice(),
+        ),
+        (
+            "scalars.rs",
+            include_bytes!("../python_native/scalars.rs").as_slice(),
+        ),
+        ("vendor/ruff/provenance.json", PROVENANCE),
+        (
+            "Cargo.lock",
+            include_bytes!("../../../Cargo.lock").as_slice(),
+        ),
+    ]
+    .into_iter()
+    .chain(unicode15::identity_inputs().iter().copied())
+    {
+        hash_frame(&mut hash, name, bytes, cancel);
     }
     result.implementation_sha256 = format!("{:x}", hash.finalize());
     result.sha256.clear();
@@ -187,6 +215,11 @@ fn extract_impl<'a, F: FnMut(Checkpoint) -> bool>(
                 sha256: "0".repeat(64),
                 status: FactStatus::ResourceLimit,
                 reason: Some("deadline"),
+                failure_line: None,
+                compatibility_nodes: 0,
+                compatibility_work: 0,
+                compatibility_depth: 0,
+                type_ignores: 0,
                 nodes: 0,
                 edges: 0,
             })
@@ -231,6 +264,7 @@ fn extract_impl<'a, F: FnMut(Checkpoint) -> bool>(
                 lines: Vec::new(),
                 pairs: Vec::new(),
                 keywords: Vec::new(),
+                comments: None,
                 projection: Projection::default(),
                 scope: ScopeId::default(),
                 owners: Vec::new(),
@@ -247,6 +281,12 @@ fn extract_impl<'a, F: FnMut(Checkpoint) -> bool>(
             let file = &mut report.files[index];
             file.nodes = driver.nodes;
             file.edges = driver.edges;
+            if let Some(plan) = &driver.comments {
+                file.compatibility_nodes = plan.compatibility_nodes;
+                file.compatibility_work = plan.normalization_work;
+                file.compatibility_depth = plan.max_depth;
+                file.type_ignores = plan.ignore_count;
+            }
             // Drop all owned normalization/scheduling/scope data before refunding.
             drop(driver);
             match result {
@@ -265,6 +305,10 @@ fn extract_impl<'a, F: FnMut(Checkpoint) -> bool>(
                         trace.truncate(trace_mark);
                     }
                     (file.status, file.reason) = match error {
+                        Error::Syntax { line, reason } => {
+                            file.failure_line = Some(line);
+                            (FactStatus::SyntaxError, Some(reason))
+                        }
                         Error::Unsupported(reason) => (FactStatus::UnsupportedSyntax, Some(reason)),
                         Error::Cancelled | Error::Sink(shared::Failure::Cancelled) => {
                             (FactStatus::ResourceLimit, Some("deadline"))
@@ -277,9 +321,17 @@ fn extract_impl<'a, F: FnMut(Checkpoint) -> bool>(
     )?;
     for (file, parsed) in report.files.iter_mut().zip(parser.files) {
         file.sha256 = parsed.sha256;
-        if parsed.admission == Admission::UnsupportedEncoding {
+        if parsed.admission == Admission::InvalidSource {
+            file.status = FactStatus::SyntaxError;
+            file.reason = parsed.failure_reason;
+            file.failure_line = parsed.syntax_error_line.map(|line| line.0);
+        } else if parsed.admission == Admission::UnsupportedEncoding {
             file.status = FactStatus::UnsupportedEncoding;
-            file.reason = Some("encoding");
+            file.reason = Some(if parsed.diagnostic == Some(Diagnostic::UnresolvedCodec) {
+                "unresolved codec membership"
+            } else {
+                "unsupported codec"
+            });
         } else if parsed.admission == Admission::ResourceLimit {
             file.status = FactStatus::ResourceLimit;
             file.reason = Some("frontend resource limit");
@@ -290,6 +342,10 @@ fn extract_impl<'a, F: FnMut(Checkpoint) -> bool>(
                 FactStatus::UnsupportedSyntax
             };
             file.reason = Some("parser diagnostics");
+            file.failure_line = parsed
+                .syntax_error_line
+                .or(parsed.unsupported_version_line)
+                .map(|line| line.0);
         }
     }
     let final_result = sink.finalize(&mut || cancel.at(Checkpoint::Final));
@@ -302,6 +358,7 @@ fn extract_impl<'a, F: FnMut(Checkpoint) -> bool>(
         for file in &mut report.files {
             file.status = FactStatus::ResourceLimit;
             file.reason = Some("run finalization");
+            file.failure_line = None;
         }
     }
     (report.facts, report.diagnostics) = sink.into_records();
@@ -320,6 +377,7 @@ fn extract_impl<'a, F: FnMut(Checkpoint) -> bool>(
         for file in &mut report.files {
             file.status = FactStatus::ResourceLimit;
             file.reason = Some("deadline");
+            file.failure_line = None;
         }
         shared::measure(&report, OUTPUT, &mut || false).map_err(|_| FrontEndError::ReportLimit)?;
     }
@@ -343,6 +401,7 @@ pub(super) struct Driver<'a> {
     lines: Vec<usize>,
     pairs: Vec<Paren>,
     keywords: Vec<(TokenKind, TextRange)>,
+    comments: Option<type_comments::CommentPlan>,
     projection: Projection,
     scope: ScopeId,
     owners: Vec<(String, bool)>,
@@ -455,6 +514,43 @@ impl Driver<'_> {
 
     fn consume(&mut self, text: &str, parsed: &Parsed<Mod>) -> Result<()> {
         self.index(text, parsed)?;
+        let plan = {
+            let sink = &mut self.sink;
+            let check = std::cell::RefCell::new(&mut *self.check);
+            let mut budget = |bytes| {
+                sink.charge(bytes, &mut || (check.borrow_mut())())
+                    .map_err(|error| match error {
+                        shared::Failure::Cancelled => type_comments::Error::Cancelled,
+                        _ => type_comments::Error::WorkingLimit,
+                    })
+            };
+            let mut cancelled = || (check.borrow_mut())();
+            if self.limits.nodes == 200_000 && self.limits.depth == 256 {
+                type_comments::analyze(text, parsed, &mut budget, &mut cancelled)
+            } else {
+                type_comments::analyze_with_limits(
+                    text,
+                    parsed,
+                    &mut budget,
+                    &mut cancelled,
+                    type_comments::Limits {
+                        nodes: self.limits.nodes,
+                        depth: self.limits.depth,
+                    },
+                )
+            }
+        }
+        .map_err(|error| match error {
+            type_comments::Error::Syntax { line } => Error::Syntax {
+                line,
+                reason: "type comment placement",
+            },
+            type_comments::Error::WorkingLimit => Error::Resource,
+            type_comments::Error::Cancelled => Error::Cancelled,
+            type_comments::Error::UnsupportedCategory(reason) => Error::Unsupported(reason),
+        })?;
+        debug_assert!(plan.working_charge <= self.sink.working());
+        self.comments = Some(plan);
         self.projection.root(&mut work(
             self.sink,
             self.check,
@@ -485,7 +581,7 @@ impl Driver<'_> {
         }
         let mut stack = Vec::new();
         let mut parent = None;
-        let mut raw_fstrings = Vec::new();
+        let mut fstrings = Vec::new();
         let mut temporary = 0usize;
         let mut stack_slots = 0;
         let mut string_slots = 0;
@@ -499,7 +595,14 @@ impl Driver<'_> {
                     self.keywords.push((token.kind(), range));
                 }
                 TokenKind::Name if !raw.is_ascii() => {
-                    return Err(Error::Unsupported("non-ASCII identifier"))
+                    if !unicode15::valid_identifier(raw, self.check)
+                        .map_err(|_| Error::Cancelled)?
+                    {
+                        return Err(Error::Syntax {
+                            line: logical_line(bytes, range.start().to_usize()).0,
+                            reason: "invalid Unicode 15 identifier",
+                        });
+                    }
                 }
                 TokenKind::Int => {
                     let b = raw.as_bytes();
@@ -521,43 +624,75 @@ impl Driver<'_> {
                         }
                     }
                 }
-                TokenKind::Comment => {
-                    let comment = raw
-                        .strip_prefix('#')
-                        .unwrap_or(raw)
-                        .trim_start_matches([' ', '\t']);
-                    if comment.starts_with("type:") {
-                        return Err(Error::Unsupported("type comment"));
-                    }
-                }
                 TokenKind::FStringStart => {
-                    if raw_fstrings.len() == string_slots {
-                        temporary = temporary.checked_add(4).ok_or(Error::Resource)?;
-                        self.charge(4)?;
+                    if fstrings.len() == string_slots {
+                        let bytes = 4 * std::mem::size_of::<(bool, bool)>();
+                        temporary = temporary.checked_add(bytes).ok_or(Error::Resource)?;
+                        self.charge(bytes)?;
                         string_slots += 1;
                     }
-                    raw_fstrings.push(token.unwrap_string_flags().is_raw_string());
+                    fstrings.push((token.unwrap_string_flags().is_raw_string(), false));
                 }
                 TokenKind::FStringEnd => {
-                    raw_fstrings.pop();
+                    // CPython decodes f-string text after its replacement fields,
+                    // locating this failure at the matching closing token. Nested
+                    // literal failures therefore take precedence over outer text.
+                    // Format-spec exception taxonomy remains Pending G4.
+                    if fstrings.pop().is_some_and(|(_, invalid)| invalid) {
+                        return Err(Error::Syntax {
+                            line: logical_line(bytes, range.start().to_usize()).0,
+                            reason: "invalid Unicode 15 named escape",
+                        });
+                    }
                 }
                 TokenKind::String | TokenKind::FStringMiddle => {
                     let flags = token.unwrap_string_flags();
                     let raw_string = if token.kind() == TokenKind::FStringMiddle {
-                        raw_fstrings.last().copied().unwrap_or(false)
+                        fstrings.last().is_some_and(|&(raw, _)| raw)
                     } else {
                         flags.is_raw_string()
                     };
                     if !raw_string && !flags.is_byte_string() {
-                        let mut slash = false;
-                        for (i, &b) in raw.as_bytes().iter().enumerate() {
-                            if i % 256 == 0 {
+                        let mut i = 0;
+                        while i < raw.len() {
+                            self.tick()?;
+                            if raw.as_bytes()[i] != b'\\' {
+                                i += 1;
+                                continue;
+                            }
+                            if raw.as_bytes().get(i + 1) != Some(&b'N') {
+                                i += 2;
+                                continue;
+                            }
+                            i += 2;
+                            let braced = raw.as_bytes().get(i) == Some(&b'{');
+                            i += usize::from(braced);
+                            let name_start = i;
+                            while i < raw.len() && raw.as_bytes()[i] != b'}' {
                                 self.tick()?;
+                                i += 1;
                             }
-                            if slash && b == b'N' && raw.as_bytes().get(i + 1) == Some(&b'{') {
-                                return Err(Error::Unsupported("named Unicode escape"));
+                            if !braced
+                                || i == raw.len()
+                                || unicode15::lookup_name_15(&raw[name_start..i], self.check)
+                                    .map_err(|_| Error::Cancelled)?
+                                    .is_none()
+                            {
+                                if token.kind() == TokenKind::FStringMiddle {
+                                    let Some((_, invalid)) = fstrings.last_mut() else {
+                                        return Err(Error::Unsupported("f-string index"));
+                                    };
+                                    *invalid = true;
+                                    break;
+                                }
+                                // Adjacent ordinary literals retain their own
+                                // opening-token location, not the group's start.
+                                return Err(Error::Syntax {
+                                    line: logical_line(bytes, range.start().to_usize()).0,
+                                    reason: "invalid Unicode 15 named escape",
+                                });
                             }
-                            slash = b == b'\\' && !slash;
+                            i += 1;
                         }
                     }
                 }
@@ -603,7 +738,7 @@ impl Driver<'_> {
             }
         }
         drop(stack);
-        drop(raw_fstrings);
+        drop(fstrings);
         self.release(temporary)?;
         Ok(())
     }
@@ -635,6 +770,12 @@ impl Driver<'_> {
             self.lines
                 .partition_point(|&start| start <= range.end().to_usize().saturating_sub(1)),
         )
+    }
+
+    fn corrected_range(&self, kind: type_comments::NodeKind, range: TextRange) -> TextRange {
+        self.comments
+            .as_ref()
+            .map_or(range, |plan| plan.corrected_range(kind, range))
     }
 
     fn symbol(&mut self, parameter: Option<&str>) -> Result<String> {
@@ -944,7 +1085,8 @@ impl Driver<'_> {
                 depth,
             )?,
             Stmt::Assign(n) => {
-                self.assignment(stmt.range(), &n.targets, None, Some(&n.value), depth)?
+                let range = self.corrected_range(type_comments::NodeKind::Assign, stmt.range());
+                self.assignment(range, &n.targets, None, Some(&n.value), depth)?
             }
             Stmt::AnnAssign(n) => self.assignment(
                 stmt.range(),
@@ -1095,8 +1237,7 @@ impl Driver<'_> {
             return Ok(());
         };
         self.node(depth)?;
-        // PY312 does not support any defaults. The pinned parser only reports
-        // the version error for TypeVar, not TypeVarTuple or ParamSpec.
+        // Defensive guard: the frontend rejects defaults through its version channel.
         for parameter in &parameters.type_params {
             self.node(depth + 1)?;
             if parameter.default().is_some() {
@@ -1404,7 +1545,8 @@ impl Driver<'_> {
         let name = self.text(parameter.name.as_str())?;
         let (line, end) = self.span(TextRange::new(
             parameter.name.range().start(),
-            parameter.range().end(),
+            self.corrected_range(type_comments::NodeKind::Parameter, parameter.range())
+                .end(),
         ));
         let annotation = parameter
             .annotation
@@ -1632,3 +1774,7 @@ impl Driver<'_> {
 #[cfg(test)]
 #[path = "../python_parity/ruff_facts_batch.rs"]
 mod ruff_facts_batch;
+
+#[cfg(test)]
+#[path = "../python_parity/ruff_compat_batch.rs"]
+mod ruff_compat_batch;

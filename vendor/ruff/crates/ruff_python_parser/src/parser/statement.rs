@@ -3477,6 +3477,7 @@ impl<'src> Parser<'src> {
         if self.eat(TokenKind::Star) {
             let name = self.parse_identifier();
 
+            let equal_token_start = self.node_start();
             let default = if self.eat(TokenKind::Equal) {
                 if self.at_expr() {
                     // test_err type_param_type_var_tuple_invalid_default_expr
@@ -3505,6 +3506,13 @@ impl<'src> Parser<'src> {
                 None
             };
 
+            if default.is_some() {
+                self.add_unsupported_syntax_error(
+                    UnsupportedSyntaxErrorKind::TypeParamDefault,
+                    self.node_range(equal_token_start),
+                );
+            }
+
             // test_err type_param_type_var_tuple_bound
             // type X[*T: int] = int
             ast::TypeParam::TypeVarTuple(ast::TypeParamTypeVarTuple {
@@ -3522,6 +3530,7 @@ impl<'src> Parser<'src> {
         } else if self.eat(TokenKind::DoubleStar) {
             let name = self.parse_identifier();
 
+            let equal_token_start = self.node_start();
             let default = if self.eat(TokenKind::Equal) {
                 if self.at_expr() {
                     // test_err type_param_param_spec_invalid_default_expr
@@ -3544,6 +3553,13 @@ impl<'src> Parser<'src> {
             } else {
                 None
             };
+
+            if default.is_some() {
+                self.add_unsupported_syntax_error(
+                    UnsupportedSyntaxErrorKind::TypeParamDefault,
+                    self.node_range(equal_token_start),
+                );
+            }
 
             // test_err type_param_param_spec_bound
             // type X[**T: int] = int

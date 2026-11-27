@@ -2,7 +2,7 @@
 use super::*;
 use serde_json::{json, Value};
 
-fn source(text: impl AsRef<[u8]>) -> Source {
+pub(super) fn source(text: impl AsRef<[u8]>) -> Source {
     let bytes = text.as_ref().to_vec();
     let hex = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
     Source {
@@ -439,19 +439,9 @@ fn ruff_facts_cross_family_candidate_is_not_parse_only() {
 #[test]
 fn ruff_facts_whole_file_exclusions_are_transactional() {
     for text in [
-        "eval()\nmatch value:\n    case [\u{212a}]: pass\n",
-        "eval()\ntype Alias[\u{212a}] = int\n",
-        "eval()\ntype Alias = int # type: ignore\n",
         "eval()\nmatch value:\n    case _: pass # type: int\n",
-        "eval()\ntype Alias[T: '\\N{LATIN CAPITAL LETTER A}'] = int\n",
-        "eval()\nmatch value:\n    case '\\N{LATIN CAPITAL LETTER A}': pass\n",
-        "before()\nvalue = \u{212a}\n",
-        "before()\npass # type: ignore\n",
         "before()\npass #type: int\n",
         "before()\npass #\t type: int\n",
-        "before()\nvalue = '\\N{LATIN CAPITAL LETTER A}'\n",
-        "before()\nvalue = f'\\N{LATIN CAPITAL LETTER A}{call()}'\n",
-        "before()\nvalue = rf'{\"\\N{LATIN CAPITAL LETTER A}\"}'\n",
     ] {
         let sources = [source(text)];
         let mut trace = Vec::new();
@@ -462,11 +452,7 @@ fn ruff_facts_whole_file_exclusions_are_transactional() {
             Some(&mut trace),
         )
         .unwrap();
-        assert_eq!(
-            report.files[0].status,
-            FactStatus::UnsupportedSyntax,
-            "{text}"
-        );
+        assert_eq!(report.files[0].status, FactStatus::SyntaxError, "{text}");
         assert_eq!(report.facts.len(), 1, "{text}");
         assert!(report.diagnostics.is_empty() && trace.is_empty());
     }
@@ -527,11 +513,17 @@ fn ruff_facts_decimal_and_byte_admission_is_explicit() {
             expected
         );
     }
-    for bytes in [b"# coding: utf-8\ncall()\n".as_slice(), b"call('\xff')\n"] {
+    for (bytes, expected) in [
+        (
+            b"# coding: utf-8\ncall()\n".as_slice(),
+            FactStatus::AcceptedFacts,
+        ),
+        (b"call('\xff')\n".as_slice(), FactStatus::SyntaxError),
+    ] {
         let sources = [source(bytes)];
         assert_eq!(
             extract_fact_candidates(&sources).unwrap().files[0].status,
-            FactStatus::UnsupportedEncoding
+            expected
         );
     }
     let mut input = source(b"\xef\xbb\xbfcall()\r\n");
@@ -560,7 +552,7 @@ fn ruff_facts_decimal_and_byte_admission_is_explicit() {
 fn ruff_facts_file_isolation_resources_and_latched_cancellation() {
     let mut sources = [
         source("from arbitrary import eval as probe\nprobe()\n"),
-        source("before()\nvalue = '\\N{SPACE}'\n"),
+        source("before()\npass # type: int\n"),
         source("def f[T: bound()]() -> result():\n    match subject():\n        case Record(child=[head, *tail]):\n            type Alias[U: other()] = rhs()\n"),
     ];
     for (i, s) in sources.iter_mut().enumerate() {
@@ -571,7 +563,7 @@ fn ruff_facts_file_isolation_resources_and_latched_cancellation() {
         report.files.iter().map(|f| f.status).collect::<Vec<_>>(),
         [
             FactStatus::AcceptedFacts,
-            FactStatus::UnsupportedSyntax,
+            FactStatus::SyntaxError,
             FactStatus::AcceptedFacts
         ]
     );
@@ -639,8 +631,8 @@ fn ruff_facts_validated_callback_has_one_parse_and_no_error_channel_lowering() {
         ("call()\n", 1),
         ("def f(:\n", 0),
         ("type Alias[T = int] = T\n", 0),
-        ("type Alias[*Ts = *tuple[int]] = int\n", 1),
-        ("type Alias[**P = [int]] = int\n", 1),
+        ("type Alias[*Ts = *tuple[int]] = int\n", 0),
+        ("type Alias[**P = [int]] = int\n", 0),
         (
             "match subject():\n    case [capture]: body()\ntype Alias[T: bound()] =\n",
             0,
@@ -698,8 +690,8 @@ fn ruff_facts_type_parameter_defaults_are_explicit_py312_exclusions() {
             );
             assert_eq!(report.facts.len(), 1);
             assert!(report.diagnostics.is_empty() && trace.is_empty());
-            if parameter.starts_with('*') {
-                assert_eq!(report.files[0].reason, Some("type parameter default"));
+            {
+                assert_eq!(report.files[0].reason, Some("parser diagnostics"));
                 let mut consumed = false;
                 run_consumer(
                     &sources,
@@ -712,14 +704,14 @@ fn ruff_facts_type_parameter_defaults_are_explicit_py312_exclusions() {
                     },
                 )
                 .unwrap();
-                assert!(consumed);
+                assert!(!consumed);
             }
         }
     }
 }
 
 #[test]
-fn ruff_facts_bare_fstring_mapping_key_parser_gap_is_not_waived() {
+fn ruff_facts_bare_fstring_mapping_key_is_ast_only_without_recovery() {
     let sources = [source(
         "eval()\nmatch value:\n    case {f'{key()}': capture}: body()\n",
     )];
@@ -728,8 +720,8 @@ fn ruff_facts_bare_fstring_mapping_key_parser_gap_is_not_waived() {
         consumes += 1;
     })
     .unwrap();
-    assert_eq!(consumes, 0);
-    assert_eq!(parsed.files[0].syntax, RuffSyntax::StructuredSyntax);
+    assert_eq!(consumes, 1);
+    assert_eq!(parsed.files[0].syntax, RuffSyntax::AcceptedByRuff);
     let mut trace = Vec::new();
     let report = extract_impl(
         &sources,
@@ -738,9 +730,13 @@ fn ruff_facts_bare_fstring_mapping_key_parser_gap_is_not_waived() {
         Some(&mut trace),
     )
     .unwrap();
-    assert_eq!(report.files[0].status, FactStatus::SyntaxError);
-    assert_eq!(report.facts.len(), 1);
-    assert!(report.diagnostics.is_empty() && trace.is_empty());
+    assert_eq!(report.files[0].status, FactStatus::AcceptedFacts);
+    assert!(report.facts.iter().any(|fact| fact.value == "key()"));
+    assert!(!trace.is_empty());
+    let text = std::str::from_utf8(&sources[0].bytes).unwrap();
+    assert!(!parse_unchecked(text, ParseOptions::from(Mode::Module))
+        .errors()
+        .is_empty());
 }
 
 #[test]
@@ -1175,6 +1171,7 @@ fn ruff_facts_work_regions_keep_only_live_file_state_and_owner_high_water() {
                 lines: Vec::new(),
                 pairs: Vec::new(),
                 keywords: Vec::new(),
+                comments: None,
                 projection: Projection::default(),
                 scope: ScopeId::default(),
                 owners: Vec::new(),
@@ -1192,7 +1189,11 @@ fn ruff_facts_work_regions_keep_only_live_file_state_and_owner_high_water() {
             assert_eq!(driver.owner_slots, 2);
             let file_indexes = (text.len() + 1) * std::mem::size_of::<usize>()
                 + driver.pairs.len() * 4 * std::mem::size_of::<Paren>()
-                + driver.keywords.len() * 4 * std::mem::size_of::<(TokenKind, TextRange)>();
+                + driver.keywords.len() * 4 * std::mem::size_of::<(TokenKind, TextRange)>()
+                + driver
+                    .comments
+                    .as_ref()
+                    .map_or(0, |plan| plan.working_charge);
             assert_eq!(
                 driver.sink.working(),
                 initial + file_indexes + driver.persistent_work
@@ -1213,7 +1214,6 @@ fn ruff_facts_work_regions_keep_only_live_file_state_and_owner_high_water() {
 #[test]
 #[ignore = "requires explicitly selected trusted Python >=3.12; Ruff complete facts and raw observation order"]
 fn ruff_facts_complete_arrays_and_raw_trace_match_trusted_ast_oracle() {
-    let python = crate::analysis::python_parity::oracle();
     let mut texts = fixtures();
     texts.extend(g3_fixtures());
     let mut sources: Vec<_> = texts.iter().map(source).collect();
@@ -1222,6 +1222,13 @@ fn ruff_facts_complete_arrays_and_raw_trace_match_trusted_ast_oracle() {
     metadata.module = "metadata.\u{03bb}".into();
     sources.push(metadata);
     sources.push(source(b"\xef\xbb\xbfcall()\r\n"));
+    assert_eq!(sources.len(), 117);
+    assert_oracle_sources(sources);
+}
+
+#[cfg(unix)]
+pub(super) fn assert_oracle_sources(sources: Vec<Source>) {
+    let python = crate::analysis::python_parity::oracle();
     let helper = include_str!("../../python_extract.py");
     let (helper, autocall) = helper
         .rsplit_once("\nif __name__ == \"__main__\":")
@@ -1230,7 +1237,9 @@ fn ruff_facts_complete_arrays_and_raw_trace_match_trusted_ast_oracle() {
     let script = format!(
         "{helper}\n{}",
         r#"
-assert sys.version_info >= (3, 12)
+import unicodedata
+assert sys.version_info[:2] == (3, 12)
+assert unicodedata.unidata_version == '15.0.0'
 sys.set_int_max_str_digits(4300)
 class Diagnostics(list):
     def append(self, value):
@@ -1303,18 +1312,6 @@ json.dump(traces, sys.stdout, ensure_ascii=True)
             "complete warnings case {index}"
         );
     }
-    // A distinct AST-positive spelling still fails in the pinned parser. Keep
-    // this outside the matching-case count; no source rewriting or recovery AST
-    // is used to turn it into the adjacent-string positive fixture above.
-    let gap = [source(
-        "match value:\n    case {f'{key()}': capture}: body()\n",
-    )];
-    let ast = crate::analysis::extract_captured(&python, &gap).unwrap();
-    assert!(ast.complete);
-    let native = extract_fact_candidates(&gap).unwrap();
-    assert_eq!(native.files[0].status, FactStatus::SyntaxError);
-    assert_eq!(native.facts.len(), 1);
-    assert!(native.diagnostics.is_empty());
     eprintln!(
         "Ruff oracle: {} complete-array cases; {} raw-order cases",
         sources.len(),

@@ -40,9 +40,11 @@ Git source; there is no separate fork/submodule or registry publication requirem
   here; preserve applicable notices for actual selected versions in binary bundles.
 
 There are 65 selected Rust source files in an 85-file vendor snapshot totaling
-1,878,654 bytes. Only two upstream source files carry the reviewed AST-only policy
-change: duplicate call/class-header keyword validation can be omitted via an
-explicit option that defaults to false. Adapted manifests disable optional features
+1,881,065 bytes. Four upstream source files carry the reviewed policy patch:
+duplicate call/class-header keyword validation can be omitted via an explicit
+AST-only option that defaults to false, bare f-string mapping keys are admitted
+only in that mode, and tuple/parameter-specification defaults receive the existing
+type-variable target-version guard. Adapted manifests disable optional features
 and upstream tests. The root lock merge adds five local and thirty registry packages
 while retaining prior product selections; the upstream lock is provenance, not the
 actual product closure. These facts do not constitute a whole-graph license audit.
@@ -53,12 +55,33 @@ provenance, hashes, manifest/notices policy and reversal to pristine source. See
 Keep vendored source pristine except for that patch; format only root product code
 with `RUSTUP_AUTO_INSTALL=0 cargo fmt --package ideomancer --check`, never `--all`.
 
-The private frontend publishes only captured-byte syntax classification, not an
-AST, facts, literals or source excerpts. Production Python remains the trusted
->=3.12 AST helper; CPython compatibility and fact lowering remain Pending. Source
+The private frontend supplies captured-byte syntax classification and a separate
+bounded generic fact candidate, not public Evidence, an AST or source excerpts.
+Production Python remains the trusted >=3.12 AST helper; complete CPython
+compatibility and public native integration remain Pending. Source
 distribution must retain these notices; executable distribution additionally needs
 actual target/feature, transitive, native and toolchain review and a notice-bearing
 bundle. `make install` copies only the executable and is not license clearance.
+
+### Unicode 15 Compatibility Data
+
+The fact candidate separately carries pinned Unicode **15.0.0** source inputs and
+derived identifier/name tables in
+[`src/analysis/python_ruff/unicode15/`](../src/analysis/python_ruff/unicode15/).
+Its [provenance](../src/analysis/python_ruff/unicode15/PROVENANCE.md) and
+[manifest](../src/analysis/python_ruff/unicode15/manifest.json) record the original
+URLs, exact bytes/hashes and derivation profile. This is distinct from the newer
+Unicode tables in Ruff's registry dependencies; it does not replace their notices.
+
+Retain the complete
+[Unicode License V3 notice](../src/analysis/python_ruff/unicode15/inputs/LICENSE.txt)
+with the data and derived tables, including in binary distributions that embed
+them. The pinned notice was retrieved from Unicode's mutable license URL on
+2026-11-27; its preserved bytes/hash, not that URL's future contents, are the
+reproduction anchor. These data are not relicensed under Ideomancer's MIT license.
+`python3.12 -B scripts/check_python_unicode15.py` checks the separate input/table
+anchors and the trusted CPython 3.12.11 / Unicode 15.0.0 derivation profile. This
+finite admission/name layer does not establish complete CPython compatibility.
 
 ## Sources and Pinned Revisions
 

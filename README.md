@@ -54,7 +54,7 @@ syntax frontend is now selected privately, not as a production fact backend.
 `src/analysis/python_ruff.rs` retains classification-only `parse_batch`; a separate
 private `extract_fact_candidates` now lowers a validated borrowed AST within the
 same single Ruff parse, only after both parse/version diagnostic channels are empty.
-Current private policy `python-ruff-private-facts-3` emits bounded generic facts, IDs
+Current private policy `python-ruff-private-facts-4` emits bounded generic facts, IDs
 and diagnostics with a module baseline, not an AST or source-excerpt dump. Literal
 retention is limited to the existing bounded API path/prefix/method metadata contract;
 tags, options, descriptions and other literal payloads remain redacted. The facts-1
@@ -64,17 +64,48 @@ opaque or clipped shapes still expose descendant calls. The facts-2 checkpoint a
 pattern forms, case guards/bodies, type aliases and function/async-function/class
 type parameters, without inventing capture bindings, generic scopes or alias-map
 mutations. Class-pattern syntax such as `Record()` is not a constructor call.
-Facts-3 adds helper-compatible decorator facts, function/async-function CLI/job/API
+The historical facts-3 checkpoint added helper-compatible decorator facts, function/async-function CLI/job/API
 route metadata and diagnostics, FastAPI host/APIRouter prefix assignments,
 `include_router` preludes and multi-target mutations. Class decorators emit facts
 and calls only, not discovery. Unknown/dynamic G3 properties produce null/unsupported
 metadata and diagnostics, not whole-file exclusions. A bounded source-backed text
 decoder preserves Python code points (including lone surrogates); HTTP methods use
 ASCII plus four exhaustively checked Unicode 15 uppercase preimages. These are G3
-outputs, not new private application rules. Known
-compatibility gaps include bare f-string mapping-pattern keys (CPython AST accepts,
-Ruff rejects without recovery) and Python 3.13 type-parameter defaults (explicitly
-rejected by the fact driver even where Ruff's PY312 diagnostics miss them).
+outputs, not new private application rules. The current frontend-2/facts-4 batch
+adds pinned Unicode **15.0.0** raw XID admission before Ruff's whole-name NFKC,
+static named escapes (including 473 aliases and algorithmic CJK/Hangul names),
+contextual type comments/ignores and bounded span correction, plus UTF-8/BOM/cookies
+and finite Latin-1 decoding. Surrogates and literal redaction remain preserved;
+router target limits count at most 128 normalized Python characters. Original-byte
+hashes and 1 MiB/file, 16 MiB/run input caps remain; decoded text is capped at
+2 MiB/file and 32 MiB/run. Four vendor source files now carry reviewed patches:
+bare f-string mapping keys are allowed only with `ast_only=true`, and all three
+type-parameter default variants report PY312 version errors independently of that
+option (PY313 accepts them). Other codecs remain unsupported/unresolved. Actual
+type comments in f-string replacement fields and parameter-internal comments with
+lexically active complex-expression prefixes remain finite exclusions. Strict
+UTF-8 physical failure lines can differ from CPython's multiline opening-token
+lines, and malformed comment bytes can differ in admission. Exact failures,
+format-spec exception taxonomy and resource closure remain open.
+
+**Current validation:** all **75 Ruff tests**, including nine opt-in tests, passed.
+All **188** positive cases matched complete facts/IDs/diagnostics and raw order;
+**32** negative cases matched failure lines. The **787-case** contextual oracle
+passed its asserted outcomes, including finite exclusions—not 787 parity matches.
+Four strict-UTF-8 known-difference cases are asserted separately. Exhaustive
+Unicode/source/HTTP-method oracles, 660 ordinary library tests (183 ignored),
+18 adapter + 8 engine tests, 165 reference + 3 native opt-in tests, 192 script tests,
+data/vendor/source checks and product formatting passed. The 177 explicit tests
+(165 + 3 + 9) include known-difference assertions, not an all-parity claim.
+After the boolean simplification, formatting, all eight type-comment tests
+(including the 787-case oracle) and all-target product Clippy passed. The offline
+exported-checkout consumer also passed fresh 105-package resolution and its one
+independent native TypeScript public-API test, with all five Ruff crates contained,
+ABI 0.1.5 and source hashes rechecked. This validates a source snapshot, not a Git
+commit or these later documentation bytes. See the
+[validation ledger and local closeout record](docs/python-analysis.md#current-ruff-compatibility-batch-frontend-2--private-facts-4).
+The exact CPython 3.12.11/Unicode 15 generation/check and CI oracle pin does not
+narrow production's trusted Python >=3.12 contract.
 CPython compatibility remains Pending; full G2–G6 gates stay open despite lowering
 coverage growth. Shared output/projection primitives do not
 unify the collectors; Tree-sitter private policy 15 remains regression/reference
@@ -118,8 +149,10 @@ it. Consumers can start with an explicit local path, then pin the full actual Gi
 revision of an approved upstream checkout or internal mirror once available.
 Personal/company Git-based distribution is the approved delivery model; no
 crates.io/registry publication is required (`publish = false`). The five local
-Ruff source crates, notices and policy patch travel in `vendor/ruff` with that
-checkout: no external fork, submodule or published Ruff version is needed.
+Ruff source crates, notices and four-file policy patch travel in `vendor/ruff` with that
+checkout: no external fork, submodule or published Ruff version is needed. Current
+provenance covers 85 vendor files / 65 source files / 1,881,065 bytes; the reviewed
+source inventory is 235 paths, including Unicode data/provenance and notices.
 Ideomancer is available under the
 [MIT License](LICENSE); copies and substantial portions must retain its notices.
 The scoped [native-parser third-party notices](docs/third-party-notices.md) are
@@ -937,9 +970,11 @@ incremental caches. Builds may be slower; the cache is deliberately disposable.
 The next feature rebuilds. Never store acceptance evidence in `target/`.
 
 The core tests use synthetic sources and agent/renderer stubs, need no provider
-credentials or `mmdc`, and need no Node/browser installation. Install Python 3.12
-for the workflow tests; they skip Python-dependent cases when it is unavailable.
-`IDEOMANCER_TEST_PYTHON` can select a trusted Python 3.12 executable.
+credentials or `mmdc`, and need no Node/browser installation. Workflow tests use
+trusted Python 3.12 and skip Python-dependent cases when it is unavailable.
+`IDEOMANCER_TEST_PYTHON` selects the trusted oracle executable. Unicode-data
+generation/checking requires exact CPython 3.12.11 / Unicode 15.0.0; see the
+[current Python batch](docs/python-analysis.md#current-ruff-compatibility-batch-frontend-2--private-facts-4).
 JS/TS extraction tests use the compiled-in pinned grammars, not an external
 Node/compiler installation. CI defines Linux/macOS jobs for Rust 1.89.0 and current
 stable, with pinned action revisions, Python, Rustfmt, Clippy, tests, reviewed
@@ -1007,8 +1042,9 @@ with real `mmdc` and its browser runtime:
 cargo test --locked --lib render::presentation::tests::local_mmdc_accepts_both_arrow_styles -- --ignored
 ```
 
-CI sets up Python 3.12 in each Rust/platform lane. Tests do not exercise production
-provider credentials. See the [release checks](docs/releasing.md) for local checkout
+CI pins CPython 3.12.11 in each Rust/platform lane for the Unicode-15 oracle and
+data check; production still supports trusted Python >=3.12. Tests do not exercise
+production provider credentials. See the [release checks](docs/releasing.md) for local checkout
 and independent-consumer commands and their limits.
 
 `make` (or `make build`) performs a locked release build and copies only the

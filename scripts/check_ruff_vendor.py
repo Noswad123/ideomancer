@@ -19,7 +19,7 @@ import tomllib
 COMMIT = "87f0feb21a1af67195bebf94d811770393f9f447"
 ARCHIVE_SHA256 = "e4613ad9fe6f7293510586649aab788e10610ab80fe9dd509ba7ac2364413631"
 LOCK_SHA256 = "ccc843838d16f203d18a3410dd120e72e750a89ee42164145ae9cbf181fb6f47"
-PROVENANCE_SHA256 = "afac544d1680d3b04933cab064ef32db1a486358f02ca73427345fc28b0a4c5a"
+PROVENANCE_SHA256 = "50bd49e58b189782d00921ed6b2e6fb2229fe244cabfb6de3901cf08105205c4"
 PRISTINE_SHA256 = "7e25402b858763700567914d71410161c80128b29605de3cdb29c8f03eafe44b"
 MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_TOTAL_BYTES = 4 * 1024 * 1024
@@ -27,6 +27,8 @@ SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 POLICY_FILES = (
     "crates/ruff_python_parser/src/parser/options.rs",
     "crates/ruff_python_parser/src/parser/expression.rs",
+    "crates/ruff_python_parser/src/parser/statement.rs",
+    "crates/ruff_python_parser/src/parser/pattern.rs",
 )
 LOCAL = {
     "ruff_python_parser": ("ruff_python_ast", "ruff_python_trivia", "ruff_text_size"),
@@ -219,14 +221,17 @@ def reverse_policy_patch(patch, sources):
         cursor = 0
         hunks = 0
         while i < len(lines) and lines[i].startswith("@@ "):
-            match = re.fullmatch(r"@@ -(\d+),(\d+) \+(\d+),(\d+) @@\n", lines[i])
+            match = re.fullmatch(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@\n", lines[i])
             require(match is not None, "invalid policy hunk")
-            old_start, old_count, new_start, new_count = map(int, match.groups())
-            start = new_start - 1
+            old_start, old_count, new_start, new_count = (
+                int(value) if value is not None else 1 for value in match.groups()
+            )
+            # Empty unified ranges identify the preceding line, not the first line.
+            start = new_start - (new_count != 0)
             require(cursor <= start <= len(current), "overlapping/out-of-range policy hunk")
             output.extend(current[cursor:start])
             cursor = start
-            require(old_start == len(output) + 1, "incorrect original policy hunk offset")
+            require(old_start == len(output) + (old_count != 0), "incorrect original policy hunk offset")
             i += 1
             old_used = new_used = 0
             while i < len(lines) and not lines[i].startswith(("@@ ", "--- a/")):
@@ -250,7 +255,61 @@ def reverse_policy_patch(patch, sources):
     return restored
 
 
-def validate_policy(options, expression):
+def apply_policy(options, expression, statement, pattern):
+    """Model only the reviewed edits on the four pristine named sources."""
+    def replace_once(source, old, new):
+        require(source.count(old) == 1, "expected policy edit locus changed")
+        return source.replace(old, new, 1)
+
+    options = replace_once(options, b"    pub(crate) target_version: PythonVersion,\n", b"""    pub(crate) target_version: PythonVersion,
+    /// Omit only duplicate keyword argument validation; retain all syntax diagnostics.
+    pub(crate) ast_only: bool,
+""")
+    options = replace_once(options, b"impl ParseOptions {\n", b"""impl ParseOptions {
+    /// Omit duplicate call and class-header keyword validation when enabled.
+    ///
+    /// Defaults to false. This is not a general AST-versus-compiler semantic mode.
+    /// Both ordinary and unsupported-version errors must still be checked before AST use.
+    #[must_use]
+    pub fn with_ast_only(mut self, ast_only: bool) -> Self {
+        self.ast_only = ast_only;
+        self
+    }
+
+""")
+    require(options.count(b"            target_version: PythonVersion::default(),\n") == 2,
+            "expected policy constructor loci changed")
+    options = options.replace(b"            target_version: PythonVersion::default(),\n",
+                              b"            target_version: PythonVersion::default(),\n            ast_only: false,\n")
+    expression = replace_once(expression, b"if !all_arg_names.insert(arg_name) {",
+                              b"if !self.options.ast_only && !all_arg_names.insert(arg_name) {")
+    for token, fixture in ((b"Star", b"type_param_type_var_tuple_bound"),
+                           (b"DoubleStar", b"type_param_param_spec_bound")):
+        locus = b"if self.eat(TokenKind::" + token + b") {\n            let name = self.parse_identifier();\n\n"
+        statement = replace_once(statement, locus, locus + b"            let equal_token_start = self.node_start();\n")
+        locus = b"            // test_err " + fixture + b"\n"
+        statement = replace_once(statement, locus, b"""            if default.is_some() {
+                self.add_unsupported_syntax_error(
+                    UnsupportedSyntaxErrorKind::TypeParamDefault,
+                    self.node_range(equal_token_start),
+                );
+            }
+
+""" + locus)
+    pattern = replace_once(pattern,
+                           b"        self.at_ts(MAPPING_PATTERN_START_SET) || self.at_soft_keyword()\n",
+                           b"""        self.at_ts(MAPPING_PATTERN_START_SET)
+            || self.at_soft_keyword()
+            || (self.options.ast_only && self.at(TokenKind::FStringStart))
+""")
+    return options, expression, statement, pattern
+
+
+def validate_policy(sources, originals):
+    require(set(sources) == set(originals) == set(POLICY_FILES), "unexpected policy source files")
+    expected = apply_policy(*(originals[name] for name in POLICY_FILES))
+    require(tuple(sources[name] for name in POLICY_FILES) == expected, "source differs from exact reviewed policy edits")
+    options, expression = (sources[name] for name in POLICY_FILES[:2])
     require(options.count(b"ast_only: false,") == 2, "both policy constructors must default false")
     require(b"pub(crate) ast_only: bool," in options, "missing narrow policy field")
     require(b"pub fn with_ast_only(mut self, ast_only: bool) -> Self" in options, "missing explicit policy builder")
@@ -276,7 +335,7 @@ def check_vendor(root):
     for name, expected in pristine.items():
         content = originals[name] if name in originals else (root / name).read_bytes()
         require(len(content) == expected["bytes"] and digest(content) == expected["sha256"], f"pristine source mismatch: {name}")
-    validate_policy(*(patched[name] for name in POLICY_FILES))
+    validate_policy(patched, originals)
     for name in LOCAL:
         crate = root / "crates" / name
         validate_manifest((crate / "Cargo.toml").read_bytes(), name, crate, root)

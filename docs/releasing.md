@@ -12,6 +12,9 @@ depends on three local Ruff crates under `vendor/ruff/crates`; their closure is
 five source crates. All five, upstream notices and the narrow policy patch travel
 with the Ideomancer checkout. No external fork, submodule, published Ruff version
 or separately maintained unpublished registry-version family is required.
+The reviewed source closure also carries Unicode-15 raw inputs, derived tables,
+manifest, provenance and their permission notice under
+`src/analysis/python_ruff/unicode15/`; keep them together in Git delivery.
 
 ## API / Interfaces
 
@@ -30,7 +33,10 @@ everything that may be tracked in Git. Review the actual authorized revision too
 
 1. Review source additions and inventory changes rather than regenerating blindly.
 2. Check the source closure and `check_ruff_vendor.py`'s anchored provenance,
-   manifests, notices, exact hashes and policy-patch reversal.
+   manifests, notices, exact hashes and four-source-file policy-patch reversal.
+   Run `check_python_unicode15.py` to verify independent official-input/table
+   hashes, reproducibility and exhaustive Unicode oracle checks; review data
+   provenance and permission notices with the source inventory.
 3. `check_checkout_consumer.py` exports only reviewed source into an owned external
    temporary run. It resolves a fresh independent consumer lockfile, then runs the
    locked public-API consumer tests with all local dependencies inside the export's
@@ -44,15 +50,34 @@ everything that may be tracked in Git. Review the actual authorized revision too
 
 ## Example usage
 
-These are gates for the coordinating maintainer, not results already obtained:
+These are gate commands for the coordinating maintainer, not automatic release
+approval. Record actual completed and pending results in the Python ledger:
 
 ```sh
 python3.12 -B -m unittest discover -s scripts -p 'test_*.py'
 python3.12 -B scripts/check_checkout.py --source-dir .
 python3.12 -B scripts/check_ruff_vendor.py
+python3.12 -B scripts/check_python_unicode15.py
 RUSTUP_AUTO_INSTALL=0 python3.12 -B scripts/check_checkout_consumer.py \
   --source-dir . --target-dir target --offline
 ```
+
+The Unicode checker requires the installed trusted exact **CPython 3.12.11 /
+Unicode 15.0.0** profile used by CI. Reproduce tables offline with
+`python3.12 -B scripts/generate_python_unicode15.py` (no `--fetch`); do not refresh
+inputs or notices implicitly. This is an oracle/data requirement, not a narrowing
+of production's trusted Python >=3.12 contract. For current reported results,
+the tested consumer snapshot hash and guarded cache-cleanup record, see the
+[Python ledger](python-analysis.md#current-ruff-compatibility-batch-frontend-2--private-facts-4).
+
+The final product formatting, all eight type-comment tests (including the 787-case
+oracle) and all-target product Clippy reruns passed after the equivalent boolean
+simplification. The exported-checkout consumer passed offline fresh 105-package
+lock resolution and one full independent native TypeScript public-API test, with
+all five Ruff crates contained, ABI 0.1.5 verified and source hashes rechecked.
+The explicitly configured unique owned cache scratch was cleaned. This validates
+the recorded source snapshot, not an actual Git commit or the later documentation
+edits, and does not constitute release/cutover approval.
 
 Configure a verified disk-backed `TMPDIR` under an owned unique run in
 `${XDG_CACHE_HOME:-$HOME/.cache}/agent-test-runs` before substantial work, check
@@ -81,18 +106,28 @@ path dependencies. The archive helpers and inventory below remain historical too
 and unit-test coverage, **not active delivery gates**. Do not run archive builds as
 a substitute for checkout-consumer acceptance, or claim CI still runs them.
 
-Keep third-party Rust source pristine except for the reviewed two-file AST-only
-policy patch. Adapted manifests disable optional features and upstream tests;
+Keep third-party Rust source pristine except for the reviewed four-source-file
+policy patch in `options.rs`, `expression.rs`, `pattern.rs` and `statement.rs`.
+AST-only mode admits duplicate keywords and bare f-string mapping keys; default
+mode retains rejection. TypeVarTuple/ParamSpec defaults receive the same version
+guard as TypeVar independently of AST-only mode (PY312 errors, PY313 accepted).
+Adapted manifests disable optional features and upstream tests;
 format only the product with
 `RUSTUP_AUTO_INSTALL=0 cargo fmt --package ideomancer --check`, never `--all`.
 Ruff syntax acceptance alone proves neither CPython compatibility nor semantic facts;
-production Python still uses the trusted >=3.12 AST helper.
+the separate private facts-4 lowering is implemented, not wholesale pending, but
+full CPython compatibility, public integration and production cutover remain open.
+Known-difference assertion passes are not parity matches. Production Python still
+uses the trusted >=3.12 AST helper.
 
 Personal/company scope does not permit private fixtures, identifiers or company
 paths in generic source. Existing history, ownership, source privacy, license,
 security and supported-platform gates below still apply. Binary bundles must retain
-`LICENSE`, `vendor/ruff/LICENSE`, vendored notices and applicable dependency/toolchain
-notices after actual target/feature review. `make install` copies only the executable,
+`LICENSE`, `vendor/ruff/LICENSE`, vendored notices, the Unicode data/derived-table
+permission notice at `src/analysis/python_ruff/unicode15/inputs/LICENSE.txt`, and
+applicable dependency/toolchain notices after actual target/feature review. Preserve
+the Unicode manifest/provenance with source data and do not silently refresh its
+hashed notice from a mutable URL. `make install` copies only the executable,
 not a license-cleared release bundle. Remote commits, pushes, releases and any
 publication still require explicit authorization.
 
@@ -101,7 +136,9 @@ publication still require explicit authorization.
 - [Development workflow](development-workflow.md): gate selection and cleanup last.
 - [Third-party notices](third-party-notices.md), [Ruff maintenance](../vendor/ruff/README.md).
 - `scripts/check_checkout.py`, `scripts/check_checkout_consumer.py`,
-  `scripts/check_ruff_vendor.py`, and `docs/source-files.txt`: active source gates.
+  `scripts/check_ruff_vendor.py`, `scripts/check_python_unicode15.py`, and
+  `docs/source-files.txt`: active source/data gates.
+- `src/analysis/python_ruff/unicode15/PROVENANCE.md`: data inputs, notice and generation profile.
 - [Readiness review](release-readiness.md): dated historical evidence and open approvals.
 
 ## Historical Registry-Package Archive Procedure (Inactive)

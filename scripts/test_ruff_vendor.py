@@ -120,6 +120,24 @@ class RuffProvenanceTests(unittest.TestCase):
         with self.assertRaisesRegex(checker.VendorError, "provenance digest"):
             checker.parse_provenance(json.dumps(self.value).encode())
 
+    def test_new_policy_source_and_sidecar_are_not_self_proving(self):
+        for name in checker.POLICY_FILES[2:]:
+            value = copy.deepcopy(self.value)
+            value["files"][name]["sha256"] = "0" * 64
+            value["policy"][name]["patched_sha256"] = "0" * 64
+            with self.subTest(name=name), self.assertRaisesRegex(checker.VendorError, "provenance digest"):
+                checker.parse_provenance(json.dumps(value).encode())
+
+    def test_policy_membership_cannot_expand_or_shrink(self):
+        for name in checker.POLICY_FILES:
+            value = copy.deepcopy(self.value)
+            del value["policy"][name]
+            with self.subTest(name=name), self.assertRaisesRegex(checker.VendorError, "policy files"):
+                checker.parse_provenance(json.dumps(value).encode())
+        self.value["policy"]["extra.rs"] = {}
+        with self.assertRaisesRegex(checker.VendorError, "policy files"):
+            checker.parse_provenance(json.dumps(self.value).encode())
+
     def test_missing_provenance_field(self):
         del self.value["policy"]
         with self.assertRaisesRegex(checker.VendorError, "fields"):
@@ -180,27 +198,77 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)', 'cfg(codspeed)'
 
 
 class RuffPolicyTests(unittest.TestCase):
-    OPTIONS = b'''pub(crate) ast_only: bool,
-pub fn with_ast_only(mut self, ast_only: bool) -> Self {
-    self.ast_only = ast_only;
-    self
-}
-ast_only: false,
-ast_only: false,
-'''
-    EXPRESSION = b"if !self.options.ast_only && !all_arg_names.insert(arg_name) {"
+    def setUp(self):
+        self.sources = {name: (VENDOR / name).read_bytes() for name in checker.POLICY_FILES}
+        self.originals = checker.reverse_policy_patch(
+            (VENDOR / "patches/ast-only-policy.patch").read_text(), self.sources)
+
+    def validate_change(self, index, old, new, count=1):
+        sources = dict(self.sources)
+        name = checker.POLICY_FILES[index]
+        self.assertIn(old, sources[name])
+        sources[name] = sources[name].replace(old, new, count)
+        with self.assertRaisesRegex(checker.VendorError, "exact reviewed policy edits"):
+            checker.validate_policy(sources, self.originals)
 
     def test_explicit_policy_defaults(self):
-        checker.validate_policy(self.OPTIONS, self.EXPRESSION)
+        checker.validate_policy(self.sources, self.originals)
 
     def test_each_constructor_must_default_false(self):
         for replacement in (b"ast_only: true,", b""):
-            with self.subTest(replacement=replacement), self.assertRaises(checker.VendorError):
-                checker.validate_policy(self.OPTIONS.replace(b"ast_only: false,", replacement, 1), self.EXPRESSION)
+            for count in (1, 2):
+                with self.subTest(replacement=replacement, count=count):
+                    self.validate_change(0, b"ast_only: false,", replacement, count)
 
     def test_policy_guard_must_precede_diagnostic(self):
-        with self.assertRaises(checker.VendorError):
-            checker.validate_policy(self.OPTIONS, b"if !all_arg_names.insert(arg_name) {")
+        self.validate_change(1, b"if !self.options.ast_only && !all_arg_names.insert(arg_name) {",
+                             b"if !all_arg_names.insert(arg_name) {")
+
+    def test_both_new_default_checks_are_exact(self):
+        check = b"""            if default.is_some() {
+                self.add_unsupported_syntax_error(
+                    UnsupportedSyntaxErrorKind::TypeParamDefault,
+                    self.node_range(equal_token_start),
+                );
+            }
+
+"""
+        for fixture in (b"type_param_type_var_tuple_bound", b"type_param_param_spec_bound"):
+            locus = check + b"            // test_err " + fixture
+            for changed in (b"", check.replace(b"default.is_some()", b"self.options.ast_only"),
+                            check.replace(b"TypeParamDefault", b"TypeParams"),
+                            check.replace(b"equal_token_start", b"start")):
+                with self.subTest(fixture=fixture, changed=changed):
+                    self.validate_change(2, locus, changed + b"            // test_err " + fixture)
+
+    def test_mapping_entry_is_ast_only_and_fstring_only(self):
+        gate = b"(self.options.ast_only && self.at(TokenKind::FStringStart))"
+        for changed in (b"self.at(TokenKind::FStringStart)",
+                        gate.replace(b"ast_only", b"fake_version_flag"),
+                        gate.replace(b"FStringStart", b"TStringStart"), b"false"):
+            with self.subTest(changed=changed):
+                self.validate_change(3, gate, changed)
+        self.validate_change(3, b"let str = self.parse_strings();", b"let str = self.parse_expression();")
+
+    def test_extra_source_edit_is_not_policy(self):
+        for index in range(4):
+            with self.subTest(index=index):
+                self.validate_change(index, b"\n", b"\n// unreviewed\n")
+
+    def test_policy_membership_is_exact(self):
+        for name in checker.POLICY_FILES:
+            sources = dict(self.sources)
+            del sources[name]
+            with self.subTest(name=name), self.assertRaisesRegex(checker.VendorError, "source files"):
+                checker.validate_policy(sources, self.originals)
+
+    def test_reviewed_patch_requires_all_four_paths(self):
+        patch = (VENDOR / "patches/ast-only-policy.patch").read_text()
+        for name in checker.POLICY_FILES:
+            with self.subTest(name=name), self.assertRaises(checker.VendorError):
+                checker.reverse_policy_patch(patch, {n: s for n, s in self.sources.items() if n != name})
+        with self.assertRaisesRegex(checker.VendorError, "missing policy patch file"):
+            checker.reverse_policy_patch(patch, {**self.sources, "extra.rs": b""})
 
     def test_exact_patch_roundtrip(self):
         patch = "--- a/demo.rs\n+++ b/demo.rs\n@@ -1,2 +1,2 @@\n same\n-old\n+new\n"

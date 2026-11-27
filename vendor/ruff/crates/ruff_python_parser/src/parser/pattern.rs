@@ -59,7 +59,9 @@ impl Parser<'_> {
 
     /// Returns `true` if the current token is a valid start of a mapping pattern.
     pub(super) fn at_mapping_pattern_start(&self) -> bool {
-        self.at_ts(MAPPING_PATTERN_START_SET) || self.at_soft_keyword()
+        self.at_ts(MAPPING_PATTERN_START_SET)
+            || self.at_soft_keyword()
+            || (self.options.ast_only && self.at(TokenKind::FStringStart))
     }
 
     /// Entry point to start parsing a pattern.
