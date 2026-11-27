@@ -1024,6 +1024,10 @@ mod tests {
             ("f(x for x in xs, 1)\n".into(), false, false),
             ("def f(:\n".into(), false, false),
             ("type Alias[T = int] = T\n".into(), false, false),
+            // The pinned parser omits version errors in these two branches.
+            // Fact lowering has an explicit all-variant default exclusion.
+            ("def f[*Ts = *tuple[int]](): pass\n".into(), false, true),
+            ("class C[**P = [int]]: pass\n".into(), false, true),
             // Explicit, required differences, not unexplained matching cases.
             (format!("x={}\n", "1".repeat(4301)), false, true),
             ("\u{1c89}=1\n".into(), false, true),

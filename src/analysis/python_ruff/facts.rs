@@ -12,7 +12,7 @@ use ruff_python_ast::{self as ast, Expr, Mod, Stmt};
 use ruff_python_parser::Parsed;
 use ruff_text_size::{Ranged, TextRange};
 
-const FACT_POLICY: &str = "python-ruff-private-facts-1";
+const FACT_POLICY: &str = "python-ruff-private-facts-2";
 const OUTPUT: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Serialize)]
@@ -986,6 +986,20 @@ impl Driver<'_> {
                 self.expression(&n.test, depth)?;
                 self.optional(n.msg.as_deref(), depth)?;
             }
+            Stmt::Match(n) => {
+                self.expression(&n.subject, depth)?;
+                for case in &n.cases {
+                    self.node(depth + 1)?;
+                    self.pattern(&case.pattern, depth + 2)?;
+                    self.optional(case.guard.as_deref(), depth + 1)?;
+                    self.statements(&case.body, depth + 1)?;
+                }
+            }
+            Stmt::TypeAlias(n) => {
+                self.expression(&n.name, depth)?;
+                self.type_parameters(n.type_params.as_deref(), None, depth + 1)?;
+                self.expression(&n.value, depth)?;
+            }
             Stmt::Global(n) => {
                 for _ in &n.names {
                     self.tick()?;
@@ -997,8 +1011,92 @@ impl Driver<'_> {
                 }
             }
             Stmt::Pass(_) | Stmt::Break(_) | Stmt::Continue(_) => {}
-            Stmt::Match(_) | Stmt::TypeAlias(_) | Stmt::IpyEscapeCommand(_) => {
-                return Err(Error::Unsupported("statement variant"))
+            Stmt::IpyEscapeCommand(_) => return Err(Error::Unsupported("statement variant")),
+        }
+        Ok(())
+    }
+
+    fn pattern(&mut self, pattern: &ast::Pattern, depth: usize) -> Result<()> {
+        self.node(depth)?;
+        match pattern {
+            ast::Pattern::MatchValue(n) => self.expression(&n.value, depth)?,
+            ast::Pattern::MatchSingleton(_) | ast::Pattern::MatchStar(_) => {}
+            ast::Pattern::MatchSequence(n) => {
+                for child in &n.patterns {
+                    self.pattern(child, depth + 1)?;
+                }
+            }
+            ast::Pattern::MatchMapping(n) => {
+                // AST fields group all keys before all corresponding patterns.
+                for key in &n.keys {
+                    self.expression(key, depth)?;
+                }
+                for child in &n.patterns {
+                    self.pattern(child, depth + 1)?;
+                }
+            }
+            ast::Pattern::MatchClass(n) => {
+                // The class expression is not a constructor call; keyword attrs
+                // and capture names are strings, not expression/binding edges.
+                self.expression(&n.cls, depth)?;
+                self.node(depth + 1)?;
+                for child in &n.arguments.patterns {
+                    self.pattern(child, depth + 2)?;
+                }
+                for keyword in &n.arguments.keywords {
+                    self.node(depth + 2)?;
+                    self.pattern(&keyword.pattern, depth + 3)?;
+                }
+            }
+            ast::Pattern::MatchAs(n) => {
+                if let Some(child) = &n.pattern {
+                    self.pattern(child, depth + 1)?;
+                }
+            }
+            ast::Pattern::MatchOr(n) => {
+                for child in &n.patterns {
+                    self.pattern(child, depth + 1)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn type_parameters(
+        &mut self,
+        parameters: Option<&ast::TypeParams>,
+        mut schedule: Option<&mut HeaderSchedule>,
+        depth: usize,
+    ) -> Result<()> {
+        let Some(parameters) = parameters else {
+            return Ok(());
+        };
+        self.node(depth)?;
+        // PY312 does not support any defaults. The pinned parser only reports
+        // the version error for TypeVar, not TypeVarTuple or ParamSpec.
+        for parameter in &parameters.type_params {
+            self.node(depth + 1)?;
+            if parameter.default().is_some() {
+                return Err(Error::Unsupported("type parameter default"));
+            }
+        }
+        for parameter in &parameters.type_params {
+            self.tick()?;
+            match parameter {
+                ast::TypeParam::TypeVar(n) => {
+                    if let Some(bound) = &n.bound {
+                        match &mut schedule {
+                            Some(schedule) => self.header_visits(
+                                schedule,
+                                bound,
+                                HeaderGroup::TypeParameters,
+                                depth + 1,
+                            )?,
+                            None => self.expression(bound, depth + 1)?,
+                        }
+                    }
+                }
+                ast::TypeParam::TypeVarTuple(_) | ast::TypeParam::ParamSpec(_) => {}
             }
         }
         Ok(())
@@ -1251,6 +1349,19 @@ impl Driver<'_> {
         })
     }
 
+    fn header_visits(
+        &mut self,
+        schedule: &mut HeaderSchedule,
+        expr: &Expr,
+        group: HeaderGroup,
+        depth: usize,
+    ) -> Result<()> {
+        self.arena_scope(|driver| {
+            let id = driver.normalize(expr, depth + 1)?;
+            driver.visits(id, Some((schedule, group)))
+        })
+    }
+
     fn stage(&mut self, schedule: &mut HeaderSchedule, metadata: HeaderMetadata) -> Result<()> {
         schedule.stage(metadata, 0, 200_000, &mut work(self.sink, self.check, None))?;
         Ok(())
@@ -1362,8 +1473,8 @@ impl Driver<'_> {
     }
 
     fn function(&mut self, n: &ast::StmtFunctionDef, depth: usize) -> Result<()> {
-        if !n.decorator_list.is_empty() || n.type_params.is_some() {
-            return Err(Error::Unsupported("decorator or type parameters"));
+        if !n.decorator_list.is_empty() {
+            return Err(Error::Unsupported("decorator"));
         }
         let previous = self.enter(n.name.as_str(), false)?;
         let value = self.text(n.name.as_str())?;
@@ -1456,6 +1567,7 @@ impl Driver<'_> {
             let shape = self.header_expression(&mut schedule, expr, ReturnAnnotation, depth)?;
             self.stage(&mut schedule, HeaderMetadata::Return(shape))?;
         }
+        self.type_parameters(n.type_params.as_deref(), Some(&mut schedule), depth + 1)?;
         self.drain(&mut schedule, DefinitionKind::Function, false)?;
         self.statements(&n.body, depth)?;
         self.drain(&mut schedule, DefinitionKind::Function, true)?;
@@ -1465,8 +1577,8 @@ impl Driver<'_> {
     }
 
     fn class(&mut self, n: &ast::StmtClassDef, depth: usize) -> Result<()> {
-        if !n.decorator_list.is_empty() || n.type_params.is_some() {
-            return Err(Error::Unsupported("decorator or type parameters"));
+        if !n.decorator_list.is_empty() {
+            return Err(Error::Unsupported("decorator"));
         }
         let previous = self.enter(n.name.as_str(), true)?;
         let value = self.text(n.name.as_str())?;
@@ -1485,6 +1597,7 @@ impl Driver<'_> {
                 self.drop_text(shape.value)?;
             }
         }
+        self.type_parameters(n.type_params.as_deref(), Some(&mut schedule), depth + 1)?;
         self.drain(&mut schedule, DefinitionKind::Class, false)?;
         self.statements(&n.body, depth)?;
         self.drain(&mut schedule, DefinitionKind::Class, true)?;

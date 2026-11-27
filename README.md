@@ -54,13 +54,20 @@ syntax frontend is now selected privately, not as a production fact backend.
 `src/analysis/python_ruff.rs` retains classification-only `parse_batch`; a separate
 private `extract_fact_candidates` now lowers a validated borrowed AST within the
 same single Ruff parse, only after both parse/version diagnostic channels are empty.
-Policy `python-ruff-private-facts-1` emits bounded generic facts, IDs and diagnostics
-with a module baseline, not an AST, literal payloads or source excerpts. Its first
-cross-family lane covers declarations/signatures, non-decorator header calls,
+Policy `python-ruff-private-facts-2` emits bounded generic facts, IDs and diagnostics
+with a module baseline, not an AST, literal payloads or source excerpts. The facts-1
+checkpoint covered declarations/signatures, non-decorator header calls,
 imports, assignments, ordinary suites and Python 3.12 generic expression families;
-opaque or clipped shapes still expose descendant calls. Decorators, patterns,
-generic declarations/type aliases and G3 framework metadata remain excluded.
-CPython compatibility remains Pending. Shared output/projection primitives do not
+opaque or clipped shapes still expose descendant calls. Facts-2 adds all eight match
+pattern forms, case guards/bodies, type aliases and function/async-function/class
+type parameters, without inventing capture bindings, generic scopes or alias-map
+mutations. Class-pattern syntax such as `Record()` is not a constructor call.
+Decorators and G3 constructors/include/router mutations remain blocked. Known
+compatibility gaps include bare f-string mapping-pattern keys (CPython AST accepts,
+Ruff rejects without recovery) and Python 3.13 type-parameter defaults (explicitly
+rejected by the fact driver even where Ruff's PY312 diagnostics miss them).
+CPython compatibility remains Pending; full G2–G6 gates stay open despite lowering
+coverage growth. Shared output/projection primitives do not
 unify the collectors; Tree-sitter private policy 15 remains regression/reference
 coverage. Production `python-static-8-generic-facts`, the AST helper, public API,
 evidence, CLI and default are unchanged. Byte/token/depth gates and cooperative

@@ -64,13 +64,39 @@ fn fixtures() -> Vec<String> {
         "def f(a: A=first(), a: B=second(), *x: V, x: K=third(), **w: W):\n    body()\n".into(),
         "target(key=first(), **mapping(), key=second())\n".into(),
         "class C(key=first(), **mapping(), key=second()):\n    body()\n".into(),
+        "match subject():\n    case constants.VALUE: body()\n    case None: other()\n    case True: yes()\n    case False: no()\n".into(),
+        "match subject():\n    case [head, *tail]: body()\n    case (*_,): other()\n    case []: empty()\n".into(),
+        "match subject():\n    case {'key': value, constants.KEY: [head, *tail], **rest}: body()\n".into(),
+        "match subject():\n    case pkg.Record(item, flag=True, child=[head, *tail]): body()\n".into(),
+        "match subject():\n    case ((1 | 2) as selected): body()\n    case capture: other()\n".into(),
+        "match subject():\n    case [same, same, *first, *second]: body()\n    case left | right: other()\n".into(),
+        "match subject():\n    case Record(key=first, key=second): body()\n    case {1: first, 1: second}: other()\n    case _: wildcard()\n    case capture: irrefutable()\n".into(),
+        "match subject():\n    case f'{value():{width()}.{precision()}f}' if guard(): body()\n".into(),
+        "match subject():\n    case {'' f'{key1()}': f'{value1()}', '' f'{key2()}': f'{value2()}'}: body()\n".into(),
+        "from early import eval as probe\nmatch probe():\n    case FastAPI(probe, prefix=capture) if probe():\n        from late import exec as probe\n        probe()\n    case APIRouter(probe, tags=[*capture]) if probe(): probe()\nprobe()\n".into(),
+        "match subject():\n    case Record(child=[head, *tail]) if guard():\n        match inner():\n            case {'key': (1 | 2) as selected, **rest}: body()\n".into(),
+        "before()\ntype Alias = int\nafter()\n".into(),
+        "type Alias[T: bound(), U: (left(), right()), *Ts, **P] = rhs()\n".into(),
+        "from arbitrary import eval as probe\ntype probe[probe: probe()] = probe()\nprobe()\n".into(),
+        "class C:\n    type Field[T: bound()] = rhs()\n    def method[U: method_bound()]():\n        type Local[V: local_bound()] = local_rhs()\n".into(),
+        "match subject():\n    case capture:\n        type Alias[T: bound()] = rhs()\n        after()\n".into(),
+        "def f[T](): pass\nclass C[T]: pass\n".into(),
+        "def f[T: bound(), U: (left(), right()), *Ts, **P](a: annotation()=default()) -> result():\n    body()\n".into(),
+        "async def f[T: bound(), *Ts, **P](a: annotation()=default(), *, k=keyword()) -> result():\n    await body()\n".into(),
+        "class C[T: bound(), U: (left(), right()), *Ts, **P](base(), metaclass=meta(), key=keyword()):\n    body()\n".into(),
+        "from early import eval as probe\ndef f[T: probe()](a=probe()) -> probe():\n    from late import exec as probe\n    probe()\n".into(),
+        "from early import eval as probe\nclass C[T: probe()](probe(), metaclass=probe()):\n    from late import exec as probe\n    probe()\n".into(),
+        "def outer[T: outer_bound()]():\n    def repeat[U: first_bound()]():\n        body()\n    def repeat[V: second_bound()]() -> result():\n        other()\n    class repeat[W: class_bound()](base()):\n        tail()\n".into(),
+        "type Alias[T: (lambda: bound()), *Ts, **P] = [element() for x in iterable() if condition()]\n".into(),
+        "type Alias[T: f'{bound():{width()}}'] = f'{rhs()}'\n".into(),
+        "\u{feff}# harmless comment\r\nclass C[T: bound()]:\r\n    type Field[U: other()] = rhs()\r\n    # trailing comment\r\nafter()\r\n".into(),
     ]
 }
 
 #[test]
 fn ruff_facts_cross_family_candidate_is_not_parse_only() {
     let cases = fixtures();
-    assert!(cases.len() >= 30);
+    assert_eq!(cases.len(), 75);
     for (index, text) in cases.iter().enumerate() {
         let sources = [source(text)];
         let report = extract_fact_candidates(&sources).unwrap();
@@ -94,10 +120,20 @@ fn ruff_facts_cross_family_candidate_is_not_parse_only() {
 fn ruff_facts_whole_file_exclusions_are_transactional() {
     for text in [
         "before()\n@decorator\ndef f(): pass\n",
-        "before()\nmatch value:\n    case _: pass\n",
-        "before()\ntype Alias = int\n",
-        "before()\ndef f[T](): pass\n",
-        "before()\nclass C[T]: pass\n",
+        "eval()\nmatch value:\n    case _:\n        @decorator\n        def f[T](): pass\n",
+        "eval()\nmatch value:\n    case _ if FastAPI(): pass\n",
+        "eval()\nmatch value:\n    case f'{receiver.include_router(router)}': pass\n",
+        "eval()\nmatch value:\n    case _: receiver.prefix = value\n",
+        "eval()\ntype Alias[T: FastAPI()] = int\n",
+        "eval()\ntype Alias = receiver.include_router(router)\n",
+        "eval()\ndef f[T: FastAPI()](): pass\n",
+        "eval()\nclass C[T: receiver.include_router(router)]: pass\n",
+        "eval()\nmatch value:\n    case [\u{212a}]: pass\n",
+        "eval()\ntype Alias[\u{212a}] = int\n",
+        "eval()\ntype Alias = int # type: ignore\n",
+        "eval()\nmatch value:\n    case _: pass # type: int\n",
+        "eval()\ntype Alias[T: '\\N{LATIN CAPITAL LETTER A}'] = int\n",
+        "eval()\nmatch value:\n    case '\\N{LATIN CAPITAL LETTER A}': pass\n",
         "before()\napp = FastAPI()\n",
         "before()\nfrom fastapi import APIRouter as constructor\nr = constructor()\n",
         "before()\nimport fastapi as framework\nr = framework.APIRouter()\n",
@@ -211,7 +247,7 @@ fn ruff_facts_file_isolation_resources_and_latched_cancellation() {
     let mut sources = [
         source("from arbitrary import eval as probe\nprobe()\n"),
         source("before()\n@bad\ndef f(): pass\n"),
-        source("probe()\n"),
+        source("def f[T: bound()]() -> result():\n    match subject():\n        case Record(child=[head, *tail]):\n            type Alias[U: other()] = rhs()\n"),
     ];
     for (i, s) in sources.iter_mut().enumerate() {
         s.path = format!("{i}.py");
@@ -289,6 +325,13 @@ fn ruff_facts_validated_callback_has_one_parse_and_no_error_channel_lowering() {
         ("call()\n", 1),
         ("def f(:\n", 0),
         ("type Alias[T = int] = T\n", 0),
+        ("type Alias[*Ts = *tuple[int]] = int\n", 1),
+        ("type Alias[**P = [int]] = int\n", 1),
+        (
+            "match subject():\n    case [capture]: body()\ntype Alias[T: bound()] =\n",
+            0,
+        ),
+        ("type Alias[T: bound()] = rhs()\ndef f[U: other()](:\n", 0),
     ] {
         let sources = [source(text)];
         let mut parses = 0;
@@ -313,6 +356,201 @@ fn ruff_facts_validated_callback_has_one_parse_and_no_error_channel_lowering() {
             report.files[0].syntax == RuffSyntax::AcceptedByRuff,
             expected == 1
         );
+    }
+}
+
+#[test]
+fn ruff_facts_type_parameter_defaults_are_explicit_py312_exclusions() {
+    for parameter in ["T = int", "*Ts = *tuple[int]", "**P = [int]"] {
+        for declaration in [
+            format!("type Alias[{parameter}] = rhs()\n"),
+            format!("def f[{parameter}](): body()\n"),
+            format!("async def f[{parameter}](): body()\n"),
+            format!("class C[{parameter}]: body()\n"),
+        ] {
+            let sources = [source(format!("eval()\n{declaration}"))];
+            let mut trace = Vec::new();
+            let report = extract_impl(
+                &sources,
+                |_| false,
+                SemanticLimits::default(),
+                Some(&mut trace),
+            )
+            .unwrap();
+            assert_eq!(
+                report.files[0].status,
+                FactStatus::UnsupportedSyntax,
+                "{declaration}"
+            );
+            assert_eq!(report.facts.len(), 1);
+            assert!(report.diagnostics.is_empty() && trace.is_empty());
+            if parameter.starts_with('*') {
+                assert_eq!(report.files[0].reason, Some("type parameter default"));
+                let mut consumed = false;
+                run_consumer(
+                    &sources,
+                    Limits::default(),
+                    |_| false,
+                    &mut |_, _, parsed, _| {
+                        assert!(parsed.errors().is_empty());
+                        assert!(parsed.unsupported_syntax_errors().is_empty());
+                        consumed = true;
+                    },
+                )
+                .unwrap();
+                assert!(consumed);
+            }
+        }
+    }
+}
+
+#[test]
+fn ruff_facts_bare_fstring_mapping_key_parser_gap_is_not_waived() {
+    let sources = [source(
+        "eval()\nmatch value:\n    case {f'{key()}': capture}: body()\n",
+    )];
+    let mut consumes = 0;
+    let parsed = run_consumer(&sources, Limits::default(), |_| false, &mut |_, _, _, _| {
+        consumes += 1;
+    })
+    .unwrap();
+    assert_eq!(consumes, 0);
+    assert_eq!(parsed.files[0].syntax, RuffSyntax::StructuredSyntax);
+    let mut trace = Vec::new();
+    let report = extract_impl(
+        &sources,
+        |_| false,
+        SemanticLimits::default(),
+        Some(&mut trace),
+    )
+    .unwrap();
+    assert_eq!(report.files[0].status, FactStatus::SyntaxError);
+    assert_eq!(report.facts.len(), 1);
+    assert!(report.diagnostics.is_empty() && trace.is_empty());
+}
+
+#[test]
+fn ruff_facts_structural_neutral_nodes_and_depth_are_bounded_per_file() {
+    for (text, limits) in [
+        (
+            "match value:\n    case [[[[capture]]]]: pass\n".to_string(),
+            SemanticLimits {
+                depth: 6,
+                ..SemanticLimits::default()
+            },
+        ),
+        (
+            format!(
+                "match value:\n    case [{}]: pass\n",
+                vec!["_"; 40].join(",")
+            ),
+            SemanticLimits {
+                nodes: 20,
+                ..SemanticLimits::default()
+            },
+        ),
+        (
+            format!(
+                "match value:\n    case Record({}): pass\n",
+                (0..30)
+                    .map(|i| format!("k{i}=_"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            SemanticLimits {
+                edges: 20,
+                ..SemanticLimits::default()
+            },
+        ),
+        (
+            format!(
+                "type Alias[{}] = int\n",
+                (0..40)
+                    .map(|i| format!("T{i}"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            SemanticLimits {
+                nodes: 20,
+                ..SemanticLimits::default()
+            },
+        ),
+        (
+            "def f[T: bound() ](): pass\n".to_string(),
+            SemanticLimits {
+                depth: 3,
+                ..SemanticLimits::default()
+            },
+        ),
+    ] {
+        let mut sources = [
+            source("eval()\n"),
+            source(format!("eval()\n{text}")),
+            source("eval()\n"),
+        ];
+        for (i, source) in sources.iter_mut().enumerate() {
+            source.path = format!("{i}.py");
+        }
+        let mut trace = Vec::new();
+        let report = extract_impl(&sources, |_| false, limits, Some(&mut trace)).unwrap();
+        assert_eq!(
+            report.files.iter().map(|f| f.status).collect::<Vec<_>>(),
+            [
+                FactStatus::AcceptedFacts,
+                FactStatus::ResourceLimit,
+                FactStatus::AcceptedFacts
+            ],
+            "{text}"
+        );
+        assert_eq!(report.files[1].reason, Some("semantic resource limit"));
+        assert_eq!(report.facts.iter().filter(|f| f.path == "1.py").count(), 1);
+        assert_eq!(report.diagnostics.len(), 2);
+        assert!(trace.iter().all(|event| match event {
+            Observation::Fact { fact } => fact.path != "1.py",
+            Observation::Warning { warning } => warning.path != "1.py",
+        }));
+    }
+}
+
+#[test]
+fn ruff_facts_structural_hidden_guards_remain_transactional_beyond_shape_caps() {
+    let wide = vec!["safe()"; 90].join(",");
+    let long = "identifier".repeat(80);
+    for hidden in ["FastAPI()", "receiver.include_router(router)"] {
+        for text in [
+            format!("match subject:\n    case f'{{target({wide}, {hidden})}}': pass\n"),
+            format!("type Alias[T: target({wide}, {hidden})] = int\n"),
+            format!("def f[T: target({long}, {hidden})](): pass\n"),
+            format!("class C[T: target({wide}, {hidden})]: pass\n"),
+            format!("type Alias = target({wide}, {hidden})\n"),
+        ] {
+            let sources = [source(format!("eval()\n{text}"))];
+            let mut trace = Vec::new();
+            let report = extract_impl(
+                &sources,
+                |_| false,
+                SemanticLimits::default(),
+                Some(&mut trace),
+            )
+            .unwrap();
+            assert_eq!(
+                report.files[0].status,
+                FactStatus::UnsupportedSyntax,
+                "{text}"
+            );
+            assert_eq!(report.facts.len(), 1);
+            assert!(report.diagnostics.is_empty() && trace.is_empty());
+        }
+    }
+    for text in [
+        format!("match value:\n    case {}: pass\n", "1".repeat(4301)),
+        format!("type Alias[T: {}] = int\n", "1".repeat(4301)),
+    ] {
+        let sources = [source(text)];
+        let report = extract_fact_candidates(&sources).unwrap();
+        assert_eq!(report.files[0].status, FactStatus::UnsupportedSyntax);
+        assert_eq!(report.facts.len(), 1);
+        assert!(report.diagnostics.is_empty());
     }
 }
 
@@ -400,6 +638,7 @@ fn ruff_facts_header_schedule_reverses_capture_not_helper_replay() {
         KwargAnnotation,
         PositionalDefaults,
         ReturnAnnotation,
+        TypeParameters,
     ];
     let mut schedule = HeaderSchedule::default();
     for group in groups.into_iter().rev() {
@@ -452,6 +691,10 @@ fn ruff_facts_alias_dependent_constructor_guards_run_at_header_replay() {
         ("from safe import read as probe\ndef f() -> probe():\n    from fastapi import APIRouter as probe\n", FactStatus::UnsupportedSyntax),
         ("from fastapi import APIRouter as probe\ndef f() -> probe():\n    from safe import read as probe\n", FactStatus::AcceptedFacts),
         ("from fastapi import APIRouter as probe\ndef f(a=probe()):\n    from safe import read as probe\n", FactStatus::UnsupportedSyntax),
+        ("from safe import read as probe\ndef f[T: probe()]():\n    from fastapi import APIRouter as probe\n", FactStatus::UnsupportedSyntax),
+        ("from fastapi import APIRouter as probe\ndef f[T: probe()]():\n    from safe import read as probe\n", FactStatus::AcceptedFacts),
+        ("from safe import read as probe\nclass C[T: probe()]:\n    from fastapi import APIRouter as probe\n", FactStatus::UnsupportedSyntax),
+        ("from fastapi import APIRouter as probe\nclass C[T: probe()]:\n    from safe import read as probe\n", FactStatus::AcceptedFacts),
     ] {
         let sources = [source(text)];
         let report = extract_fact_candidates(&sources).unwrap();
@@ -466,6 +709,8 @@ fn ruff_facts_work_regions_bound_repeated_statements_and_control_bodies() {
         "ordinary()\n".repeat(1000),
         format!("if ready:\n{calls}"),
         format!("def owner(a=header()) -> result():\n{calls}"),
+        "type Alias[T: bound()] = ordinary()\n".repeat(1000),
+        "def owner[T: bound()](): ordinary()\n".repeat(1000),
     ];
     for text in texts {
         let sources = [source(text)];
@@ -583,7 +828,7 @@ fn ruff_facts_work_regions_preserve_shrinking_aliases_and_nested_owner_headers()
 
 #[test]
 fn ruff_facts_work_regions_keep_only_live_file_state_and_owner_high_water() {
-    let definitions = "    def child(a=probe()) -> probe():\n        probe()\n".repeat(80);
+    let definitions = "    def child[T: probe()](a=probe()) -> probe():\n        type Alias[U: probe()] = probe()\n        probe()\n".repeat(80);
     let sources = [source(format!(
         "from package import read as probe\ndef owner(a=probe()) -> probe():\n{definitions}"
     ))];
@@ -731,6 +976,18 @@ json.dump(traces, sys.stdout, ensure_ascii=True)
             "complete warnings case {index}"
         );
     }
+    // A distinct AST-positive spelling still fails in the pinned parser. Keep
+    // this outside the matching-case count; no source rewriting or recovery AST
+    // is used to turn it into the adjacent-string positive fixture above.
+    let gap = [source(
+        "match value:\n    case {f'{key()}': capture}: body()\n",
+    )];
+    let ast = crate::analysis::extract_captured(&python, &gap).unwrap();
+    assert!(ast.complete);
+    let native = extract_fact_candidates(&gap).unwrap();
+    assert_eq!(native.files[0].status, FactStatus::SyntaxError);
+    assert_eq!(native.facts.len(), 1);
+    assert!(native.diagnostics.is_empty());
     eprintln!(
         "Ruff oracle: {} complete-array cases; {} raw-order cases",
         sources.len(),

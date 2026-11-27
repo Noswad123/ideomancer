@@ -115,7 +115,8 @@ guidance for coding agents, not an interpretation prompt for analyzed applicatio
 The maintained Ruff 0.12.0 snapshot at
 `87f0feb21a1af67195bebf94d811770393f9f447` is a private syntax frontend, not a
 production fact backend. It now also has private generic fact candidate policy
-`python-ruff-private-facts-1`; CPython compatibility remains Pending. Production
+`python-ruff-private-facts-2`; facts-1 remains the first cross-family checkpoint,
+not the current exclusion list. CPython compatibility remains Pending. Production
 `python-static-8-generic-facts`, the trusted Python >=3.12 AST helper, public API,
 evidence, CLI and default are unchanged. No new vendor/dependency changes are needed.
 
@@ -136,9 +137,18 @@ PY312 and `with_ast_only(true)`. Both parse and unsupported-version diagnostics 
 be empty before a callback consumes the validated borrowed AST. No reparse or AST
 escape is allowed. Bounded normalization separates render and visit edges, preserving
 descendant calls even through opaque/clipped shapes and helper-order alias effects:
-return-annotation calls follow body imports, not source order. File emission is
+return-annotation calls follow body imports, not source order. Function type-parameter
+bound calls replay after body/return annotations; class bounds replay after the body.
+Observations stay unresolved until replay, so body imports affect resolution;
+constraints use tuple bounds. The observation-only header helper avoids rendering
+an unused root shape. Match traversal is subject, pattern, guard, body; mapping
+patterns visit all keys before all patterns. Type aliases visit name, type parameters,
+value under the same owner; reusing an import alias name does not invalidate it.
+No pattern/capture/type-alias/type-parameter facts, bindings, scopes or alias-map
+mutations are invented. File emission is
 transactional. Source working regions are scoped per statement/expression; persistent
 projection maps charge retained aliases, including overwrite-shrink adjustments.
+Existing node/edge accounting, including class-pattern wrappers, remains in force.
 
 ### Edge Cases
 
@@ -147,9 +157,11 @@ projection maps charge retained aliases, including overwrite-shrink adjustments.
   star and future imports; Assign/AnnAssign/class attributes/chained/destructured
   writes; ordinary control flow, try, async for/with, raise/assert/augmented writes/
   deletion; all Python 3.12 generic expression families, including lambdas,
-  comprehensions/generators, await/yield/walrus and f-strings. AST-only top-level
-  return/jumps are allowed when the parser accepts them, not executed or compile-validated.
-- Excluded: decorators, match patterns, type aliases/definition type parameters,
+  comprehensions/generators, await/yield/walrus and f-strings; all eight match pattern
+  forms with case guards/bodies, type aliases and function/async-function/class type
+  parameters. AST-only top-level return/jumps are allowed when the parser accepts
+  them, not executed or compile-validated.
+- Excluded: decorators, Python 3.13 type-parameter defaults,
   raw non-ASCII identifiers (even those normalizing to ASCII), all type comments
   including ignores, and active named Unicode escapes. Raw/bytes/escaped-backslash
   text is allowed. Nonzero decimal integers over 4300 digits exclude underscores
@@ -158,20 +170,37 @@ projection maps charge retained aliases, including overwrite-shrink adjustments.
   unsupported where G3 metadata is missing. Generic redacted shapes need no literal
   payload retention. Effective encoding cookies and invalid UTF-8 remain unsupported;
   UTF-8 BOM source hashes cover original bytes.
+- Class patterns such as `Record()`, `FastAPI()` and `APIRouter()` are syntax, not
+  constructor calls. MatchValue f-strings are admitted, but a bare f-string mapping
+  key accepted by the CPython AST helper produces an ordinary Ruff diagnostic:
+  zero AST callbacks, module baseline only, `SyntaxError`, no recovery or diagnostic
+  waiver. A separate adjacent plain-string prefix fixture is accepted independently,
+  not an automatic source rewrite.
+- Ruff's PY312 mode misses version errors for TypeVarTuple/ParamSpec defaults;
+  TypeVar has an upstream version error. The fact driver explicitly rejects defaults
+  on all three variants without visiting them. Classification-only `parse_batch`
+  remains unchanged and Pending, not proof of target-version parity.
 - Semantic bounds: 200000 nodes, depth 256, 400000 edges, 100000 facts, 100000
   warnings, 32 MiB working and 32 MiB output, in addition to existing input/lexical
   bounds. Parsing and AST destruction are uninterruptible; cooperative accounting
   is not an RSS/stack sandbox or hard deadline. Full Unicode, encoding, failure,
-  resource and G3/G5/G6 closure remain open; PY312 alone proves no compatibility.
+  resource and full G2–G6 closure remain open; PY312 alone proves no compatibility.
 
 ### Example usage
 
 For developer validation, use the existing `--lib analysis::python_ruff -- --ignored`
 oracle command above with a trusted Python 3.12 interpreter. Keep the existing active
 Rust 1.89 compiler, `RUSTUP_AUTO_INSTALL=0`, two jobs/threads and package-only formatting.
-There is no new public CLI/backend selector. Focused results are not final acceptance:
-broader Clippy, old-native source regression and oracle gates remain pending until
-the coordinating owner records their actual completion.
+There is no new public CLI/backend selector. The recorded facts-2 focused checkpoint
+is 31 Ruff tests, including 77 complete-array/raw-order cases on trusted Python
+3.12.11: 75 base fixtures plus two metadata/BOM cases, preserving the old 51 and
+adding 26 structured cases. The 18-case acceptance oracle (previously 16) checks
+both new CPython/Ruff admission disagreements against the fact guard; the bare
+mapping-key gap separately asserts zero callbacks and is not a matching case.
+Focused checks are not final acceptance; record actual broader results per batch.
+The coordinating owner owns broad gates and ROADMAP/Python-ledger/source-inventory
+updates. This batch adds no source paths, manifests, vendor or dependency changes;
+the 215-source/85-vendor closure and reviewed two-file AST-only patch are unchanged.
 
 ### Related files
 

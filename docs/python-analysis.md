@@ -73,7 +73,7 @@ The finite completion ledger is:
 | Gate | Outcome and required acceptance | State |
 | --- | --- | --- |
 | P1-G1 | Generic expression and ordinary-body coverage: containers/operators/indexing, call-free defaults, conditions, loops and context managers; hidden calls/warnings, owner restoration, spans and one counted walk remain exact. | Implemented and locally validated for the bounded G1 subset below |
-| P1-G2 | Close the generic visitor inventory: remaining statements, targets/writes/imports, arbitrary callees/splats, comprehensions/lambdas/generators, await/yield/walrus, all headers and literal/identifier forms. Every target-version node has a normalization/traversal rule and cross-family oracle cases. | In progress: first cross-family Ruff fact lane includes non-decorator header calls; Ruff patterns/type aliases/type parameters and full literal/identifier compatibility remain open |
+| P1-G2 | Close the generic visitor inventory: remaining statements, targets/writes/imports, arbitrary callees/splats, comprehensions/lambdas/generators, await/yield/walrus, all headers and literal/identifier forms. Every target-version node has a normalization/traversal rule and cross-family oracle cases. | In progress: Ruff facts-2 covers structural patterns, type aliases and generic declarations; decorator traversal and full literal/identifier compatibility remain open, with parser gaps explicit |
 | P1-G3 | Preserve every existing discovery/framework side output: decorators, CLI/job/API entry facts, route diagnostics and FastAPI host/prefix/include/mutation metadata, including aliases and literal-retention limits. | Pending |
 | P1-G4 | Close grammar/version/encoding/failure differences: original-byte digests, decoding/cookies, physical layout and exact observable parse diagnostics. No unexplained valid-file rejection or invalid-file acceptance in the approved compatibility suite. | Open: private Ruff syntax frontend integrated; CPython admission, normalization/decoding/failure and resource closure remain; production helper retained |
 | P1-G5 | Integrate distinct native identity, evidence/snapshots, CLI/library dispatch, workflow revalidation and capabilities. Preserve old-save reading/rendering; rediscovery invalidates stale claims. Native operation must not probe Python. | Pending; public migration design required |
@@ -1142,11 +1142,111 @@ containment/build reuse, not Ruff production dispatch or an actual Git revision.
 The vendor snapshot, dependency manifest and product lockfile were not changed by
 this lowering batch. No additional toolchain or package build was required.
 
-**Next:** close the remaining Ruff inventory (patterns, type aliases/type parameters),
-then decorator/discovery/framework metadata and versioned literal/identifier,
-comment/encoding/failure compatibility. Generic fact lowering is no longer merely
-planned, but G2–G6 are still open. Production promotion, public native identity and
-an actual downstream compiled dependency fingerprint remain separate decisions.
+**Boundary at that checkpoint:** structural patterns, type aliases/type parameters
+were next; the following batch implements that lowering. Decorator/discovery/
+framework metadata and versioned literal/identifier, comment/encoding/failure
+compatibility remain. G2–G6 are still open. Production promotion, public native
+identity and an actual downstream compiled dependency fingerprint remain separate
+decisions.
+
+#### Ruff structural inventory: private facts-2
+
+Private policy **`python-ruff-private-facts-2`** extends the existing lane with
+match statements/all eight pattern variants, type aliases and generic function,
+async-function and class declarations. It adds traversal rules, not new capture,
+pattern, type-alias or type-parameter fact kinds. Shared output, parser invocation,
+vendor source, dependencies, public API and production dispatch are unchanged.
+The parse-only policy name and Tree-sitter private policy 15 remain unchanged;
+development source fingerprints still advance with their implementation inputs.
+
+**Match semantics:** visit subject, then each case's pattern, optional guard and
+body. Mapping patterns visit all keys before patterns; class patterns visit the
+class expression, positional patterns and keyword patterns. Sequence, OR, AS,
+value, singleton and star forms use their explicit child rules. Capture/rest/star
+names and keyword attribute names are strings, not bindings, alias mutations or
+new scopes. `Record(...)`, `FastAPI(...)` and `APIRouter(...)` class-pattern syntax
+does not invent a constructor call. Actual calls in formatted value patterns,
+guards and bodies retain all existing observations and G3 guards. Case-body
+imports can affect later cases and later statements, as in the helper.
+
+AST-only duplicate captures, unequal OR captures, multiple stars, duplicate class
+keyword attributes/mapping keys and irrefutable alternatives/cases are exercised
+without invoking compile-time validation or executing source. No stronger runtime
+activation, match exhaustiveness or binding claim is inferred from them.
+
+**Type declaration semantics:** type aliases visit name → type parameters → value
+under the existing owner. They bypass assignment handling: no binding,
+invalidation, class attribute annotation, import-alias update or annotation scope
+is manufactured. Reusing an imported name as an alias/type-parameter name does not
+erase the helper's import alias.
+
+For type parameters, TypeVar bounds—including tuple constraints—supply ordinary
+expression visits; Python-3.12 TypeVarTuple/ParamSpec names have no bound children.
+Function/class bounds are normalized into unresolved observation-only
+`HeaderGroup::TypeParameters` visits before the body. They replay after the body
+and, for functions, after return-annotation visits, before owner removal. A small
+adapter helper captures these visits without rendering/staging an unused root
+shape. Body-import and repeated-owner alias effects therefore occur at replay,
+not at source capture. Ordinary signature/parameter metadata is unchanged, with
+no type-bound annotation facts added.
+
+**Two demonstrated pinned-parser gaps remain explicit:**
+
+1. Bare formatted-string mapping keys such as
+   `case {f'{key()}': capture}` are AST-positive in trusted Python 3.12.11 but fail
+   Ruff's ordinary syntax channel. The callback count is zero, the fact candidate
+   reports `SyntaxError`, and only its module baseline survives. Separate accepted
+   adjacent-string-prefix fixtures establish mapping traversal order; live source
+   is never rewritten into that spelling and recovery/error channels are not waived.
+   This is G4 compatibility work, not proof of full pattern syntax compatibility.
+2. The pin emits a version error for a TypeVar default but omits that check in
+   TypeVarTuple/ParamSpec branches. Under `PY312`, those later-version defaults can
+   reach a callback with both channels empty. The fact walker explicitly rejects
+   **every present default for all three variants**, in aliases/functions/classes,
+   before visiting any default. This is a private `UnsupportedSyntax` compatibility
+   exclusion, not a fabricated parser error or a vendor patch. The acceptance
+   oracle now records these two extra differences in its 18-case suite.
+
+Decorators and missing framework side outputs remain guarded. Raw non-ASCII
+identifiers, recognized type comments, active named Unicode escapes, effective
+encoding cookies and the remaining finite compatibility boundaries are unchanged.
+`cpython_compatibility` remains `Pending`; G2–G6 and cutover approval stay open.
+
+Cases, patterns, class-pattern argument/keyword wrappers, type-parameter lists and
+items charge semantic nodes/depth/edges even when fact-neutral. Every loop retains
+bounded checks, expressions use scoped arenas, and only owned scheduled call
+observations survive across a definition body. Low-budget deep/wide neutral-tree
+tests discard only the failed file while preserving accepted siblings. Hidden G3
+triggers beyond rendering caps, alias-dependent bound guards in both directions,
+many aliases/generic bounds and nested live schedules exercise existing rollback
+and working-region accounting. Parsing/destruction remain uninterruptible; no hard
+stack/RSS/timeout guarantee is claimed.
+
+**Completed local gates for this batch:** all **31 focused Ruff tests** passed;
+the complete-output/raw-order oracle preserved its previous 51 cases and added
+26 structural cases for **77 matching cases** (75 source fixtures plus two
+metadata/BOM cases), with the bare mapping-key gap checked separately and excluded
+from the matching count. The broader gates passed **622 ordinary library tests**
+(176 opt-in tests ignored by that invocation), **18 adapter + 8 engine** tests,
+and **170 explicitly selected Python oracle tests**, using trusted Python 3.12.11.
+The latter includes the existing 165 reference comparisons, three native semantic/
+scalar gates, Ruff acceptance and Ruff complete-output/raw-order gates. Formatting
+and product Clippy with warnings denied passed; the same 19 preserved vendor
+lifetime-style warnings remain visible. Existing Rust 1.89.0/macOS arm64 was used;
+these counts are not full Python coverage or hosted-platform acceptance.
+All **180** Python script tests passed. Source integrity verified the same **215**
+reviewed paths, vendor verification confirmed the unchanged **85-file** snapshot,
+and the independent exported-checkout consumer passed fresh offline resolution,
+locked compilation and its native JS/TS public-API regression. No source paths
+were added or renamed; manifests, dependency locks and vendor patches are unchanged.
+The consumer attests its reviewed source snapshot, not an immutable Git commit or
+Ruff production fact dispatch.
+
+**Next:** implement decorator/discovery/framework side outputs and their bounded
+literal retention, then close versioned identifier/literal, type-comment/encoding,
+parser-gap and failure/resource compatibility before public integration. Source
+selection and Git-based delivery do not require another parser-selection exercise
+or registry publication.
 
 P1 has a **private captured-source AST parity harness**, a native parse-only
 front-end and bounded class/function/header/body/import candidates, not a production native Python
