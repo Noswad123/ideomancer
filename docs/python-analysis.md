@@ -73,7 +73,7 @@ The finite completion ledger is:
 | Gate | Outcome and required acceptance | State |
 | --- | --- | --- |
 | P1-G1 | Generic expression and ordinary-body coverage: containers/operators/indexing, call-free defaults, conditions, loops and context managers; hidden calls/warnings, owner restoration, spans and one counted walk remain exact. | Implemented and locally validated for the bounded G1 subset below |
-| P1-G2 | Close the generic visitor inventory: remaining statements, targets/writes/imports, arbitrary callees/splats, comprehensions/lambdas/generators, await/yield/walrus, all headers and literal/identifier forms. Every target-version node has a normalization/traversal rule and cross-family oracle cases. | In progress: admitted-lane statement/header ordering and literal subset locally validated; header calls/identifiers and AST-only pattern inventory remain open |
+| P1-G2 | Close the generic visitor inventory: remaining statements, targets/writes/imports, arbitrary callees/splats, comprehensions/lambdas/generators, await/yield/walrus, all headers and literal/identifier forms. Every target-version node has a normalization/traversal rule and cross-family oracle cases. | In progress: first cross-family Ruff fact lane includes non-decorator header calls; Ruff patterns/type aliases/type parameters and full literal/identifier compatibility remain open |
 | P1-G3 | Preserve every existing discovery/framework side output: decorators, CLI/job/API entry facts, route diagnostics and FastAPI host/prefix/include/mutation metadata, including aliases and literal-retention limits. | Pending |
 | P1-G4 | Close grammar/version/encoding/failure differences: original-byte digests, decoding/cookies, physical layout and exact observable parse diagnostics. No unexplained valid-file rejection or invalid-file acceptance in the approved compatibility suite. | Open: private Ruff syntax frontend integrated; CPython admission, normalization/decoding/failure and resource closure remain; production helper retained |
 | P1-G5 | Integrate distinct native identity, evidence/snapshots, CLI/library dispatch, workflow revalidation and capabilities. Preserve old-save reading/rendering; rediscovery invalidates stale claims. Native operation must not probe Python. | Pending; public migration design required |
@@ -989,13 +989,164 @@ documentation-only result recording afterward does not mint an immutable release
 pin. Hosted matrix results, a complete binary notice audit and production cutover
 are not claimed by these local gates.
 
-**Remaining boundary:** Ruff fact lowering into the helper-order semantic core is
-next. The Tree-sitter fact candidate remains a reference/regression path, not an
-additional replacement direction. Literal/name/version/comment/encoding/failure
+**Boundary at that checkpoint:** Ruff fact lowering into the helper-order semantic
+core was next; the following batch implements its first cross-family lane. The
+Tree-sitter fact candidate remains a reference/regression path, not an additional
+replacement direction. Literal/name/version/comment/encoding/failure
 and resource compatibility still require closure. Production remains the trusted
 `python-static-8-generic-facts` helper; public requests, metadata, saved-state
 capabilities and defaults are unchanged. G2–G6 and explicit cutover approval remain
 open. No remote fork, commit, push, toolchain installation or publication is implied.
+
+#### First Ruff generic fact candidate: cross-family lane
+
+Private `python_ruff::extract_fact_candidates` now consumes Ruff's validated AST
+and emits generic facts/IDs/diagnostics for admitted whole files. Its distinct
+policy is **`python-ruff-private-facts-1`**. It remains a private candidate with
+`cpython_compatibility: Pending`, not a public backend, Evidence producer or
+cutover. Production `python-static-8-generic-facts`, interpreter selection,
+snapshots, public request types and defaults are unchanged.
+
+The parse-only entry point remains classification-only. Both entry points share
+an internal borrowed-AST consumer seam: each eligible file is parsed **once**;
+the consumer runs only after both ordinary and unsupported-version channels are
+empty. AST references stay inside that callback. A semantic or compatibility
+rejection can coexist with `AcceptedByRuff` syntax classification. No recovered
+tree is consumed, and the fact entry point does not call the parse-only entry
+point followed by another parse. Consume/drop/final checkpoints share the same
+latched invocation deadline.
+
+**Shared observable output:** `analysis/python_facts.rs` owns fact/warning record
+types, canonical ASCII fact IDs, compact signatures/import metadata, bounded
+measurement and a transactional sink. Projection and scalar modules now have one
+private owner under `analysis`; both frontends import the same module instances.
+The Tree-sitter reference delegates its record types, IDs and signature writer to
+the shared core, but retains its CST collector, import serializer and specialized
+finalization. It was not rewritten into a universal parser framework.
+
+The shared sink reserves all module baselines before file marks, restores active
+file facts/warnings/output accounting on failure, retains container high-water
+charges, and bounds committed output separately from pending working storage.
+Finalization deduplicates fact IDs only, sorts the helper's full fact tuple, and
+sorts diagnostics without removing duplicate observations. Hash preimages retain
+Python's spaced `ensure_ascii=True` array spelling and path-only module IDs.
+Independent fixed vectors test the shared encoding rather than merely comparing
+two native users of the same implementation.
+
+**Admitted together in this lane:**
+
+- Sync/async functions, classes, methods and nested definitions; full ordinary
+  signatures, parameter annotations/defaults, return annotations, bases and class
+  keyword visitation. Non-decorator header calls are now admitted.
+- Plain/from/relative/star/future imports and the helper's persistent path-keyed
+  alias lookup, nearest-prefix selection and one-step full-target substitution.
+- Calls/arbitrary callees/unpacking, containers, operators/subscripts/slices,
+  lambdas, comprehensions/generators, await/yield/walrus and f-string descendants.
+- Assign/AnnAssign, chained and destructured targets, class attribute annotations,
+  eligible bindings and invalidations. Annotation-only statements do not write.
+- Ordinary expression/return/pass/jumps, conditions/loops, sync/async for/with,
+  try/try-star, raise/assert, global/nonlocal, AugAssign and Delete. AST-positive
+  but non-compilable contexts are not rejected by a new runtime-context validator.
+
+Definitions push their owner before metadata. Parameter metadata follows
+positional → keyword-only → vararg → kwarg order, each parameter preceding its
+annotation/default. Generic header visits use separate typed `HeaderGroup` slots
+in AST field order. Calls remain unresolved until replay, so body imports can
+change later return-annotation resolution without affecting earlier argument
+visits. Parameter roles come from syntax fields, not comparisons of repeated
+parameter names. Class/function reuse of the same path preserves helper aliases.
+
+Expression normalization produces bounded owned redacted descriptors once, with
+separate rendering and visitation edges. Dictionaries visit keys before values,
+conditionals test before branches, lambda keyword defaults before positional
+defaults, and comprehensions their element/key/value before generators. Opaque
+shapes and rendering caps never hide calls. Rendering retains the helper's
+80-node/depth-12/first-16/per-node-512-byte rules, including independent callee
+rendering. UTF-8 clipping stays saturated after truncation rather than filling a
+discarded partial code point with later punctuation. No decoded literal payloads
+or arbitrary-precision numeric values are reconstructed.
+
+A universal-newline line index maps byte spans without rescanning the entire file
+per fact. A token-balanced parentheses index corrects observable generator spans,
+including multiline parameter defaults and grouped generator elements. Original
+captured-byte digests still include BOM; source paths are never reopened and legacy
+hex transport is ignored by native lowering.
+
+**Finite whole-file exclusions, not false completion:** decorators, match/patterns,
+type aliases and definition type parameters are not yet lowered. Framework
+constructor/include/mutation triggers remain guarded until their G3 side outputs
+exist, including triggers hidden in headers, opaque expressions or past clipping.
+Alias-dependent constructor checks occur at replay under the current owner.
+Ordinary body calls such as `client.get(...)` are not treated as route decorators.
+
+Postparse/pre-lowering checks use Ruff's already-produced token stream, without a
+new vendor patch: reject raw non-ASCII identifier spellings, all recognized type
+comments including `ignore`, active named Unicode text escapes, and nonzero
+decimal integers above 4300 digits excluding underscores. Raw strings, bytes and
+escaped-backslash spellings are distinguished from active named escapes; Unicode
+comments/redacted strings remain admissible. Zero-only, base-prefixed, float and
+imaginary numbers retain their separate admission rules. Effective cookies and
+invalid UTF-8 remain explicit unsupported encoding. These exclusions are private
+`UnsupportedSyntax`/encoding outcomes, not manufactured CPython parse diagnostics.
+They do not change production's Python >=3.12 language/encoding contract.
+
+**Resources and transactions:** semantic bounds are 200000 nodes, depth 256 and
+400000 bookkeeping/visitation edges, with 100000 facts/warnings, 32 MiB pending
+working storage and 32 MiB complete encoded output. Frontend byte/lexical/report
+gates still apply. Normalization arenas drop at expression/assignment/header
+boundaries; statement refunds preserve persistent scope/alias and owner-capacity
+charges, including alias replacements that shrink storage. Call resolution and
+rendered temporaries are refunded after buffers drop. Finalization failure or
+invocation cancellation keeps only module baselines and clears warnings; ordinary
+file failure does not discard earlier accepted sibling files. Parsing and recursive
+AST destruction remain uninterruptible; these are not hard stack/RSS/timeout
+guarantees. Tight private resource limits can reject otherwise valid sources.
+
+The new Ruff oracle is
+`analysis::python_ruff::facts::ruff_facts_batch::ruff_facts_complete_arrays_and_raw_trace_match_trusted_ast_oracle`.
+It is selected by the existing `analysis::python_ruff -- --ignored` gate, not the
+Tree-sitter `analysis::python_parity` filter. **51 independently synthetic cases**
+compare complete facts, IDs, encoded metadata and diagnostics **and** unsorted raw
+fact/warning observations against the trusted helper. They cover header/body alias
+effects, duplicate AST-only parameter/keyword forms, variadics/multiline generator
+spans, assignments, exceptions/control flow, closures/comprehensions/f-strings,
+render clipping, repeated scopes and Unicode source metadata. Recognized type
+comments and near-miss comments have separate controls. Only the trusted helper
+and stdlib AST parse synthetic inputs; target code is never executed or imported.
+
+Local completed regression gates on existing Rust 1.89.0/macOS arm64 include
+**618 ordinary library tests**, **18 adapter + 8 engine** tests and **170 explicitly
+selected Python oracle tests** with trusted Python 3.12.11. The latter includes
+the existing 165 comparison gates, three native semantic/scalar oracles, the Ruff
+acceptance gate and the new 51-case complete-output/raw-order gate. The ordinary
+invocation ignored 176 opt-in tests; those are not counted as ordinary passes.
+The new oracle count is not a coverage percentage or a claim that every old
+Tree-sitter case now runs against Ruff. Eight shared-core unit vectors pass as
+part of the library suite. Independent read-only review found no blocking issue.
+
+The candidate also tests one parse/zero callbacks on either error channel,
+whole-file rollback for late exclusions, captured replay and input reordering,
+redaction, hidden framework triggers, semantic depth limits and every named
+cancellation stage. Working-region regressions include 1000 ordinary calls,
+2000 calls through a 30-KiB alias both inside/across statements, alias shrinkage
+and nested owner/header lifetimes. These protect bounded live state rather than
+retaining renderer/normalization charges for the entire file.
+
+Formatting and product all-target `--no-deps` Clippy with warnings denied passed;
+the same 19 preserved vendor lifetime-style warnings remain non-fatal. **180**
+Python script tests passed, and integrity checks verified **215** reviewed source
+paths plus the unchanged **85-file** Ruff snapshot and exact policy patch. The
+independent exported-checkout consumer also passed fresh offline resolution,
+locked compilation and its native JS/TS public-API test. That gate verifies source
+containment/build reuse, not Ruff production dispatch or an actual Git revision.
+The vendor snapshot, dependency manifest and product lockfile were not changed by
+this lowering batch. No additional toolchain or package build was required.
+
+**Next:** close the remaining Ruff inventory (patterns, type aliases/type parameters),
+then decorator/discovery/framework metadata and versioned literal/identifier,
+comment/encoding/failure compatibility. Generic fact lowering is no longer merely
+planned, but G2–G6 are still open. Production promotion, public native identity and
+an actual downstream compiled dependency fingerprint remain separate decisions.
 
 P1 has a **private captured-source AST parity harness**, a native parse-only
 front-end and bounded class/function/header/body/import candidates, not a production native Python

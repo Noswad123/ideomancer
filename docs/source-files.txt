@@ -56,6 +56,7 @@ src/adapters/fastapi.rs
 src/adapters/mod.rs
 src/adapters/vendor_sdk.rs
 src/analysis.rs
+src/analysis/python_facts.rs
 src/analysis/python_native.rs
 src/analysis/python_native/facts.rs
 src/analysis/python_native/expressions.rs
@@ -70,7 +71,10 @@ src/analysis/python_parity/literal_batch.rs
 src/analysis/python_parity/fstring_batch.rs
 src/analysis/python_parity/projection_batch.rs
 src/analysis/python_parity/phase_batch.rs
+src/analysis/python_parity/ruff_facts_batch.rs
 src/analysis/python_ruff.rs
+src/analysis/python_ruff/expressions.rs
+src/analysis/python_ruff/facts.rs
 src/analyze.rs
 src/catalog.rs
 src/cli.rs

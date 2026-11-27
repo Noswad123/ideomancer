@@ -51,12 +51,20 @@ and type aliases, broad call-free headers, and reviewed import/layout forms toge
 A further lexical batch adds redacted escaped strings/bytes, numeric-boundary
 validation and f-string descendant traversal. A maintained vendored Ruff 0.12.0
 syntax frontend is now selected privately, not as a production fact backend.
-`src/analysis/python_ruff.rs` classifies captured bytes with explicit PY312 and
-AST-only options, checking both parse and unsupported-version errors. It publishes
-no AST, facts, literals or source excerpts. CPython compatibility and fact lowering
-remain Pending; the Tree-sitter fact candidate remains regression coverage until
-future Ruff lowering. Byte/token/depth gates and cooperative before/after deadlines
-are not a hard timeout, RSS bound or complete parser-recursion proof.
+`src/analysis/python_ruff.rs` retains classification-only `parse_batch`; a separate
+private `extract_fact_candidates` now lowers a validated borrowed AST within the
+same single Ruff parse, only after both parse/version diagnostic channels are empty.
+Policy `python-ruff-private-facts-1` emits bounded generic facts, IDs and diagnostics
+with a module baseline, not an AST, literal payloads or source excerpts. Its first
+cross-family lane covers declarations/signatures, non-decorator header calls,
+imports, assignments, ordinary suites and Python 3.12 generic expression families;
+opaque or clipped shapes still expose descendant calls. Decorators, patterns,
+generic declarations/type aliases and G3 framework metadata remain excluded.
+CPython compatibility remains Pending. Shared output/projection primitives do not
+unify the collectors; Tree-sitter private policy 15 remains regression/reference
+coverage. Production `python-static-8-generic-facts`, the AST helper, public API,
+evidence, CLI and default are unchanged. Byte/token/depth gates and cooperative
+deadlines are not hard timeout, RSS, stack or complete parser-recursion guarantees.
 See the [Python parity gates](docs/python-analysis.md#native-migration-parity-foundation).
 Release/history review remains separate—not a reason to add codebase-specific
 rules to the engine or claim complete application understanding.
@@ -472,8 +480,8 @@ explicitly rather than use an unsafe filesystem fallback.
 JS/TS inspection also requires Unix, but uses compiled-in Tree-sitter and requires
 neither Node nor Python. Parse/traversal limits are cooperative, not a hard memory
 sandbox. Python still uses its trusted Python >=3.12 AST helper; Python's
-native fact-backend migration remains pending despite the private Ruff syntax
-frontend, and Rust source analysis is not implemented.
+production native fact-backend migration remains pending despite the private Ruff
+generic fact candidate, and Rust source analysis is not implemented.
 Optional SVG rendering still needs external `mmdc` and its Node/Chromium toolchain.
 `discover`, `catalog`, and explicit source views are local. A workflow selected without `--view` or
 explicit `analyze` opts into sending evidence through Djinn or a protocol-compatible

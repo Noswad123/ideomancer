@@ -1,5 +1,15 @@
 //! Private captured-byte Ruff frontend, not evidence or a compatibility backend.
-//! No AST access, source diagnostics, literal values, or inferred facts are published.
+//! The separate private fact candidate consumes only validated, borrowed ASTs.
+
+mod expressions;
+mod facts;
+pub(super) use facts::CandidateReport;
+
+pub(super) fn extract_fact_candidates(
+    sources: &[Source],
+) -> Result<CandidateReport<'_>, FrontEndError> {
+    facts::extract_fact_candidates(sources)
+}
 
 use super::Source;
 use ruff_python_ast::PythonVersion;
@@ -163,6 +173,9 @@ enum Checkpoint {
     Token,
     PreParse,
     PostParse,
+    Semantic,
+    PostConsume,
+    PostDrop,
     Output,
     Final,
 }
@@ -287,10 +300,20 @@ fn run<F: FnMut(Checkpoint) -> bool>(
     limits: Limits,
     check: F,
 ) -> Result<BatchReport<'_>, FrontEndError> {
-    let mut cancel = Cancellation {
-        expired: false,
-        check,
-    };
+    run_consumer(sources, limits, check, &mut |_, _, _, _| {})
+}
+
+type ValidatedConsumer<'a> = dyn FnMut(usize, &str, &ruff_python_parser::Parsed<ruff_python_ast::Mod>, &mut dyn FnMut() -> bool)
+    + 'a;
+
+type ValidatedFileConsumer<'a> = dyn FnMut(&str, &ruff_python_parser::Parsed<ruff_python_ast::Mod>, &mut dyn FnMut() -> bool)
+    + 'a;
+
+fn validate_sources<F: FnMut(Checkpoint) -> bool>(
+    sources: &[Source],
+    limits: Limits,
+    cancel: &mut Cancellation<F>,
+) -> Result<(), FrontEndError> {
     cancel.at(Checkpoint::Admission);
     if sources.len() > limits.files {
         return Err(FrontEndError::FileCount);
@@ -311,8 +334,6 @@ fn run<F: FnMut(Checkpoint) -> bool>(
         if !paths.insert(path) {
             return Err(FrontEndError::DuplicatePath);
         }
-        // Module names are scanner metadata, not Python identifiers. As in the
-        // reference lane, empty and duplicate modules do not imply duplicate paths.
         if source.module.len() > MAX_METADATA || source.module.contains('\0') {
             return Err(FrontEndError::InvalidModule);
         }
@@ -321,11 +342,34 @@ fn run<F: FnMut(Checkpoint) -> bool>(
         }
         total = total
             .checked_add(source.bytes.len())
-            .filter(|&count| count <= limits.total_bytes)
+            .filter(|&n| n <= limits.total_bytes)
             .ok_or(FrontEndError::TotalBytes)?;
     }
+    Ok(())
+}
+
+fn run_consumer<'a, F: FnMut(Checkpoint) -> bool>(
+    sources: &'a [Source],
+    limits: Limits,
+    check: F,
+    consumer: &mut ValidatedConsumer<'_>,
+) -> Result<BatchReport<'a>, FrontEndError> {
+    let mut cancel = Cancellation {
+        expired: false,
+        check,
+    };
+    run_context(sources, limits, &mut cancel, consumer)
+}
+
+fn run_context<'a, F: FnMut(Checkpoint) -> bool>(
+    sources: &'a [Source],
+    limits: Limits,
+    cancel: &mut Cancellation<F>,
+    consumer: &mut ValidatedConsumer<'_>,
+) -> Result<BatchReport<'a>, FrontEndError> {
+    validate_sources(sources, limits, cancel)?;
     let mut report = BatchReport {
-        identity: identity(&mut cancel),
+        identity: identity(cancel),
         capabilities: Capabilities::default(),
         files: Vec::new(),
     };
@@ -350,11 +394,19 @@ fn run<F: FnMut(Checkpoint) -> bool>(
             .filter(|&count| count <= limits.report)
             .ok_or(FrontEndError::ReportLimit)?;
     }
-    for source in sources {
+    for (index, source) in sources.iter().enumerate() {
         let mut file = file_report(source);
-        file.sha256 = digest(&source.bytes, &mut cancel, Checkpoint::Hash);
+        file.sha256 = digest(&source.bytes, cancel, Checkpoint::Hash);
         if !cancel.at(Checkpoint::Decode) {
-            classify(&source.bytes, &mut file, limits, &mut cancel);
+            classify(
+                &source.bytes,
+                &mut file,
+                limits,
+                cancel,
+                &mut |text, parsed, check| {
+                    consumer(index, text, parsed, check);
+                },
+            );
         }
         report.files.push(file);
     }
@@ -383,6 +435,7 @@ fn classify<F: FnMut(Checkpoint) -> bool>(
     file: &mut FileReport<'_>,
     limits: Limits,
     cancel: &mut Cancellation<F>,
+    consume: &mut ValidatedFileConsumer<'_>,
 ) {
     let bytes = raw.strip_prefix(b"\xef\xbb\xbf").unwrap_or(raw);
     // Cookie detection precedes UTF-8 validation, including BOM/cookie conflicts.
@@ -428,8 +481,14 @@ fn classify<F: FnMut(Checkpoint) -> bool>(
         (true, false) => RuffSyntax::UnsupportedVersion,
         (false, false) => RuffSyntax::SyntaxAndUnsupportedVersion,
     };
-    // No syntax()/into_syntax() access here, even on success. Future lowering
-    // must be inside the BOTH-empty branch above, never an is_ok-only branch.
+    if errors.is_empty() && unsupported.is_empty() && !cancel.at(Checkpoint::Semantic) {
+        consume(text, &parsed, &mut || cancel.at(Checkpoint::Semantic));
+        cancel.at(Checkpoint::PostConsume);
+    }
+    // AST references never escape the callback. Destruction, like parsing, has no
+    // interrupt hook; this is cooperative accounting, not a stack/RSS sandbox.
+    drop(parsed);
+    cancel.at(Checkpoint::PostDrop);
 }
 
 fn lexical_gate<F: FnMut(Checkpoint) -> bool>(

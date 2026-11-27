@@ -1,5 +1,9 @@
 //! Deliberately small, transactional candidate policy. Not production evidence.
 use super::*;
+#[cfg(test)]
+use crate::analysis::python_scalars as scalars;
+use crate::analysis::{python_facts, python_projection as projection};
+pub(in crate::analysis) use python_facts::{Fact as CandidateFact, Warning as CandidateWarning};
 use std::collections::HashSet;
 use tree_sitter::Node;
 
@@ -11,17 +15,14 @@ mod patterns;
 use patterns::Pattern;
 #[path = "literals.rs"]
 mod literals;
-#[path = "scalars.rs"]
-mod scalars;
-use scalars::AsciiJson;
-#[path = "projection.rs"]
-mod projection;
 #[cfg(test)]
 use projection::AliasScope;
 use projection::{
     CallObservation, DefinitionKind, HeaderEvent, HeaderMetadata, HeaderSchedule, Projection,
     ScopeId, Shape,
 };
+#[cfg(test)]
+use scalars::AsciiJson;
 
 #[cfg(test)]
 #[path = "../python_parity/phase_batch.rs"]
@@ -31,18 +32,6 @@ mod phase_batch;
 const FACT_POLICY: &str = "python-native-private-facts-15";
 const MAX_FACTS: usize = 100_000;
 const SIGNATURE_WORK: usize = 2 * 16384 + 17;
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub(in crate::analysis) struct CandidateFact {
-    pub(in crate::analysis) id: String,
-    pub(in crate::analysis) kind: String,
-    pub(in crate::analysis) path: String,
-    pub(in crate::analysis) line: usize,
-    #[serde(rename = "endLine")]
-    pub(in crate::analysis) end_line: usize,
-    pub(in crate::analysis) symbol: String,
-    pub(in crate::analysis) value: String,
-}
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 pub(in crate::analysis) enum CandidateStatus {
@@ -73,13 +62,6 @@ pub(in crate::analysis) struct CandidateFile<'a> {
     pub(in crate::analysis) nodes_visited: usize,
     pub(in crate::analysis) max_depth: usize,
     pub(in crate::analysis) traversal_finished: bool,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub(in crate::analysis) struct CandidateWarning {
-    pub(in crate::analysis) code: &'static str,
-    pub(in crate::analysis) path: String,
-    pub(in crate::analysis) message: String,
 }
 
 // Opt-in test capture uses indices until definition spans/IDs are final. Ordinary
@@ -293,6 +275,7 @@ fn extract_impl<'a, F: FnMut(Checkpoint) -> bool>(
         candidate_identity.sha256.as_bytes(),
         FACT_POLICY.as_bytes(),
         include_bytes!("facts.rs").as_slice(),
+        include_bytes!("../python_facts.rs").as_slice(),
         include_bytes!("expressions.rs").as_slice(),
         include_bytes!("patterns.rs").as_slice(),
         include_bytes!("literals.rs").as_slice(),
@@ -3944,87 +3927,44 @@ fn type_comment<F: FnMut(Checkpoint) -> bool>(bytes: &[u8], cancel: &Cancellatio
 }
 
 // Python's ensure_ascii=True spelling, streamed directly into the ID hasher.
+#[cfg(test)]
 fn ascii_json<F: FnMut(Checkpoint) -> bool>(
     text: &str,
     hash: &mut Sha256,
     cancel: &Cancellation<F>,
 ) {
-    struct HashWriter<'a>(&'a mut Sha256);
-    impl Write for HashWriter<'_> {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.0.update(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-    // Source and fact budgets already bound input. Only cancellation can fail
-    // this infallible hashing sink; the caller discards the whole transaction.
-    let _ = AsciiJson::new(HashWriter(hash), usize::MAX, || {
-        cancel.at(Checkpoint::FactId)
-    })
-    .text(text);
+    let _ = python_facts::ascii_json(text, hash, &mut || cancel.at(Checkpoint::FactId));
 }
 
 fn fact_id<F: FnMut(Checkpoint) -> bool>(fact: &CandidateFact, cancel: &Cancellation<F>) -> String {
-    let mut hash = Sha256::new();
-    hash.update(b"[");
-    ascii_json(&fact.path, &mut hash, cancel);
-    hash.update(b", ");
-    ascii_json(&fact.kind, &mut hash, cancel);
-    hash.update(format!(", {}, {}, ", fact.line, fact.end_line).as_bytes());
-    ascii_json(&fact.symbol, &mut hash, cancel);
-    hash.update(b", ");
-    ascii_json(&fact.value, &mut hash, cancel);
-    hash.update(b"]");
-    format!("fact_{:x}", hash.finalize())
+    // The native cancellation latch invalidates the transaction before output;
+    // never manufacture a publishable digest from an interrupted hash prefix.
+    python_facts::fact_id(
+        python_facts::FactInput {
+            path: &fact.path,
+            kind: &fact.kind,
+            line: fact.line,
+            end_line: fact.end_line,
+            symbol: &fact.symbol,
+            value: &fact.value,
+        },
+        &mut || cancel.at(Checkpoint::FactId),
+    )
+    .unwrap_or_default()
 }
 
 fn signature<F: FnMut(Checkpoint) -> bool>(f: &Definition, cancel: &Cancellation<F>) -> String {
-    cancel.at(Checkpoint::Signature);
-    if f.positional.len() + f.keyword.len() > 128 {
-        return "{\"truncated\":true}".into();
-    }
-    let mut writer = AsciiJson::new(Vec::with_capacity(16384), 16384, || {
-        cancel.at(Checkpoint::Signature)
-    });
-    let result = (|| {
-        writer.raw(b"{\"keywordOnly\":[")?;
-        for (index, name) in f.keyword.iter().enumerate() {
-            if index > 0 {
-                writer.raw(b",")?;
-            }
-            writer.text(name)?;
-        }
-        writer.raw(b"]")?;
-        if let Some(name) = &f.kwarg {
-            writer.raw(b",\"kwarg\":")?;
-            writer.text(name)?;
-        }
-        writer.raw(b",\"positional\":[")?;
-        for (index, name) in f.positional.iter().enumerate() {
-            if index > 0 {
-                writer.raw(b",")?;
-            }
-            writer.text(name)?;
-        }
-        writer.raw(b"],\"positionalOnly\":")?;
-        writer.raw(f.positional_only.to_string().as_bytes())?;
-        if let Some(name) = &f.vararg {
-            writer.raw(b",\"vararg\":")?;
-            writer.text(name)?;
-        }
-        writer.raw(b"}")
-    })();
-    if result.is_err() {
-        "{\"truncated\":true}".into()
-    } else {
-        // Do not transfer 16 KiB of spare capacity per short signature into the
-        // output array, whose separate budget measures encoded bytes.
-        String::from_utf8(writer.into_inner().into_boxed_slice().into_vec())
-            .expect("ASCII parameter signature")
-    }
+    python_facts::signature(
+        python_facts::Signature {
+            positional: &f.positional,
+            positional_only: f.positional_only,
+            keyword: &f.keyword,
+            vararg: f.vararg.as_deref(),
+            kwarg: f.kwarg.as_deref(),
+        },
+        &mut || cancel.at(Checkpoint::Signature),
+    )
+    .unwrap_or_else(|_| "{\"truncated\":true}".into())
 }
 
 #[cfg(test)]

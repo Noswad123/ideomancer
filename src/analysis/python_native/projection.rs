@@ -245,11 +245,33 @@ pub(super) enum HeaderEvent {
     Visit(CallObservation),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HeaderGroup {
+    PositionalOnlyAnnotations,
+    PositionalAnnotations,
+    VarargAnnotation,
+    KeywordOnlyAnnotations,
+    KeywordDefaults,
+    KwargAnnotation,
+    PositionalDefaults,
+    Bases,
+    Keywords,
+    Decorators,
+    ReturnAnnotation,
+    TypeParameters,
+}
+
+impl HeaderGroup {
+    pub(super) const fn index(self) -> usize {
+        self as usize
+    }
+}
+
 #[derive(Default)]
 pub(super) struct HeaderSchedule {
     metadata: Vec<Option<HeaderMetadata>>,
     // Arguments/bases/keywords precede Body; decorators/return/type params follow.
-    // The admitted frontend supplies empty visit groups, not header-call admission.
+    // Capture is not syntax admission; each frontend owns its header-call guards.
     visits: [Vec<CallObservation>; 12],
     state: u8,
     kind: Option<DefinitionKind>,
@@ -280,16 +302,15 @@ impl HeaderSchedule {
         Ok(charge)
     }
 
-    #[cfg(test)]
     pub(super) fn capture_visit(
         &mut self,
-        group: usize,
+        group: HeaderGroup,
         call: CallObservation,
         limit: usize,
         work: &mut impl FnMut(usize) -> Result<()>,
     ) -> Result<()> {
         work(0)?;
-        if self.state != 0 || group >= self.visits.len() {
+        if self.state != 0 {
             return Err(Error::Unsupported);
         }
         let count = self
@@ -300,11 +321,13 @@ impl HeaderSchedule {
         if count >= limit || call.value.len() > 512 || call.callee.len() > 512 {
             return Err(Error::WorkingLimit);
         }
+        // Incoming text is already charged by lowering; this additional fixed
+        // allowance conservatively double-charges its bounded retained strings.
         let charge = (4 * std::mem::size_of::<CallObservation>())
             .checked_add(1024)
             .ok_or(Error::WorkingLimit)?;
         work(charge)?;
-        self.visits[group].push(call);
+        self.visits[group.index()].push(call);
         Ok(())
     }
 
@@ -314,6 +337,7 @@ impl HeaderSchedule {
         check: &mut impl FnMut() -> Result<()>,
         emit: &mut impl FnMut(HeaderEvent) -> Result<()>,
     ) -> Result<()> {
+        use HeaderGroup::*;
         check()?;
         if self.state != 0 {
             return Err(Error::Unsupported);
@@ -322,10 +346,14 @@ impl HeaderSchedule {
         self.state = 3;
         self.kind = Some(kind);
         let invalid = match kind {
-            DefinitionKind::Function => !self.visits[7].is_empty() || !self.visits[8].is_empty(),
+            DefinitionKind::Function => {
+                !self.visits[Bases.index()].is_empty() || !self.visits[Keywords.index()].is_empty()
+            }
             DefinitionKind::Class => {
-                self.visits[..7].iter().any(|group| !group.is_empty())
-                    || !self.visits[10].is_empty()
+                self.visits[..Bases.index()]
+                    .iter()
+                    .any(|group| !group.is_empty())
+                    || !self.visits[ReturnAnnotation.index()].is_empty()
             }
         };
         if invalid {
@@ -350,14 +378,22 @@ impl HeaderSchedule {
                 }
             }
         }
-        let groups: &[usize] = match kind {
+        let groups: &[HeaderGroup] = match kind {
             // ast.arguments field order, distinct from parameter metadata order:
             // posonlyargs, args, vararg, kwonlyargs, kw_defaults, kwarg, defaults.
-            DefinitionKind::Function => &[0, 1, 2, 3, 4, 5, 6],
-            DefinitionKind::Class => &[7, 8],
+            DefinitionKind::Function => &[
+                PositionalOnlyAnnotations,
+                PositionalAnnotations,
+                VarargAnnotation,
+                KeywordOnlyAnnotations,
+                KeywordDefaults,
+                KwargAnnotation,
+                PositionalDefaults,
+            ],
+            DefinitionKind::Class => &[Bases, Keywords],
         };
         for &group in groups {
-            for call in std::mem::take(&mut self.visits[group]) {
+            for call in std::mem::take(&mut self.visits[group.index()]) {
                 check()?;
                 emit(HeaderEvent::Visit(call))?;
             }
@@ -372,17 +408,18 @@ impl HeaderSchedule {
         check: &mut impl FnMut() -> Result<()>,
         emit: &mut impl FnMut(HeaderEvent) -> Result<()>,
     ) -> Result<()> {
+        use HeaderGroup::*;
         check()?;
         if self.state != 1 || self.kind != Some(kind) {
             return Err(Error::Unsupported);
         }
         self.state = 3;
-        let groups: &[usize] = match kind {
-            DefinitionKind::Function => &[9, 10, 11],
-            DefinitionKind::Class => &[9, 11],
+        let groups: &[HeaderGroup] = match kind {
+            DefinitionKind::Function => &[Decorators, ReturnAnnotation, TypeParameters],
+            DefinitionKind::Class => &[Decorators, TypeParameters],
         };
         for &group in groups {
-            for call in std::mem::take(&mut self.visits[group]) {
+            for call in std::mem::take(&mut self.visits[group.index()]) {
                 check()?;
                 emit(HeaderEvent::Visit(call))?;
             }
@@ -583,7 +620,8 @@ mod tests {
         );
     }
 
-    fn observation(group: usize) -> CallObservation {
+    fn observation(group: HeaderGroup) -> CallObservation {
+        let group = group.index();
         CallObservation {
             line: group + 1,
             end: group + 1,
@@ -594,6 +632,7 @@ mod tests {
 
     #[test]
     fn phase_batch_owned_groups_share_the_collector_driver_and_resolve_at_drain() {
+        use HeaderGroup::*;
         for kind in [DefinitionKind::Function, DefinitionKind::Class] {
             let mut p = Projection::default();
             p.root(&mut unlimited).unwrap();
@@ -602,9 +641,20 @@ mod tests {
                 .unwrap();
             let owner = p.enter(root, "repeat", 8, &mut unlimited).unwrap();
             let mut schedule = HeaderSchedule::default();
-            let groups: &[usize] = match kind {
-                DefinitionKind::Function => &[0, 1, 2, 3, 4, 5, 6, 9, 10, 11],
-                DefinitionKind::Class => &[7, 8, 9, 11],
+            let groups: &[HeaderGroup] = match kind {
+                DefinitionKind::Function => &[
+                    PositionalOnlyAnnotations,
+                    PositionalAnnotations,
+                    VarargAnnotation,
+                    KeywordOnlyAnnotations,
+                    KeywordDefaults,
+                    KwargAnnotation,
+                    PositionalDefaults,
+                    Decorators,
+                    ReturnAnnotation,
+                    TypeParameters,
+                ],
+                DefinitionKind::Class => &[Bases, Keywords, Decorators, TypeParameters],
             };
             for &group in groups.iter().rev() {
                 schedule
@@ -644,8 +694,8 @@ mod tests {
                 groups
                     .iter()
                     .map(|&group| (
-                        format!("group{group}()"),
-                        if group < 9 {
+                        format!("group{}()", group.index()),
+                        if group.index() < Decorators.index() {
                             "early.eval".into()
                         } else {
                             "late.exec".into()
@@ -670,21 +720,22 @@ mod tests {
 
     #[test]
     fn phase_batch_owned_group_bounds_and_failed_drains_are_not_resumable() {
+        use HeaderGroup::PositionalOnlyAnnotations as Group;
         let mut schedule = HeaderSchedule::default();
         assert_eq!(
             schedule.after(DefinitionKind::Function, &mut || Ok(()), &mut |_| Ok(())),
             Err(Error::Unsupported)
         );
         assert_eq!(
-            schedule.capture_visit(0, observation(0), 0, &mut unlimited),
+            schedule.capture_visit(Group, observation(Group), 0, &mut unlimited),
             Err(Error::WorkingLimit)
         );
         assert_eq!(
-            schedule.capture_visit(0, observation(0), 2, &mut |_| Err(Error::Cancelled)),
+            schedule.capture_visit(Group, observation(Group), 2, &mut |_| Err(Error::Cancelled)),
             Err(Error::Cancelled)
         );
         assert_eq!(
-            schedule.capture_visit(0, observation(0), 2, &mut |n| if n > 0 {
+            schedule.capture_visit(Group, observation(Group), 2, &mut |n| if n > 0 {
                 Err(Error::WorkingLimit)
             } else {
                 Ok(())
@@ -693,13 +744,13 @@ mod tests {
         );
         assert!(schedule.visits.iter().all(Vec::is_empty));
         schedule
-            .capture_visit(0, observation(0), 2, &mut unlimited)
+            .capture_visit(Group, observation(Group), 2, &mut unlimited)
             .unwrap();
         schedule
-            .capture_visit(0, observation(0), 2, &mut unlimited)
+            .capture_visit(Group, observation(Group), 2, &mut unlimited)
             .unwrap();
         assert_eq!(
-            schedule.capture_visit(0, observation(0), 2, &mut unlimited),
+            schedule.capture_visit(Group, observation(Group), 2, &mut unlimited),
             Err(Error::WorkingLimit)
         );
         let mut consumed = 0;
@@ -740,6 +791,7 @@ mod tests {
 
     #[test]
     fn phase_batch_metadata_order_is_distinct_from_generic_argument_order() {
+        use HeaderGroup::PositionalOnlyAnnotations as Group;
         let mut schedule = HeaderSchedule::default();
         for (order, name) in [(0, "a"), (1, "v"), (0, "k"), (2, "w")] {
             schedule
@@ -771,7 +823,7 @@ mod tests {
             )
             .unwrap();
         schedule
-            .capture_visit(0, observation(0), 8, &mut unlimited)
+            .capture_visit(Group, observation(Group), 8, &mut unlimited)
             .unwrap();
         let mut trace = Vec::new();
         schedule
@@ -788,7 +840,7 @@ mod tests {
         assert_eq!(trace, ["a", "k", "v", "w", "R", "group0()"]);
         assert!(schedule.metadata.iter().all(Option::is_none));
         assert_eq!(
-            schedule.capture_visit(0, observation(0), 8, &mut unlimited),
+            schedule.capture_visit(Group, observation(Group), 8, &mut unlimited),
             Err(Error::Unsupported)
         );
         assert_eq!(

@@ -17,6 +17,15 @@ use std::time::{Duration, Instant};
 #[allow(dead_code)] // Private native candidates, pending a production caller.
 mod python_native;
 
+#[allow(dead_code)] // Shared private output boundary for native Python candidates.
+mod python_facts;
+#[allow(dead_code)]
+#[path = "analysis/python_native/projection.rs"]
+mod python_projection;
+#[allow(dead_code)]
+#[path = "analysis/python_native/scalars.rs"]
+mod python_scalars;
+
 #[allow(dead_code)] // Private Ruff admission lane; no production dispatch.
 mod python_ruff;
 

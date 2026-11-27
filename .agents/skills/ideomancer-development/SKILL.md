@@ -40,7 +40,7 @@ guidance for coding agents, not an interpretation prompt for analyzed applicatio
   ```sh
   RUSTUP_AUTO_INSTALL=0 cargo test --locked --offline --jobs 2 --lib analysis::python_native -- --test-threads=2
   RUSTUP_AUTO_INSTALL=0 cargo test --locked --offline --jobs 2 --test engine_api -- --test-threads=2
-  ```
+   ```
 
 - Do not run concurrent Cargo commands against the shared target directory. Delegate
   read-only reviews or disjoint edits, but coordinate builds and tests serially.
@@ -71,7 +71,14 @@ guidance for coding agents, not an interpretation prompt for analyzed applicatio
   RUSTUP_AUTO_INSTALL=0 IDEOMANCER_TEST_PYTHON="$(command -v python3.12)" \
     cargo test --locked --offline --jobs 2 --lib analysis::python_ruff \
       -- --ignored --nocapture --test-threads=2
-  ```
+   ```
+
+  The Ruff filter already selects the new ignored
+  `analysis::python_ruff::facts::ruff_facts_batch` oracle, not selected by
+  `analysis::python_parity`. The three existing native ignored gates remain under
+  `analysis::python_native`. Shared ordinary unit tests now live under
+  `analysis::python_facts`, `analysis::python_projection` and
+  `analysis::python_scalars`; the old native filter does not select them.
 
 - Script changes: `python3.12 -B -m unittest discover -s scripts -p 'test_*.py'`.
 - New source paths: review and update `docs/source-files.txt`, then run
@@ -103,16 +110,75 @@ guidance for coding agents, not an interpretation prompt for analyzed applicatio
 
 ## Python frontend boundary
 
+### Overview
+
 The maintained Ruff 0.12.0 snapshot at
 `87f0feb21a1af67195bebf94d811770393f9f447` is a private syntax frontend, not a
-production fact backend. Captured-byte classification explicitly selects PY312 and
-`with_ast_only(true)` and checks both parse/version error channels. No AST, facts,
-literals or source excerpts are published. CPython compatibility and fact lowering
-remain Pending; the trusted Python >=3.12 AST helper remains the production default.
-Keep the Tree-sitter fact candidate as regression coverage until future Ruff lowering.
-Preparse byte/token/depth gates and cooperative before/after deadlines are not hard
-timeout/RSS guarantees or complete parser-recursion proof. PY312 is not proof of
-Unicode 15 compatibility. Syntax acceptance alone establishes no semantic facts.
+production fact backend. It now also has private generic fact candidate policy
+`python-ruff-private-facts-1`; CPython compatibility remains Pending. Production
+`python-static-8-generic-facts`, the trusted Python >=3.12 AST helper, public API,
+evidence, CLI and default are unchanged. No new vendor/dependency changes are needed.
+
+### API / Interfaces
+
+`parse_batch` remains classification-only. `extract_fact_candidates` returns bounded
+generic facts/IDs/diagnostics and per-file status with a module baseline; no AST,
+literal payload or source excerpt is published. `analysis/python_facts.rs` supplies
+common Fact/Warning records, IDs, signature/import/warning helpers and a transactional
+bounded sink. Projection/scalars are declared once in `analysis.rs`. Tree-sitter
+private policy 15 uses common records/IDs/signatures but retains its CST-specific
+collector, finalization and import encoder; this is not complete backend unification.
+
+### Data Flow
+
+Captured bytes pass existing input/lexical gates, then one Ruff parse with explicit
+PY312 and `with_ast_only(true)`. Both parse and unsupported-version diagnostics must
+be empty before a callback consumes the validated borrowed AST. No reparse or AST
+escape is allowed. Bounded normalization separates render and visit edges, preserving
+descendant calls even through opaque/clipped shapes and helper-order alias effects:
+return-annotation calls follow body imports, not source order. File emission is
+transactional. Source working regions are scoped per statement/expression; persistent
+projection maps charge retained aliases, including overwrite-shrink adjustments.
+
+### Edge Cases
+
+- Admitted: functions/async functions/classes/nested owners, full signatures,
+  annotations/defaults/bases/class keywords and non-decorator header calls; relative,
+  star and future imports; Assign/AnnAssign/class attributes/chained/destructured
+  writes; ordinary control flow, try, async for/with, raise/assert/augmented writes/
+  deletion; all Python 3.12 generic expression families, including lambdas,
+  comprehensions/generators, await/yield/walrus and f-strings. AST-only top-level
+  return/jumps are allowed when the parser accepts them, not executed or compile-validated.
+- Excluded: decorators, match patterns, type aliases/definition type parameters,
+  raw non-ASCII identifiers (even those normalizing to ASCII), all type comments
+  including ignores, and active named Unicode escapes. Raw/bytes/escaped-backslash
+  text is allowed. Nonzero decimal integers over 4300 digits exclude underscores
+  from the count; all-zero, base-prefixed, float and imaginary forms are exempt.
+- Constructor/include_router/router-mutation guards reject the whole file as
+  unsupported where G3 metadata is missing. Generic redacted shapes need no literal
+  payload retention. Effective encoding cookies and invalid UTF-8 remain unsupported;
+  UTF-8 BOM source hashes cover original bytes.
+- Semantic bounds: 200000 nodes, depth 256, 400000 edges, 100000 facts, 100000
+  warnings, 32 MiB working and 32 MiB output, in addition to existing input/lexical
+  bounds. Parsing and AST destruction are uninterruptible; cooperative accounting
+  is not an RSS/stack sandbox or hard deadline. Full Unicode, encoding, failure,
+  resource and G3/G5/G6 closure remain open; PY312 alone proves no compatibility.
+
+### Example usage
+
+For developer validation, use the existing `--lib analysis::python_ruff -- --ignored`
+oracle command above with a trusted Python 3.12 interpreter. Keep the existing active
+Rust 1.89 compiler, `RUSTUP_AUTO_INSTALL=0`, two jobs/threads and package-only formatting.
+There is no new public CLI/backend selector. Focused results are not final acceptance:
+broader Clippy, old-native source regression and oracle gates remain pending until
+the coordinating owner records their actual completion.
+
+### Related files
+
+See `docs/python-analysis.md` for the completion ledger and historical Tree-sitter/
+Ruff probes; `src/analysis/python_ruff/{facts,expressions}.rs` for the candidate;
+`src/analysis/python_facts.rs` and `src/analysis/python_native/{projection,scalars}.rs`
+for shared primitives. Keep fixtures generic; consumer-private source/paths stay out.
 
 ## Finish the feature
 
