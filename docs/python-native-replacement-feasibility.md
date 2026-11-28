@@ -6,25 +6,123 @@
 contract.** The user authorized this bounded byte-aware Ruff and version-strategy
 investigation after the private G2/G3 implementation checkpoint.
 
-**Finding: conditional GO for a separately bounded byte-input prototype, not a
-replacement-readiness pass.** An unchanged Ruff `&str` interface is insufficient.
-A byte-backed extension retaining its lexer state machine and grammar is credible
-by source inspection, but has not been implemented, compiled or demonstrated.
-It would expand the maintained fork beyond its current four patched source files.
+**Current: bounded private F1 lexer goal COMPLETE / PROVED by compiled tests;
+all F1 delivery gates PASS, including checkout consumer and guarded cache cleanup.**
+The [F1 ledger](python-analysis.md#f1-shared-byte-lexer-experiment)
+records the shared fallible byte core, frozen baseline, tests and provenance. F0's
+conditional GO/uncompiled finding below is historical and superseded only for
+lexical proof, not parser integration or replacement readiness. Unchanged Ruff
+`&str` input remains insufficient for malformed comment bytes.
 
 This investigation does not authorize that expanded production patch, a parser
 replacement, source repair, tool installation, public profile/API changes,
 automatic fallback, a default switch or a narrower production contract. Existing
-uncommitted frontend-5/facts-7 work is preserved. Production remains
+frontend-5/facts-7 policies are preserved. Production remains
 `python-static-8-generic-facts` with the explicitly selected Python >=3.12 helper.
-F1/F2 implementation and its expanded vendored patch closure require a new,
-bounded implementation approval; the conditional GO is not that approval.
+F1's bounded vendor expansion is now authorized; F2 parser/source/debug changes
+and version/product policy still require separate approval. The user-reported
+actual pre-F1 HEAD is `fdf4e58` (facts-6 commit, initially clean/ahead one), not the
+historical `523cd7b` checkpoint. Current F1 changes remain uncommitted and unstaged.
+F1 completion does not prove byte parser input, AST/debug construction, CPython
+admission, F2 or full G4, and does not authorize further implementation.
+
+## F1 Current Lexical Evidence
+
+### Overview
+
+One `CoreLexer(&[u8], byte cursor)` serves legacy `Lexer(&str)` and the doc-hidden
+experimental `pub lexer::byte::ByteLexer`. There is no separate lexer, source
+repair/masking/substitution, unchecked UTF-8, parser/AST/debug construction,
+codec/type-comment semantic, facts dispatch or `engine::v1` change. Legacy
+signatures/defaults and all four modes remain; malformed-byte guarantees cover
+Module only. Production still uses the helper; frontend-5/facts-7 names stay fixed,
+while implementation identity changes transitively through vendor provenance.
+
+### API / Interfaces
+
+The byte facade is fallible and session-checkpointed. Byte views are range-checked
+zero-copy borrows; `source_text(&mut self, range)` meters work and polls cancellation.
+Invalid UTF-8 views do not poison lexing; view resource/cancellation failures latch.
+Defaults are 2 MiB input, 32M work units, 200000 tokens, depth 256, 32 MiB cumulative
+conservative allocation charges, 1024 checkpoints and 10000 diagnostics. These are
+cooperative limits, not live RSS or hard deadlines; the final precharged safe UTF-8
+check remains linear and uninterruptible (at most 2 MiB under default input limits).
+
+### Data Flow
+
+Scalar, malformed input and EOF are distinct. Only existing `lex_comment` consumes
+opaque bytes, including replacement-expression comments. String/outer/format text
+faults are structured `SourceFault`s, never Python certificates. Session-owned
+checkpoints restore token/value/taken state, cursor/token start/previous opaque
+state, diagnostics and indentation/interpolation stacks even non-LIFO. A prior
+owned checkpoint can clear a source fault, but never cancellation/resource latches
+or cumulative work/token/allocation/checkpoint charges. Re-lex rejects offsets
+at/after the cursor and non-newlines. Original pointers, bytes and ranges remain.
+
+### Edge Cases
+
+Raw NUL is a scalar here; root NUL policy remains separate. Lexically opaque
+type/ignore payloads are not semantic admission. Debug-shaped field comments do
+not prove debug constants, AST admission or lazy failure precedence: those remain
+F2, along with byte parser/source access and BOM/coordinate anchors. G4 is open.
+
+The coordinator reports **all 131 private Ruff tests passed** after fixes,
+including **23 F1 ordinary** (22 acceptance + one baseline) and **17 existing
+opt-ins**. All **364** complete positive facts/IDs/diagnostics/raw replay matched
+on the unchanged normal `&str` path. Both facades passed all thirteen independent
+pre-core trace hashes (298 tokens including EOF, all four modes); legacy
+`Send + Sync` compiled/passed in the baseline. Forty-eight shared-core UTF-8 trace
+comparisons remain supplementary. The P2 source-view metering fix and added root
+regression passed, including repeated views, cancellation and chunk boundaries.
+
+Product formatting/all-target Clippy, **58 vendor script tests**, schema-2 vendor
+checker and **261-path** source check passed. Scripts: **310 discovered, 297 passed,
+13 isolation-required skips**; explicit byte/visitor/codec **23 / 43 / 24 passed**,
+no skips, together covering all 310 unique tests across lanes. No additional core
+changes are planned; provenance anchors are stable. Current preservation passed
+**708 library tests (191 ignored), 18 adapter + 8 engine**, and explicit **165
+reference + 3 native** tests. With the 17 Ruff opt-ins, **all 185 explicit gates
+passed**, including known-limit assertions—not 185 parity matches. The P2 view
+accounting item is closed; final read-only review found no material P1/P2/P3
+findings and new schema-2 guards passed. Offline consumer passed with a fresh
+**105-package** lock, **one native TypeScript public-API test**, five contained
+Ruff crates, ABI **0.1.5** and source-hash rechecks. Its tested snapshot is
+`2cea3f996bf4a0e0cbbfd242b681331fb2208a3f0e6ac1fba2e4e81472869c6e`,
+not a Git revision or final-docs attestation; its owned cache `TMPDIR` was cleaned.
+Guarded preflight found zero blockers/protected outputs, normal `debug`/`tmp` only;
+cleanup removed **1,360,498,688 estimated allocated bytes (~1.27 GiB)**. Target
+absent, follow-up `already_clean`, **no Cargo afterward**. No owned debug/test
+artifacts remain; root cache parent empty, `.ideomancer/` JS/global caches
+untouched. Final source/Git/helper checks are read-only, without rebuilding.
+No commits or pushes were made. The bounded lexical goal and delivery are complete,
+not an outstanding source-fault or compilation concern.
+
+### Example usage
+
+`b"# \xff\nx=1\n"` retains opaque comment bytes lexically; a text view of the
+comment fails `InvalidUtf8` without poisoning the stream. This is not a CPython
+file-admission result. See the acceptance tests rather than a public engine selector.
+
+### Related files
+
+- [Frozen baseline](python-byte-lexer-baseline.json),
+  [legacy test](../src/analysis/python_ruff/byte_lexer_tests.rs),
+  [acceptance tests](../src/analysis/python_ruff/byte_lexer_acceptance.rs).
+- [Schema-2 vendor provenance](../vendor/ruff/provenance.json): unchanged policy
+  patch plus disjoint four-file lexer patch; eight modified upstream sources,
+  57 unchanged and one separately hashed authored MIT facade. Current closure:
+  87 files / 66 Rust sources / 1,972,891 bytes; source inventory 261 paths.
+   Exact hashes, completed delivery and future F2 gates are in the [F1 ledger](python-analysis.md#f1-shared-byte-lexer-experiment).
+
+The remaining source audit and F0 validation sections are historical unless marked
+as future F2/F3/version requirements; their cache receipts do not describe F1.
 
 ## The Two Independent Problems
 
-1. **Byte input.** CPython admits some malformed UTF-8 bytes in comments. Ruff's
-   current parser, token source, lexer and character cursor require whole-source
-   `&str`. Replacing, masking, stripping or lossily decoding those bytes would
+1. **Byte input.** CPython admits some malformed UTF-8 bytes in comments. At F0,
+   Ruff's parser, token source, lexer and cursor required whole-source `&str`.
+   F1 changes the lexical seam only; parser integration remains F2.
+   Replacing, masking, stripping or lossily decoding those bytes would
    change the parser input; hashing the original would not make that acceptable.
 2. **Version semantics.** The helper calls the selected interpreter's
    `ast.parse(original_bytes, type_comments=True)` without a grammar version and
@@ -118,7 +216,8 @@ string lexer loses lexical state and is not a byte-input solution.
 
 ## Proposed Byte Architecture
 
-This is a design shape, not an approved API or implemented feature:
+This remains a proposed end-to-end design, not an implemented byte parser. F1
+implements only its shared lexical seam:
 
 ```text
 captured immutable bytes + original digest
@@ -281,7 +380,7 @@ Rust build, target application, dependency installation or parser adoption is
 performed. The existing completed visitor/metadata work and production default
 are unchanged.
 
-## Investigation Validation And Handoff
+## Historical F0 Investigation Validation And Handoff
 
 - Reference checker: **219/219 expected CPython outcomes**, **53 control
   relationships**, **20 debug-f-string witnesses**; not native parity results.
@@ -299,6 +398,7 @@ are unchanged.
   F0. The guarded helper reported `already_clean`; no cache removal was needed.
   Owned validation scratch was cleaned, with no retained test/debug artifacts.
   Earlier implementation results remain historical receipts, not new F0 tests.
-- Changes remain uncommitted with prior implementation work preserved. The next
-  engineering proposal is F1's bounded byte-lexer experiment, not production
-  integration. Version-policy approval remains an independent promotion blocker.
+- At F0 handoff, changes remained uncommitted with prior implementation work
+  preserved and F1 was the proposed next step. F1 is now authorized as recorded
+  above; this historical receipt is not its closeout. Version-policy approval
+  remains an independent promotion blocker.

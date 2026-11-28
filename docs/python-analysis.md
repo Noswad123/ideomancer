@@ -22,13 +22,15 @@ or Flask support and does not remove basic non-web Python callable discovery,
 local service/network candidate views, or the existing Python agent path.
 
 Production remains `python-static-8-generic-facts` with the trusted Python >=3.12
-helper. The user selected contract-preserving full replacement and explicitly
-authorized the bounded F0 byte-aware Ruff feasibility/version investigation. Start
-with the [feasibility ADR](python-native-replacement-feasibility.md) and
-[F0 ledger](#f0-byte-input-and-version-feasibility); the
+helper. The user selected contract-preserving full replacement and authorized the
+bounded private F1 lexer experiment following F0. Start with the
+[current F1 ledger](#f1-shared-byte-lexer-experiment) and
+[feasibility ADR](python-native-replacement-feasibility.md); the
 [frontend-5/facts-7 visitor contract](#ruff-visitor-contract-batch-frontend-5--private-facts-7)
 and private G2/G3 closure are unchanged. Earlier results/cleanup receipts remain
-historical, not new validation of F0 or these documentation bytes.
+historical, not current-tree validation or cache status. The user-reported actual
+HEAD before F1 is `fdf4e58` (the facts-6 commit; initially clean and ahead one), not
+`523cd7b`. Earlier HEAD/uncommitted-work statements below describe their checkpoints.
 
 Explicit `network`/`services` views stay local for one API or callable workflow
 entry plus saved evidence. Only API entries can be enriched by a local
@@ -84,7 +86,7 @@ The finite completion ledger is:
 | P1-G1 | Generic expression and ordinary-body coverage: containers/operators/indexing, call-free defaults, conditions, loops and context managers; hidden calls/warnings, owner restoration, spans and one counted walk remain exact. | Implemented and locally validated for the bounded G1 subset below |
 | P1-G2 | Close the generic visitor inventory: remaining statements, targets/writes/imports, arbitrary callees/splats, comprehensions/lambdas/generators, await/yield/walrus, all headers and literal/identifier forms. Every target-version node has a normalization/traversal rule and cross-family oracle cases. | **PRIVATE IMPLEMENTATION COMPLETE/CLOSED** for current admitted Python 3.12 Module-AST lane: closed class/field inventory + full-output/raw-replay coverage, 364 matching positives and completed preservation checkpoint; not complete Python compatibility or G4–G6/cutover |
 | P1-G3 | Preserve every existing discovery/framework side output: decorators, CLI/job/API entry facts, route diagnostics and FastAPI host/prefix/include/mutation metadata, including aliases and literal-retention limits. | **PRIVATE IMPLEMENTATION COMPLETE/CLOSED** for the same admitted lane, including metadata/diagnostic/cap coverage and completed preservation: 108 Ruff (17 opt-in), 685 library (191 ignored), 18 adapter / 8 engine, 165 reference + 3 native; no new framework semantics or G4–G6/cutover approval |
-| P1-G4 | Close grammar/version/encoding/failure differences: original-byte digests, decoding/cookies, physical layout and exact observable parse diagnostics. No unexplained valid-file rejection or invalid-file acceptance in the approved compatibility suite. | Open: full replacement selected; F0 source audit conditionally supports a separately bounded byte prototype, not native parity. Byte proof, approved version policy and remaining admission/failure/resource/codec gates still block replacement; production helper retained |
+| P1-G4 | Close grammar/version/encoding/failure differences: original-byte digests, decoding/cookies, physical layout and exact observable parse diagnostics. No unexplained valid-file rejection or invalid-file acceptance in the approved compatibility suite. | Open: bounded F1 lexer goal COMPLETE / PROVED by compiled tests; all F1 delivery gates passed, consumer and cleanup complete. Byte parser input, AST/debug construction, CPython admission/F2, approved version policy and remaining failure/resource/codec gates still block replacement; production helper retained |
 | P1-G5 | Integrate distinct native identity, evidence/snapshots, CLI/library dispatch, workflow revalidation and capabilities. Preserve old-save reading/rendering; rediscovery invalidates stale claims. Native operation must not probe Python. | Pending; public migration design required |
 | P1-G6 | Existing-engine usefulness and operational/cutover acceptance: class/callable/API/network/services views, adapter proofs, saved-source reuse, supported platforms/toolchain/package/resource checks, then explicit replacement approval. | Pending |
 
@@ -1922,7 +1924,168 @@ rebuilding; the pre-documentation receipt does not self-attest these edited byte
 - `scripts/{generate,check,test}_python_codecs312.py`: offline isolated reproduction and profile gates
 - [Development workflow](development-workflow.md), [release boundary](releasing.md), [third-party notices](third-party-notices.md)
 
+#### F1 shared byte lexer experiment
+
+##### Overview
+
+**Bounded F1 lexer goal COMPLETE / PROVED by compiled tests; all delivery gates PASS.**
+Checkout-consumer validation and guarded cache cleanup are complete. This does
+not prove byte parser input, AST/debug construction,
+CPython admission, F2 or full G4, and does not authorize further implementation.
+F1 supersedes F0's uncompiled feasibility finding only for lexical proof. One
+fallible `CoreLexer` over borrowed bytes and a byte cursor serves both the legacy
+`Lexer(&str)` facade and experimental `ruff_python_parser::lexer::byte::ByteLexer`.
+There is no independent lexer, source masking/substitution, unchecked UTF-8,
+parser/AST/debug-construction change, source-codec/type-comment semantic change or
+facts dispatch change. Frontend-5/facts-7 names and production helper/API/defaults
+remain unchanged; the implementation fingerprint changes transitively with the
+new vendor provenance. F2 and version/product-policy changes still need approval.
+
+##### API / Interfaces
+
+The doc-hidden `pub` vendor module is additive experimental plumbing, **not
+`engine::v1` or a public backend selector**. `ByteLexer::new` takes `&[u8]`, `Mode`,
+`ByteLexerLimits` and a cancellation callback (`true` cancels). `next_token`,
+`current_token`, `take_value`, `checkpoint`, `rewind`, `re_lex_logical_token` and
+`finish` are fallible. `finish` requires a genuine consumed EOF. Legacy signatures,
+defaults and all four modes remain; legacy control is unlimited and has no
+cancellation callback, with source faults unreachable from typed `&str`.
+
+`original_bytes` and range-checked `source_bytes` borrow the unchanged backing
+buffer. `source_text(&mut self, range)` returns a zero-copy checked view or
+`ByteViewError::{InvalidRange, InvalidUtf8, ResourceLimit, Cancelled}`. Text views
+are metered and cancellable, including repeated requests. Invalid UTF-8 views do
+not poison the token stream; resource/cancellation failures latch. Validation uses
+bounded chunks, then a precharged safe linear UTF-8 check to construct the borrow;
+that final check is uninterruptible (at most 2 MiB under default input limits).
+This is not a hard deadline or RSS guarantee.
+
+Default limits: **2 MiB input, 32M work units (32 × 1024 × 1024), 200000 tokens,
+depth 256, 32 MiB cumulative conservative allocation charges, 1024 checkpoints,
+10000 diagnostics**. Allocation accounting is not live residency.
+
+##### Data Flow
+
+The shared cursor distinguishes scalar, malformed input and EOF; raw NUL is
+`Scalar(0)`, not EOF. Only the existing `lex_comment` transition consumes opaque
+payload bytes, including in the shared f-string replacement-expression context.
+Malformed ordinary-string, outer f-string and format-text bytes produce structured
+`SourceFault` ranges, not Python exception certificates. Token spans and borrowed
+source pointers retain their original byte identity.
+
+Checkpoints belong to a unique atomic lexer-session ID, not merely a buffer.
+Restoration includes current token/value and taken state, cursor/token start,
+previous opaque state, diagnostics, indentation and interpolation stacks, including
+non-LIFO restores. A source fault is sticky until an owned prior checkpoint is
+restored. Cancellation/resource failures and monotonic work/token/allocation/
+checkpoint counts are never cleared or refunded by rewind. Re-lex rejects a
+non-newline or an offset at/after the current cursor, including an unconsumed newline.
+
+##### Edge Cases
+
+- Malformed-byte guarantees are **Module mode only**. Valid UTF-8 differential
+  coverage includes Module, Expression, ParenthesizedExpression and Ipython.
+- Cookie/type/ignore payloads are lexically opaque comments, not semantic admission.
+  Debug-shaped replacement comments tokenize; constructing CPython-compatible debug
+  constants remains F2. Root NUL rejection and encoding selection remain separate.
+- F2 still needs byte parser/source/debug integration, BOM/coordinate anchors,
+  admission and lazy-error precedence proof. F1 is not G4 or replacement parity.
+
+**Current validation reported by the coordinator:** all **131 private Ruff tests
+passed**, including **23 ordinary F1 tests** (22 acceptance + one independent
+legacy baseline) and **17 existing opt-in tests**, after all fixes. All **364**
+current complete positive facts/IDs/diagnostics/raw-replay cases matched on the
+unchanged normal `&str` path. Current preservation passed **708 library tests
+(191 ignored)** and **18 adapter + 8 engine** tests. Explicit **165 reference +
+3 native** tests also passed; with the 17 Ruff opt-ins from the full 131-test run,
+**all 185 explicit gates passed**, including known-limit assertions—not 185 parity
+matches. These are current feature results; older receipts below remain historical.
+
+Thirteen complete ordered kind/range/flag/value/error traces were frozen **before
+core edits**, covering **298 tokens including EOF** across all four modes. Both
+legacy and byte facades passed all thirteen hashes using the
+[frozen baseline](python-byte-lexer-baseline.json). The legacy `Send + Sync`
+assertion compiled and passed inside the baseline test in the full 131-test run.
+The additional **48** full valid-UTF-8 trace comparisons share the core and are supplementary,
+not independent preservation proof. The acceptance matrix includes **128** malformed
+comment ending/adjacency combinations, **32** valid comment counterparts, **24**
+opaque type/ignore/cookie payloads, **32** replacement-comment contexts and **48**
+negative string/f-string contexts (plus **48** fault-location/unterminated probes).
+
+The initial run had 21 passes/two failures: an unconsumed newline at
+`offset == cursor` was incorrectly accepted; rejecting offsets `>= cursor` fixed
+the real re-lex API issue without rewriting source. The raw-`0xff` newline
+expectation was corrected from `5..6` to `4..5`: `0xff` occupies one byte (test
+off-by-one). Review's P2 unmetered-source-view finding is fixed; the passing root
+regression covers repeated views, cancellation and UTF-8 chunk boundaries with
+bounded `&mut self` control and explicit view-error variants. The **23** F1 count
+includes this additional regression beyond the agent's earlier 21 acceptance
+tests. All **131** passed after these fixes. No additional core changes are
+planned; provenance/patch/authored-source anchors below are stable. The P2
+source-view accounting review item is closed. Final read-only review found no
+material P1/P2/P3 findings; the new schema-2 guards passed. Structured source-fault
+behavior and compiled lexical proof are established, not outstanding concerns.
+
+| Current gate | Coordinator-reported result |
+| --- | --- |
+| Unfiltered library / API preservation | **708 library passed / 191 ignored; 18 adapter + 8 engine passed** |
+| Explicit reference / native / Ruff gates | **165 + 3 + 17 = 185 passed**, including known-limit assertions, not all parity matches |
+| Product formatting / all-target Clippy | Passed; product-only formatting and `--no-deps -- -D warnings` |
+| Global script discovery | **310 discovered, 297 passed, 13 isolation-required skips** |
+| Explicit isolated byte / visitor / codec suites | **23 / 43 / 24 passed**, no skips; combined lanes cover **all 310 unique tests**, not 310 discovery-lane passes |
+| Vendor scripts / schema-2 checker | **58 passed**; checker passed at **87 files / 66 Rust sources / 1,972,891 bytes** (65 upstream + one local; eight modified / 57 unchanged upstream) |
+| Source inventory | **261 paths passed** |
+| Offline checkout consumer | Passed: fresh **105-package** lock, **one native TypeScript public-API test**, five contained Ruff crates, ABI **0.1.5**, source hashes rechecked |
+| Guarded cache cleanup | Passed: **1,360,498,688 estimated allocated bytes (~1.27 GiB)** removed; target absent, follow-up **`already_clean`** |
+
+**Completed F1 delivery:** the offline consumer's tested source snapshot is
+`2cea3f996bf4a0e0cbbfd242b681331fb2208a3f0e6ac1fba2e4e81472869c6e`.
+This is not an actual Git revision or an attestation of final documentation bytes.
+Its unique owned cache `TMPDIR` was cleaned, with none left. Guarded preflight
+found **zero blockers / zero protected outputs**, normal `debug`/`tmp` only;
+cleanup removed **1,360,498,688 estimated allocated bytes (~1.27 GiB)**. Target is
+absent and follow-up reported **`already_clean`**; **no Cargo ran after cleanup**.
+No owned debug/test artifacts were retained; the root cache parent is empty.
+Existing `.ideomancer/` JS artifacts and global caches were untouched. Final
+source/Git/helper checks are read-only, without rebuilding.
+
+Current F1 changes remain uncommitted and unstaged, with no commits or pushes,
+following the user-committed pre-F1 `fdf4e58` checkpoint observed clean.
+Existing CI's ordinary root test
+lane selects the F1 tests; no public backend or new runtime Python path is introduced.
+
+##### Example usage
+
+Private lexical example: `b"x#\xff\ntail=1\n"` retains the comment bytes and yields
+the following `tail` token. A checked text view over that comment returns
+`InvalidUtf8` without stopping lexing. By contrast `b"x='#\xff'\n"` faults in
+string text. Neither outcome certifies CPython file admission or exception class.
+
+##### Related files
+
+- [`byte_lexer_acceptance.rs`](../src/analysis/python_ruff/byte_lexer_acceptance.rs),
+  [`byte_lexer_tests.rs`](../src/analysis/python_ruff/byte_lexer_tests.rs) and
+  [baseline JSON](python-byte-lexer-baseline.json): ordinary root tests and frozen traces.
+- [`lexer.rs`](../vendor/ruff/crates/ruff_python_parser/src/lexer.rs) and
+  `lexer/{cursor,indentation,interpolated_string,byte}.rs`: shared core/state and facade.
+- [`provenance.json`](../vendor/ruff/provenance.json): strict schema 2; two disjoint
+  four-file patches (`ast-only-policy.patch` unchanged, plus
+  `byte-lexer-experiment.patch`) and separately hashed original MIT `lexer/byte.rs`.
+  The **65-source upstream pristine map is unchanged**: eight modified upstream,
+  57 unchanged, plus one authored source = **66 Rust sources** in **87 vendor files /
+  1,972,891 bytes**. Source inventory: **261 paths**, five additions to F0's 256.
+  No manifests, dependencies or tools changed.
+- Current SHA-256 anchors: provenance
+  `83b701ef82cd549d1b01501520f57b9504e3decac32cdc7d151add639f892800`;
+  F1 patch `4f4d3a244236a3e730ab805716f23f581483fa6e7a38060b1ea10c344fe5aac5`;
+  authored facade `d8e617b7bb9401e96263997b99151cfa02e3dd0af1254a384c7569e12d2fec94`.
+  Retain root MIT and Ruff licenses, plus existing PSF/Unicode notices unchanged.
+
 #### F0 byte-input and version feasibility
+
+**Historical F0 checkpoint:** uncompiled findings and clean-cache receipts below
+are superseded only by the bounded F1 lexical evidence above, not by parser proof
+or current-tree closeout. HEAD references describe that historical observation.
 
 ##### Overview
 
@@ -2011,6 +2174,10 @@ python3.12 -I -S -B scripts/test_python_byte_contract.py
 - `vendor/ruff/crates/ruff_python_parser/src/{token_source.rs,lexer/cursor.rs}`: concrete byte-interface constraints.
 
 #### Ruff visitor contract batch: frontend-5 / private facts-7
+
+**Historical visitor checkpoint:** policy names/closed private G2/G3 scope remain
+current; validation, HEAD, uncommitted-work and cache receipts below are historical,
+not current F1 closeout.
 
 ##### Overview
 

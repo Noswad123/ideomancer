@@ -19,8 +19,12 @@ import tomllib
 COMMIT = "87f0feb21a1af67195bebf94d811770393f9f447"
 ARCHIVE_SHA256 = "e4613ad9fe6f7293510586649aab788e10610ab80fe9dd509ba7ac2364413631"
 LOCK_SHA256 = "ccc843838d16f203d18a3410dd120e72e750a89ee42164145ae9cbf181fb6f47"
-PROVENANCE_SHA256 = "b8246ec2c0911719ddd715f80dac504795c97f70ab828bd4375d18538c237ee0"
+PROVENANCE_SHA256 = "83b701ef82cd549d1b01501520f57b9504e3decac32cdc7d151add639f892800"
 PRISTINE_SHA256 = "7e25402b858763700567914d71410161c80128b29605de3cdb29c8f03eafe44b"
+POLICY_PATCH_SHA256 = "e79a66530f58f63371c0423f5f0469ff82f9b0193f57b6ba8672c3c33aa4e90e"
+BYTE_PATCH_SHA256 = "4f4d3a244236a3e730ab805716f23f581483fa6e7a38060b1ea10c344fe5aac5"
+BYTE_SOURCE_SHA256 = "d8e617b7bb9401e96263997b99151cfa02e3dd0af1254a384c7569e12d2fec94"
+BYTE_SOURCE = "crates/ruff_python_parser/src/lexer/byte.rs"
 MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_TOTAL_BYTES = 4 * 1024 * 1024
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -29,6 +33,12 @@ POLICY_FILES = (
     "crates/ruff_python_parser/src/parser/expression.rs",
     "crates/ruff_python_parser/src/parser/statement.rs",
     "crates/ruff_python_parser/src/parser/pattern.rs",
+)
+BYTE_LEXER_FILES = (
+    "crates/ruff_python_parser/src/lexer.rs",
+    "crates/ruff_python_parser/src/lexer/cursor.rs",
+    "crates/ruff_python_parser/src/lexer/indentation.rs",
+    "crates/ruff_python_parser/src/lexer/interpolated_string.rs",
 )
 LOCAL = {
     "ruff_python_parser": ("ruff_python_ast", "ruff_python_trivia", "ruff_text_size"),
@@ -111,8 +121,9 @@ def parse_provenance(data):
     value = json.loads(data, object_pairs_hook=unique_object)
     require(isinstance(value, dict) and set(value) == {
         "schema_version", "upstream", "pristine_sources", "policy", "files",
+        "byte_lexer_experiment", "local_sources",
     }, "unknown or missing provenance fields")
-    require(type(value["schema_version"]) is int and value["schema_version"] == 1, "unknown schema version")
+    require(type(value["schema_version"]) is int and value["schema_version"] == 2, "unknown schema version")
     require(value["upstream"] == {
         "repository": "https://github.com/astral-sh/ruff", "tag": "0.12.0",
         "commit": COMMIT,
@@ -129,13 +140,33 @@ def parse_provenance(data):
     ), "unexpected pristine source membership")
     canonical = json.dumps(pristine, sort_keys=True, separators=(",", ":")).encode()
     require(digest(canonical) == PRISTINE_SHA256, "pristine source reference changed")
-    require(isinstance(value["policy"], dict) and set(value["policy"]) == set(POLICY_FILES), "unexpected policy files")
-    for name in POLICY_FILES:
-        require(name in value["files"], f"missing policy inventory: {name}")
-        require(value["policy"][name] == {
-            "original_sha256": pristine[name]["sha256"],
-            "patched_sha256": value["files"][name]["sha256"],
-        }, f"policy hash mapping changed: {name}")
+    files = value["files"]
+    require("provenance.json" not in files, "provenance must not inventory itself")
+    require(set(POLICY_FILES).isdisjoint(BYTE_LEXER_FILES), "overlapping patch groups")
+    for group, names in (("policy", POLICY_FILES), ("byte_lexer_experiment", BYTE_LEXER_FILES)):
+        require(isinstance(value[group], dict) and set(value[group]) == set(names), f"unexpected {group} files")
+        require(set(names) <= set(pristine), f"non-upstream {group} files")
+        for name in names:
+            require(name in files, f"missing {group} inventory: {name}")
+            require(value[group][name] == {
+                "original_sha256": pristine[name]["sha256"],
+                "patched_sha256": files[name]["sha256"],
+            }, f"{group} hash mapping changed: {name}")
+    local = value["local_sources"]
+    require(isinstance(local, dict) and set(local) == {BYTE_SOURCE}, "unexpected local source files")
+    require(set(local).isdisjoint(pristine), "local source claimed as upstream pristine")
+    require(BYTE_SOURCE in files, "missing local source inventory")
+    require(local[BYTE_SOURCE] == {
+        **files[BYTE_SOURCE], "origin": "Ideomancer-authored", "license": "MIT",
+    }, "local source metadata or inventory mismatch")
+    require(files[BYTE_SOURCE]["sha256"] == BYTE_SOURCE_SHA256, "reviewed local source hash changed")
+    require({name for name in files if "/src/" in name} == set(pristine) | set(local), "source set changed")
+    require({name for name in pristine if files[name] != pristine[name]}
+            == set(POLICY_FILES) | set(BYTE_LEXER_FILES), "modified upstream source set changed")
+    for name, expected in (("patches/ast-only-policy.patch", POLICY_PATCH_SHA256),
+                           ("patches/byte-lexer-experiment.patch", BYTE_PATCH_SHA256)):
+        require(name in files and files[name]["sha256"] == expected, f"reviewed patch hash changed: {name}")
+    require(len(files) == 86, "unexpected reviewed file count")
     # Pin the whole reviewed inventory, not hashes supplied by a mutable sidecar.
     require(digest(data) == PROVENANCE_SHA256, "reviewed provenance digest changed")
     return value
@@ -333,18 +364,23 @@ def check_vendor(root):
     files = {**provenance["files"], "provenance.json": {"bytes": len(data), "sha256": digest(data)}}
     validate_inventory(root, files)
     pristine = provenance["pristine_sources"]
-    require({name for name in files if "/src/" in name} == set(pristine), "source set changed")
     patched = {name: (root / name).read_bytes() for name in POLICY_FILES}
     originals = reverse_policy_patch((root / "patches/ast-only-policy.patch").read_text(), patched)
+    validate_policy(patched, originals)
+    byte_patched = {name: (root / name).read_bytes() for name in BYTE_LEXER_FILES}
+    originals.update(reverse_policy_patch((root / "patches/byte-lexer-experiment.patch").read_text(), byte_patched))
     for name, expected in pristine.items():
         content = originals[name] if name in originals else (root / name).read_bytes()
         require(len(content) == expected["bytes"] and digest(content) == expected["sha256"], f"pristine source mismatch: {name}")
-    validate_policy(patched, originals)
     for name in LOCAL:
         crate = root / "crates" / name
         validate_manifest((crate / "Cargo.toml").read_bytes(), name, crate, root)
     require(digest((root / "upstream/Cargo.lock").read_bytes()) == LOCK_SHA256, "upstream lock changed")
-    return {"files": len(files), "bytes": sum(item["bytes"] for item in files.values()), "sources": len(pristine), "commit": COMMIT}
+    return {"files": len(files), "bytes": sum(item["bytes"] for item in files.values()),
+            "sources": len(pristine) + len(provenance["local_sources"]),
+            "pristine_sources": len(pristine), "local_sources": len(provenance["local_sources"]),
+            "modified_upstream_sources": len(originals),
+            "unmodified_upstream_sources": len(pristine) - len(originals), "commit": COMMIT}
 
 
 def main(argv=None):

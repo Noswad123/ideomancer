@@ -19,7 +19,8 @@ use ruff_text_size::{TextLen, TextRange, TextSize};
 
 use crate::Mode;
 use crate::error::{InterpolatedStringErrorType, LexicalError, LexicalErrorType};
-use crate::lexer::cursor::{Cursor, EOF_CHAR};
+use crate::lexer::cursor::{Cursor, CursorState};
+use crate::lexer::byte::{ByteLexFailure, Control};
 use crate::lexer::indentation::{Indentation, Indentations, IndentationsCheckpoint};
 use crate::lexer::interpolated_string::{
     InterpolatedStringContext, InterpolatedStrings, InterpolatedStringsCheckpoint,
@@ -30,16 +31,52 @@ mod cursor;
 mod indentation;
 mod interpolated_string;
 
+/// Unstable, private-engine F1 experiment; not a parser byte-input API.
+#[doc(hidden)]
+pub mod byte;
+
 const BOM: char = '\u{feff}';
 
 /// A lexer for Python source code.
 #[derive(Debug)]
 pub struct Lexer<'src> {
+    // A concrete, unused callback type preserves the legacy Send/Sync auto-traits.
+    core: CoreLexer<'src, 'static, fn() -> bool>,
+}
+
+impl<'src> Lexer<'src> {
+    pub(crate) fn new(source: &'src str, mode: Mode, start_offset: TextSize) -> Self {
+        assert!(u32::try_from(source.len()).is_ok(), "Lexer only supports files with a size up to 4GB");
+        Self { core: legacy_result(CoreLexer::new(source.as_bytes(), mode, start_offset, Control::unlimited())) }
+    }
+    pub(crate) fn current_kind(&self) -> TokenKind { self.core.current_kind() }
+    pub(crate) fn current_range(&self) -> TextRange { self.core.current_range() }
+    pub(crate) fn current_flags(&self) -> TokenFlags { self.core.current_flags() }
+    pub(crate) fn take_value(&mut self) -> TokenValue { self.core.take_value() }
+    pub fn next_token(&mut self) -> TokenKind { legacy_result(self.core.next_token()) }
+    pub(crate) fn checkpoint(&self) -> LexerCheckpoint { self.core.checkpoint() }
+    pub(crate) fn rewind(&mut self, checkpoint: LexerCheckpoint) { self.core.rewind(checkpoint); }
+    pub(crate) fn re_lex_logical_token(&mut self, start: Option<TextSize>) -> bool {
+        legacy_result(self.core.re_lex_logical_token(start))
+    }
+    pub fn finish(self) -> Vec<LexicalError> { self.core.finish() }
+}
+
+fn legacy_result<T>(result: Result<T, ByteLexFailure>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(ByteLexFailure::Source(_)) => unreachable!("the legacy facade borrows well-typed UTF-8"),
+        Err(error) => panic!("legacy lexer invariant: {error:?}"),
+    }
+}
+
+#[derive(Debug)]
+struct CoreLexer<'src, 'check, Check: ?Sized = dyn FnMut() -> bool + 'check> {
     /// Source code to be lexed.
-    source: &'src str,
+    source: &'src [u8],
 
     /// A pointer to the current character of the source code which is being lexed.
-    cursor: Cursor<'src>,
+    cursor: Cursor<'src, 'check, Check>,
 
     /// The kind of the current token.
     current_kind: TokenKind,
@@ -74,13 +111,13 @@ pub struct Lexer<'src> {
     errors: Vec<LexicalError>,
 }
 
-impl<'src> Lexer<'src> {
+impl<'src, 'check, Check: FnMut() -> bool + ?Sized> CoreLexer<'src, 'check, Check> {
     /// Create a new lexer for the given input source which starts at the given offset.
     ///
     /// If the start offset is greater than 0, the cursor is moved ahead that many bytes.
     /// This means that the input source should be the complete source code and not the
     /// sliced version.
-    pub(crate) fn new(source: &'src str, mode: Mode, start_offset: TextSize) -> Self {
+    fn new(source: &'src [u8], mode: Mode, start_offset: TextSize, control: Control<'check, Check>) -> Result<Self, ByteLexFailure> {
         assert!(
             u32::try_from(source.len()).is_ok(),
             "Lexer only supports files with a size up to 4GB"
@@ -92,9 +129,9 @@ impl<'src> Lexer<'src> {
             (State::AfterNewline, 0)
         };
 
-        let mut lexer = Lexer {
+        let mut lexer = CoreLexer {
             source,
-            cursor: Cursor::new(source),
+            cursor: Cursor::new(source, control),
             state,
             current_kind: TokenKind::EndOfFile,
             current_range: TextRange::empty(start_offset),
@@ -110,12 +147,13 @@ impl<'src> Lexer<'src> {
 
         if start_offset == TextSize::new(0) {
             // TODO: Handle possible mismatch between BOM and explicit encoding declaration.
-            lexer.cursor.eat_char(BOM);
+            // A byte prefix probe does not decode malformed first source bytes.
+            if source.starts_with("\u{feff}".as_bytes()) { lexer.cursor.skip_bytes(BOM.len_utf8())?; }
         } else {
-            lexer.cursor.skip_bytes(start_offset.to_usize());
+            lexer.cursor.skip_bytes(start_offset.to_usize())?;
         }
 
-        lexer
+        Ok(lexer)
     }
 
     /// Returns the kind of the current token.
@@ -144,33 +182,45 @@ impl<'src> Lexer<'src> {
 
     /// Helper function to push the given error, updating the current range with the error location
     /// and return the [`TokenKind::Unknown`] token.
-    fn push_error(&mut self, error: LexicalError) -> TokenKind {
+    fn push_error(&mut self, error: LexicalError) -> Result<TokenKind, ByteLexFailure> {
+        if self.cursor.control.limits.is_some_and(|limit| self.errors.len() >= limit.diagnostics) {
+            return self.cursor.control.fail(ByteLexFailure::ResourceLimit);
+        }
+        self.cursor.control.allocate(256)?;
+        if self.errors.try_reserve(1).is_err() { return self.cursor.control.fail(ByteLexFailure::ResourceLimit); }
         self.current_range = error.location();
         self.errors.push(error);
-        TokenKind::Unknown
+        Ok(TokenKind::Unknown)
     }
 
     /// Lex the next token.
-    pub fn next_token(&mut self) -> TokenKind {
+    fn next_token(&mut self) -> Result<TokenKind, ByteLexFailure> {
+        self.cursor.control.work(1)?;
+        // Reserve a small envelope before any diagnostic payload is constructed.
+        self.cursor.control.allocate(256)?;
+        if let Some(limit) = self.cursor.control.limits {
+            if self.cursor.control.stats.tokens >= limit.tokens { return self.cursor.control.fail(ByteLexFailure::ResourceLimit) }
+            self.cursor.control.stats.tokens += 1;
+        }
         self.cursor.start_token();
         self.current_value = TokenValue::None;
         self.current_flags = TokenFlags::empty();
-        self.current_kind = self.lex_token();
+        self.current_kind = self.lex_token()?;
         // For `Unknown` token, the `push_error` method updates the current range.
         if !matches!(self.current_kind, TokenKind::Unknown) {
             self.current_range = self.token_range();
         }
-        self.current_kind
+        Ok(self.current_kind)
     }
 
-    fn lex_token(&mut self) -> TokenKind {
+    fn lex_token(&mut self) -> Result<TokenKind, ByteLexFailure> {
         if let Some(interpolated_string) = self.interpolated_strings.current() {
             if !interpolated_string.is_in_interpolation(self.nesting) {
-                if let Some(token) = self.lex_interpolated_string_middle_or_end() {
+                if let Some(token) = self.lex_interpolated_string_middle_or_end()? {
                     if token.is_interpolated_string_end() {
                         self.interpolated_strings.pop();
                     }
-                    return token;
+                    return Ok(token);
                 }
             }
         }
@@ -185,7 +235,7 @@ impl<'src> Lexer<'src> {
                             self.token_range(),
                         ));
                     }
-                    return TokenKind::Dedent;
+                    return Ok(TokenKind::Dedent);
                 }
                 Ok(_) => {}
                 Err(_) => {
@@ -198,11 +248,11 @@ impl<'src> Lexer<'src> {
         }
 
         if self.state.is_after_newline() {
-            if let Some(indentation) = self.eat_indentation() {
-                return indentation;
+            if let Some(indentation) = self.eat_indentation()? {
+                return Ok(indentation);
             }
         } else {
-            if let Err(error) = self.skip_whitespace() {
+            if let Some(error) = self.skip_whitespace()? {
                 return self.push_error(error);
             }
         }
@@ -210,14 +260,14 @@ impl<'src> Lexer<'src> {
         // The lexer might've skipped whitespaces, so update the start offset
         self.cursor.start_token();
 
-        if let Some(c) = self.cursor.bump() {
+        if let Some(c) = self.cursor.bump()? {
             if c.is_ascii() {
                 self.consume_ascii_character(c)
             } else if is_unicode_identifier_start(c) {
-                let identifier = self.lex_identifier(c);
+                let identifier = self.lex_identifier(c)?;
                 self.state = State::Other;
 
-                identifier
+                Ok(identifier)
             } else {
                 self.push_error(LexicalError::new(
                     LexicalErrorType::UnrecognizedToken { tok: c },
@@ -231,40 +281,40 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    fn eat_indentation(&mut self) -> Option<TokenKind> {
+    fn eat_indentation(&mut self) -> Result<Option<TokenKind>, ByteLexFailure> {
         let mut indentation = Indentation::root();
 
         loop {
-            match self.cursor.first() {
-                ' ' => {
-                    self.cursor.bump();
+            match self.cursor.first()? {
+                Some(' ') => {
+                    self.cursor.bump()?;
                     indentation = indentation.add_space();
                 }
-                '\t' => {
-                    self.cursor.bump();
+                Some('\t') => {
+                    self.cursor.bump()?;
                     indentation = indentation.add_tab();
                 }
-                '\\' => {
-                    self.cursor.bump();
-                    if self.cursor.eat_char('\r') {
-                        self.cursor.eat_char('\n');
-                    } else if !self.cursor.eat_char('\n') {
-                        return Some(self.push_error(LexicalError::new(
+                Some('\\') => {
+                    self.cursor.bump()?;
+                    if self.cursor.eat_char('\r')? {
+                        self.cursor.eat_char('\n')?;
+                    } else if !self.cursor.eat_char('\n')? {
+                        return self.push_error(LexicalError::new(
                             LexicalErrorType::LineContinuationError,
                             TextRange::at(self.offset() - '\\'.text_len(), '\\'.text_len()),
-                        )));
+                        )).map(Some);
                     }
                     if self.cursor.is_eof() {
-                        return Some(self.push_error(LexicalError::new(
+                        return self.push_error(LexicalError::new(
                             LexicalErrorType::Eof,
                             self.token_range(),
-                        )));
+                        )).map(Some);
                     }
                     indentation = Indentation::root();
                 }
                 // Form feed
-                '\x0C' => {
-                    self.cursor.bump();
+                Some('\x0C') => {
+                    self.cursor.bump()?;
                     indentation = Indentation::root();
                 }
                 _ => break,
@@ -272,27 +322,27 @@ impl<'src> Lexer<'src> {
         }
 
         // Handle indentation if this is a new, not all empty, logical line
-        if !matches!(self.cursor.first(), '\n' | '\r' | '#' | EOF_CHAR) {
+        if !matches!(self.cursor.first()?, Some('\n' | '\r' | '#' | '\0') | None) {
             self.state = State::NonEmptyLogicalLine;
 
             // Set to false so that we don't handle indentation on the next call.
             return self.handle_indentation(indentation);
         }
 
-        None
+        Ok(None)
     }
 
-    fn handle_indentation(&mut self, indentation: Indentation) -> Option<TokenKind> {
+    fn handle_indentation(&mut self, indentation: Indentation) -> Result<Option<TokenKind>, ByteLexFailure> {
         match self.indentations.current().try_compare(indentation) {
             // Dedent
             Ok(Ordering::Greater) => {
                 self.pending_indentation = Some(indentation);
 
                 if self.indentations.dedent_one(indentation).is_err() {
-                    return Some(self.push_error(LexicalError::new(
+                    return self.push_error(LexicalError::new(
                         LexicalErrorType::IndentationError,
                         self.token_range(),
-                    )));
+                    )).map(Some);
                 }
 
                 // The lexer might've eaten some whitespaces to calculate the `indentation`. For
@@ -310,84 +360,87 @@ impl<'src> Lexer<'src> {
                 // the `pass` token.
                 self.cursor.start_token();
 
-                Some(TokenKind::Dedent)
+                Ok(Some(TokenKind::Dedent))
             }
 
-            Ok(Ordering::Equal) => None,
+            Ok(Ordering::Equal) => Ok(None),
 
             // Indent
             Ok(Ordering::Less) => {
+                self.cursor.control.depth(self.indentations.len() + 1)?;
+                self.cursor.control.allocate(32)?;
+                if self.indentations.try_reserve().is_err() { return self.cursor.control.fail(ByteLexFailure::ResourceLimit) }
                 self.indentations.indent(indentation);
-                Some(TokenKind::Indent)
+                Ok(Some(TokenKind::Indent))
             }
-            Err(_) => Some(self.push_error(LexicalError::new(
+            Err(_) => self.push_error(LexicalError::new(
                 LexicalErrorType::IndentationError,
                 self.token_range(),
-            ))),
+            )).map(Some),
         }
     }
 
-    fn skip_whitespace(&mut self) -> Result<(), LexicalError> {
+    fn skip_whitespace(&mut self) -> Result<Option<LexicalError>, ByteLexFailure> {
         loop {
-            match self.cursor.first() {
-                ' ' => {
-                    self.cursor.bump();
+            match self.cursor.first()? {
+                Some(' ') => {
+                    self.cursor.bump()?;
                 }
-                '\t' => {
-                    self.cursor.bump();
+                Some('\t') => {
+                    self.cursor.bump()?;
                 }
-                '\\' => {
-                    self.cursor.bump();
-                    if self.cursor.eat_char('\r') {
-                        self.cursor.eat_char('\n');
-                    } else if !self.cursor.eat_char('\n') {
-                        return Err(LexicalError::new(
+                Some('\\') => {
+                    self.cursor.bump()?;
+                    if self.cursor.eat_char('\r')? {
+                        self.cursor.eat_char('\n')?;
+                    } else if !self.cursor.eat_char('\n')? {
+                        return Ok(Some(LexicalError::new(
                             LexicalErrorType::LineContinuationError,
                             TextRange::at(self.offset() - '\\'.text_len(), '\\'.text_len()),
-                        ));
+                        )));
                     }
                     if self.cursor.is_eof() {
-                        return Err(LexicalError::new(LexicalErrorType::Eof, self.token_range()));
+                        return Ok(Some(LexicalError::new(LexicalErrorType::Eof, self.token_range())));
                     }
                 }
                 // Form feed
-                '\x0C' => {
-                    self.cursor.bump();
+                Some('\x0C') => {
+                    self.cursor.bump()?;
                 }
                 _ => break,
             }
         }
 
-        Ok(())
+        Ok(None)
     }
 
     // Dispatch based on the given character.
-    fn consume_ascii_character(&mut self, c: char) -> TokenKind {
+    fn consume_ascii_character(&mut self, c: char) -> Result<TokenKind, ByteLexFailure> {
         let token = match c {
-            c if is_ascii_identifier_start(c) => self.lex_identifier(c),
-            '0'..='9' => self.lex_number(c),
+            c if is_ascii_identifier_start(c) => self.lex_identifier(c)?,
+            '0'..='9' => self.lex_number(c)?,
             '#' => return self.lex_comment(),
-            '\'' | '"' => self.lex_string(c),
+            '\'' | '"' => self.lex_string(c)?,
             '=' => {
-                if self.cursor.eat_char('=') {
+                if self.cursor.eat_char('=')? {
                     TokenKind::EqEqual
                 } else {
                     self.state = State::AfterEqual;
-                    return TokenKind::Equal;
+                    return Ok(TokenKind::Equal);
                 }
             }
             '+' => {
-                if self.cursor.eat_char('=') {
+                if self.cursor.eat_char('=')? {
                     TokenKind::PlusEqual
                 } else {
                     TokenKind::Plus
                 }
             }
             '*' => {
-                if self.cursor.eat_char('=') {
+                if self.cursor.eat_char('=')? {
                     TokenKind::StarEqual
-                } else if self.cursor.eat_char('*') {
-                    if self.cursor.eat_char('=') {
+                } else if self.cursor.eat_char('*')? {
+                    if self.cursor.eat_char('=')? {
                         TokenKind::DoubleStarEqual
                     } else {
                         TokenKind::DoubleStar
@@ -403,30 +456,30 @@ impl<'src> Lexer<'src> {
                     && self.nesting == 0 =>
             {
                 // SAFETY: Safe because `c` has been matched against one of the possible escape command token
-                self.lex_ipython_escape_command(IpyEscapeKind::try_from(c).unwrap())
+                self.lex_ipython_escape_command(IpyEscapeKind::try_from(c).unwrap())?
             }
 
             c @ ('%' | '!' | '?' | '/' | ';' | ',')
                 if self.mode == Mode::Ipython && self.state.is_new_logical_line() =>
             {
-                let kind = if let Ok(kind) = IpyEscapeKind::try_from([c, self.cursor.first()]) {
-                    self.cursor.bump();
+                let kind = if let Some(kind) = self.cursor.first()?.and_then(|next| IpyEscapeKind::try_from([c, next]).ok()) {
+                    self.cursor.bump()?;
                     kind
                 } else {
                     // SAFETY: Safe because `c` has been matched against one of the possible escape command token
                     IpyEscapeKind::try_from(c).unwrap()
                 };
 
-                self.lex_ipython_escape_command(kind)
+                self.lex_ipython_escape_command(kind)?
             }
 
             '?' if self.mode == Mode::Ipython => TokenKind::Question,
 
             '/' => {
-                if self.cursor.eat_char('=') {
+                if self.cursor.eat_char('=')? {
                     TokenKind::SlashEqual
-                } else if self.cursor.eat_char('/') {
-                    if self.cursor.eat_char('=') {
+                } else if self.cursor.eat_char('/')? {
+                    if self.cursor.eat_char('=')? {
                         TokenKind::DoubleSlashEqual
                     } else {
                         TokenKind::DoubleSlash
@@ -436,51 +489,51 @@ impl<'src> Lexer<'src> {
                 }
             }
             '%' => {
-                if self.cursor.eat_char('=') {
+                if self.cursor.eat_char('=')? {
                     TokenKind::PercentEqual
                 } else {
                     TokenKind::Percent
                 }
             }
             '|' => {
-                if self.cursor.eat_char('=') {
+                if self.cursor.eat_char('=')? {
                     TokenKind::VbarEqual
                 } else {
                     TokenKind::Vbar
                 }
             }
             '^' => {
-                if self.cursor.eat_char('=') {
+                if self.cursor.eat_char('=')? {
                     TokenKind::CircumflexEqual
                 } else {
                     TokenKind::CircumFlex
                 }
             }
             '&' => {
-                if self.cursor.eat_char('=') {
+                if self.cursor.eat_char('=')? {
                     TokenKind::AmperEqual
                 } else {
                     TokenKind::Amper
                 }
             }
             '-' => {
-                if self.cursor.eat_char('=') {
+                if self.cursor.eat_char('=')? {
                     TokenKind::MinusEqual
-                } else if self.cursor.eat_char('>') {
+                } else if self.cursor.eat_char('>')? {
                     TokenKind::Rarrow
                 } else {
                     TokenKind::Minus
                 }
             }
             '@' => {
-                if self.cursor.eat_char('=') {
+                if self.cursor.eat_char('=')? {
                     TokenKind::AtEqual
                 } else {
                     TokenKind::At
                 }
             }
             '!' => {
-                if self.cursor.eat_char('=') {
+                if self.cursor.eat_char('=')? {
                     TokenKind::NotEqual
                 } else {
                     TokenKind::Exclamation
@@ -488,6 +541,7 @@ impl<'src> Lexer<'src> {
             }
             '~' => TokenKind::Tilde,
             '(' => {
+                self.cursor.control.depth(self.nesting as usize + 1)?;
                 self.nesting += 1;
                 TokenKind::Lpar
             }
@@ -496,6 +550,7 @@ impl<'src> Lexer<'src> {
                 TokenKind::Rpar
             }
             '[' => {
+                self.cursor.control.depth(self.nesting as usize + 1)?;
                 self.nesting += 1;
                 TokenKind::Lsqb
             }
@@ -504,6 +559,7 @@ impl<'src> Lexer<'src> {
                 TokenKind::Rsqb
             }
             '{' => {
+                self.cursor.control.depth(self.nesting as usize + 1)?;
                 self.nesting += 1;
                 TokenKind::Lbrace
             }
@@ -530,7 +586,7 @@ impl<'src> Lexer<'src> {
                     })
                 {
                     TokenKind::Colon
-                } else if self.cursor.eat_char('=') {
+                } else if self.cursor.eat_char('=')? {
                     TokenKind::ColonEqual
                 } else {
                     TokenKind::Colon
@@ -538,26 +594,26 @@ impl<'src> Lexer<'src> {
             }
             ';' => TokenKind::Semi,
             '<' => {
-                if self.cursor.eat_char('<') {
-                    if self.cursor.eat_char('=') {
+                if self.cursor.eat_char('<')? {
+                    if self.cursor.eat_char('=')? {
                         TokenKind::LeftShiftEqual
                     } else {
                         TokenKind::LeftShift
                     }
-                } else if self.cursor.eat_char('=') {
+                } else if self.cursor.eat_char('=')? {
                     TokenKind::LessEqual
                 } else {
                     TokenKind::Less
                 }
             }
             '>' => {
-                if self.cursor.eat_char('>') {
-                    if self.cursor.eat_char('=') {
+                if self.cursor.eat_char('>')? {
+                    if self.cursor.eat_char('=')? {
                         TokenKind::RightShiftEqual
                     } else {
                         TokenKind::RightShift
                     }
-                } else if self.cursor.eat_char('=') {
+                } else if self.cursor.eat_char('=')? {
                     TokenKind::GreaterEqual
                 } else {
                     TokenKind::Greater
@@ -565,16 +621,16 @@ impl<'src> Lexer<'src> {
             }
             ',' => TokenKind::Comma,
             '.' => {
-                if self.cursor.first().is_ascii_digit() {
-                    self.lex_decimal_number('.')
-                } else if self.cursor.eat_char2('.', '.') {
+                if self.cursor.first()?.is_some_and(|c| c.is_ascii_digit()) {
+                    self.lex_decimal_number('.')?
+                } else if self.cursor.eat_char2('.', '.')? {
                     TokenKind::Ellipsis
                 } else {
                     TokenKind::Dot
                 }
             }
             '\n' => {
-                return if self.nesting == 0 && !self.state.is_new_logical_line() {
+                return Ok(if self.nesting == 0 && !self.state.is_new_logical_line() {
                     self.state = State::AfterNewline;
                     TokenKind::Newline
                 } else {
@@ -582,12 +638,12 @@ impl<'src> Lexer<'src> {
                         interpolated_string.try_end_format_spec(self.nesting);
                     }
                     TokenKind::NonLogicalNewline
-                };
+                });
             }
             '\r' => {
-                self.cursor.eat_char('\n');
+                self.cursor.eat_char('\n')?;
 
-                return if self.nesting == 0 && !self.state.is_new_logical_line() {
+                return Ok(if self.nesting == 0 && !self.state.is_new_logical_line() {
                     self.state = State::AfterNewline;
                     TokenKind::Newline
                 } else {
@@ -595,7 +651,7 @@ impl<'src> Lexer<'src> {
                         interpolated_string.try_end_format_spec(self.nesting);
                     }
                     TokenKind::NonLogicalNewline
-                };
+                });
             }
 
             _ => {
@@ -610,31 +666,32 @@ impl<'src> Lexer<'src> {
 
         self.state = State::Other;
 
-        token
+        Ok(token)
     }
 
     /// Lex an identifier. Also used for keywords and string/bytes literals with a prefix.
-    fn lex_identifier(&mut self, first: char) -> TokenKind {
+    fn lex_identifier(&mut self, first: char) -> Result<TokenKind, ByteLexFailure> {
         // Detect potential string like rb'' b'' f'' t'' u'' r''
-        let quote = match (first, self.cursor.first()) {
-            (_, quote @ ('\'' | '"')) => self.try_single_char_prefix(first).then(|| {
-                self.cursor.bump();
-                quote
-            }),
-            (_, second) if is_quote(self.cursor.second()) => {
-                self.try_double_char_prefix([first, second]).then(|| {
-                    self.cursor.bump();
-                    // SAFETY: Safe because of the `is_quote` check in this match arm's guard
-                    self.cursor.bump().unwrap()
-                })
+        let quote = match self.cursor.rest() {
+            [quote @ (b'\'' | b'"'), ..] if self.try_single_char_prefix(first) => {
+                let quote = char::from(*quote);
+                self.cursor.bump()?;
+                Some(quote)
+            }
+            [second, quote @ (b'\'' | b'"'), ..]
+                if second.is_ascii() && self.try_double_char_prefix([first, char::from(*second)]) => {
+                let quote = char::from(*quote);
+                self.cursor.bump()?;
+                self.cursor.bump()?;
+                Some(quote)
             }
             _ => None,
         };
 
         if let Some(quote) = quote {
             if self.current_flags.is_interpolated_string() {
-                if let Some(kind) = self.lex_interpolated_string_start(quote) {
-                    return kind;
+                if let Some(kind) = self.lex_interpolated_string_start(quote)? {
+                    return Ok(kind);
                 }
             }
 
@@ -650,13 +707,20 @@ impl<'src> Lexer<'src> {
         // (by far the most common case), we can skip NFKC normalization of the identifier.
         let mut is_ascii = first.is_ascii();
         self.cursor
-            .eat_while(|c| is_identifier_continuation(c, &mut is_ascii));
+            .eat_while(|c| is_identifier_continuation(c, &mut is_ascii))?;
 
-        let text = self.token_text();
+        self.charge_value()?;
+        let text = self.token_text()?;
 
         if !is_ascii {
-            self.current_value = TokenValue::Name(text.nfkc().collect::<Name>());
-            return TokenKind::Name;
+            let mut normalized = String::new();
+            for c in text.nfkc() {
+                self.cursor.control.work(1)?;
+                normalized.try_reserve(c.len_utf8()).map_err(|_| ByteLexFailure::ResourceLimit)?;
+                normalized.push(c);
+            }
+            self.current_value = TokenValue::Name(Name::from(normalized));
+            return Ok(TokenKind::Name);
         }
 
         // Short circuit for names that are longer than any known keyword.
@@ -664,10 +728,10 @@ impl<'src> Lexer<'src> {
         // is guaranteed to fit into a stack allocated (inline) Name.
         if text.len() > 8 {
             self.current_value = TokenValue::Name(Name::new(text));
-            return TokenKind::Name;
+            return Ok(TokenKind::Name);
         }
 
-        match text {
+        Ok(match text {
             "False" => TokenKind::False,
             "None" => TokenKind::None,
             "True" => TokenKind::True,
@@ -710,7 +774,7 @@ impl<'src> Lexer<'src> {
                 self.current_value = TokenValue::Name(Name::new(text));
                 TokenKind::Name
             }
-        }
+        })
     }
 
     /// Try lexing the single character string prefix, updating the token flags accordingly.
@@ -756,43 +820,46 @@ impl<'src> Lexer<'src> {
     }
 
     /// Lex a f-string or t-string start token if positioned at the start of an f-string or t-string.
-    fn lex_interpolated_string_start(&mut self, quote: char) -> Option<TokenKind> {
+    fn lex_interpolated_string_start(&mut self, quote: char) -> Result<Option<TokenKind>, ByteLexFailure> {
         #[cfg(debug_assertions)]
-        debug_assert_eq!(self.cursor.previous(), quote);
+        debug_assert_eq!(self.cursor.previous(), Some(quote));
 
         if quote == '"' {
             self.current_flags |= TokenFlags::DOUBLE_QUOTES;
         }
 
-        if self.cursor.eat_char2(quote, quote) {
+        if self.cursor.eat_char2(quote, quote)? {
             self.current_flags |= TokenFlags::TRIPLE_QUOTED_STRING;
         }
 
-        let ftcontext = InterpolatedStringContext::new(self.current_flags, self.nesting)?;
+        let Some(ftcontext) = InterpolatedStringContext::new(self.current_flags, self.nesting) else { return Ok(None) };
 
         let kind = ftcontext.kind();
 
+        self.cursor.control.depth(self.interpolated_strings.len() + 1)?;
+        self.cursor.control.allocate(64)?;
+        if self.interpolated_strings.try_reserve().is_err() { return self.cursor.control.fail(ByteLexFailure::ResourceLimit) }
         self.interpolated_strings.push(ftcontext);
 
-        Some(kind.start_token())
+        Ok(Some(kind.start_token()))
     }
 
     /// Lex an f-string or t-string middle or end token.
-    fn lex_interpolated_string_middle_or_end(&mut self) -> Option<TokenKind> {
+    fn lex_interpolated_string_middle_or_end(&mut self) -> Result<Option<TokenKind>, ByteLexFailure> {
         // SAFETY: Safe because the function is only called when `self.fstrings` is not empty.
-        let interpolated_string = self.interpolated_strings.current().unwrap();
+        let interpolated_string = self.interpolated_strings.current().unwrap().clone();
         let string_kind = interpolated_string.kind();
 
         // Check if we're at the end of the f-string.
         if interpolated_string.is_triple_quoted() {
             let quote_char = interpolated_string.quote_char();
-            if self.cursor.eat_char3(quote_char, quote_char, quote_char) {
+            if self.cursor.eat_char3(quote_char, quote_char, quote_char)? {
                 self.current_flags = interpolated_string.flags();
-                return Some(string_kind.end_token());
+                return Ok(Some(string_kind.end_token()));
             }
-        } else if self.cursor.eat_char(interpolated_string.quote_char()) {
+        } else if self.cursor.eat_char(interpolated_string.quote_char())? {
             self.current_flags = interpolated_string.flags();
-            return Some(string_kind.end_token());
+            return Ok(Some(string_kind.end_token()));
         }
 
         // We have to decode `{{` and `}}` into `{` and `}` respectively. As an
@@ -809,23 +876,21 @@ impl<'src> Lexer<'src> {
         let mut in_named_unicode = false;
 
         loop {
-            match self.cursor.first() {
-                // The condition is to differentiate between the `NUL` (`\0`) character
-                // in the source code and the one returned by `self.cursor.first()` when
-                // we reach the end of the source code.
-                EOF_CHAR if self.cursor.is_eof() => {
+            match self.cursor.first()? {
+                // EOF is distinct from an actual NUL scalar.
+                None => {
                     let error = if interpolated_string.is_triple_quoted() {
                         InterpolatedStringErrorType::UnterminatedTripleQuotedString
                     } else {
                         InterpolatedStringErrorType::UnterminatedString
                     };
                     self.interpolated_strings.pop();
-                    return Some(self.push_error(LexicalError::new(
+                    return self.push_error(LexicalError::new(
                         LexicalErrorType::from_interpolated_string_error(error, string_kind),
                         self.token_range(),
-                    )));
+                    )).map(Some);
                 }
-                '\n' | '\r' if !interpolated_string.is_triple_quoted() => {
+                Some('\n' | '\r') if !interpolated_string.is_triple_quoted() => {
                     // If we encounter a newline while we're in a format spec, then
                     // we stop here and let the lexer emit the newline token.
                     //
@@ -834,95 +899,94 @@ impl<'src> Lexer<'src> {
                         break;
                     }
                     self.interpolated_strings.pop();
-                    return Some(self.push_error(LexicalError::new(
+                    return self.push_error(LexicalError::new(
                         LexicalErrorType::from_interpolated_string_error(
                             InterpolatedStringErrorType::UnterminatedString,
                             string_kind,
                         ),
                         self.token_range(),
-                    )));
+                    )).map(Some);
                 }
-                '\\' => {
-                    self.cursor.bump(); // '\'
-                    if matches!(self.cursor.first(), '{' | '}') {
+                Some('\\') => {
+                    self.cursor.bump()?; // '\'
+                    if matches!(self.cursor.first()?, Some('{' | '}')) {
                         // Don't consume `{` or `}` as we want them to be emitted as tokens.
                         // They will be handled in the next iteration.
                         continue;
                     } else if !interpolated_string.is_raw_string() {
-                        if self.cursor.eat_char2('N', '{') {
+                        if self.cursor.eat_char2('N', '{')? {
                             in_named_unicode = true;
                             continue;
                         }
                     }
                     // Consume the escaped character.
-                    if self.cursor.eat_char('\r') {
-                        self.cursor.eat_char('\n');
+                    if self.cursor.eat_char('\r')? {
+                        self.cursor.eat_char('\n')?;
                     } else {
-                        self.cursor.bump();
+                        self.cursor.bump()?;
                     }
                 }
-                quote @ ('\'' | '"') if quote == interpolated_string.quote_char() => {
+                Some(quote @ ('\'' | '"')) if quote == interpolated_string.quote_char() => {
                     if let Some(triple_quotes) = interpolated_string.triple_quotes() {
-                        if self.cursor.rest().starts_with(triple_quotes) {
+                        if self.cursor.rest().starts_with(triple_quotes.as_bytes()) {
                             break;
                         }
-                        self.cursor.bump();
+                        self.cursor.bump()?;
                     } else {
                         break;
                     }
                 }
-                '{' => {
-                    if self.cursor.second() == '{' && !in_format_spec {
-                        self.cursor.bump();
-                        normalized
-                            .push_str(&self.source[TextRange::new(last_offset, self.offset())]);
-                        self.cursor.bump(); // Skip the second `{`
+                Some('{') => {
+                    if self.cursor.second()? == Some('{') && !in_format_spec {
+                        self.cursor.bump()?;
+                        self.append_normalized(&mut normalized, TextRange::new(last_offset, self.offset()))?;
+                        self.cursor.bump()?; // Skip the second `{`
                         last_offset = self.offset();
                     } else {
                         break;
                     }
                 }
-                '}' => {
+                Some('}') => {
                     if in_named_unicode {
                         in_named_unicode = false;
-                        self.cursor.bump();
-                    } else if self.cursor.second() == '}' && !in_format_spec {
-                        self.cursor.bump();
-                        normalized
-                            .push_str(&self.source[TextRange::new(last_offset, self.offset())]);
-                        self.cursor.bump(); // Skip the second `}`
+                        self.cursor.bump()?;
+                    } else if self.cursor.second()? == Some('}') && !in_format_spec {
+                        self.cursor.bump()?;
+                        self.append_normalized(&mut normalized, TextRange::new(last_offset, self.offset()))?;
+                        self.cursor.bump()?; // Skip the second `}`
                         last_offset = self.offset();
                     } else {
                         break;
                     }
                 }
                 _ => {
-                    self.cursor.bump();
+                    self.cursor.bump()?;
                 }
             }
         }
         let range = self.token_range();
         if range.is_empty() {
-            return None;
+            return Ok(None);
         }
 
+        self.charge_value()?;
         let value = if normalized.is_empty() {
-            self.source[range].to_string()
+            self.owned_text(range)?
         } else {
-            normalized.push_str(&self.source[TextRange::new(last_offset, self.offset())]);
-            normalized
+            self.append_normalized(&mut normalized, TextRange::new(last_offset, self.offset()))?;
+            normalized.into_boxed_str()
         };
 
-        self.current_value = TokenValue::InterpolatedStringMiddle(value.into_boxed_str());
+        self.current_value = TokenValue::InterpolatedStringMiddle(value);
 
         self.current_flags = interpolated_string.flags();
-        Some(string_kind.middle_token())
+        Ok(Some(string_kind.middle_token()))
     }
 
     /// Lex a string literal.
-    fn lex_string(&mut self, quote: char) -> TokenKind {
+    fn lex_string(&mut self, quote: char) -> Result<TokenKind, ByteLexFailure> {
         #[cfg(debug_assertions)]
-        debug_assert_eq!(self.cursor.previous(), quote);
+        debug_assert_eq!(self.cursor.previous(), Some(quote));
 
         if quote == '"' {
             self.current_flags |= TokenFlags::DOUBLE_QUOTES;
@@ -930,7 +994,7 @@ impl<'src> Lexer<'src> {
 
         // If the next two characters are also the quote character, then we have a triple-quoted
         // string; consume those two characters and ensure that we require a triple-quote to close
-        if self.cursor.eat_char2(quote, quote) {
+        if self.cursor.eat_char2(quote, quote)? {
             self.current_flags |= TokenFlags::TRIPLE_QUOTED_STRING;
         }
 
@@ -941,8 +1005,8 @@ impl<'src> Lexer<'src> {
             // For triple-quoted strings, scan until we find the closing quote (ignoring escaped
             // quotes) or the end of the file.
             loop {
-                let Some(index) = memchr::memchr(quote_byte, self.cursor.rest().as_bytes()) else {
-                    self.cursor.skip_to_end();
+                let Some(index) = self.find_string_boundary(quote_byte, false)? else {
+                    self.cursor.skip_to_end()?;
 
                     return self.push_error(LexicalError::new(
                         LexicalErrorType::UnclosedStringError,
@@ -952,14 +1016,10 @@ impl<'src> Lexer<'src> {
 
                 // Rare case: if there are an odd number of backslashes before the quote, then
                 // the quote is escaped and we should continue scanning.
-                let num_backslashes = self.cursor.rest().as_bytes()[..index]
-                    .iter()
-                    .rev()
-                    .take_while(|&&c| c == b'\\')
-                    .count();
+                let num_backslashes = self.count_backslashes(index)?;
 
                 // Advance the cursor past the quote and continue scanning.
-                self.cursor.skip_bytes(index + 1);
+                self.cursor.skip_bytes(index + 1)?;
 
                 // If the character is escaped, continue scanning.
                 if num_backslashes % 2 == 1 {
@@ -967,7 +1027,7 @@ impl<'src> Lexer<'src> {
                 }
 
                 // Otherwise, if it's followed by two more quotes, then we're done.
-                if self.cursor.eat_char2(quote, quote) {
+                if self.cursor.eat_char2(quote, quote)? {
                     break self.offset() - TextSize::new(3);
                 }
             }
@@ -976,9 +1036,9 @@ impl<'src> Lexer<'src> {
             // if we encounter a newline or the end of the file.
             loop {
                 let Some(index) =
-                    memchr::memchr3(quote_byte, b'\r', b'\n', self.cursor.rest().as_bytes())
+                    self.find_string_boundary(quote_byte, true)?
                 else {
-                    self.cursor.skip_to_end();
+                    self.cursor.skip_to_end()?;
 
                     return self.push_error(LexicalError::new(
                         LexicalErrorType::StringError,
@@ -988,37 +1048,33 @@ impl<'src> Lexer<'src> {
 
                 // Rare case: if there are an odd number of backslashes before the quote, then
                 // the quote is escaped and we should continue scanning.
-                let num_backslashes = self.cursor.rest().as_bytes()[..index]
-                    .iter()
-                    .rev()
-                    .take_while(|&&c| c == b'\\')
-                    .count();
+                let num_backslashes = self.count_backslashes(index)?;
 
                 // Skip up to the current character.
-                self.cursor.skip_bytes(index);
+                self.cursor.skip_bytes(index)?;
 
                 // Lookahead because we want to bump only if it's a quote or being escaped.
-                let quote_or_newline = self.cursor.first();
+                let quote_or_newline = self.cursor.first()?;
 
                 // If the character is escaped, continue scanning.
                 if num_backslashes % 2 == 1 {
-                    self.cursor.bump();
-                    if quote_or_newline == '\r' {
-                        self.cursor.eat_char('\n');
+                    self.cursor.bump()?;
+                    if quote_or_newline == Some('\r') {
+                        self.cursor.eat_char('\n')?;
                     }
                     continue;
                 }
 
                 match quote_or_newline {
-                    '\r' | '\n' => {
+                    Some('\r' | '\n') => {
                         return self.push_error(LexicalError::new(
                             LexicalErrorType::UnclosedStringError,
                             self.token_range(),
                         ));
                     }
-                    ch if ch == quote => {
+                    Some(ch) if ch == quote => {
                         let value_end = self.offset();
-                        self.cursor.bump();
+                        self.cursor.bump()?;
                         break value_end;
                     }
                     _ => unreachable!("memchr2 returned an index that is not a quote or a newline"),
@@ -1026,23 +1082,20 @@ impl<'src> Lexer<'src> {
             }
         };
 
-        self.current_value = TokenValue::String(
-            self.source[TextRange::new(value_start, value_end)]
-                .to_string()
-                .into_boxed_str(),
-        );
+        self.charge_value()?;
+        self.current_value = TokenValue::String(self.owned_text(TextRange::new(value_start, value_end))?);
 
-        TokenKind::String
+        Ok(TokenKind::String)
     }
 
     /// Numeric lexing. The feast can start!
-    fn lex_number(&mut self, first: char) -> TokenKind {
+    fn lex_number(&mut self, first: char) -> Result<TokenKind, ByteLexFailure> {
         if first == '0' {
-            if self.cursor.eat_if(|c| matches!(c, 'x' | 'X')).is_some() {
+            if self.cursor.eat_if(|c| matches!(c, 'x' | 'X'))?.is_some() {
                 self.lex_number_radix(Radix::Hex)
-            } else if self.cursor.eat_if(|c| matches!(c, 'o' | 'O')).is_some() {
+            } else if self.cursor.eat_if(|c| matches!(c, 'o' | 'O'))?.is_some() {
                 self.lex_number_radix(Radix::Octal)
-            } else if self.cursor.eat_if(|c| matches!(c, 'b' | 'B')).is_some() {
+            } else if self.cursor.eat_if(|c| matches!(c, 'b' | 'B'))?.is_some() {
                 self.lex_number_radix(Radix::Binary)
             } else {
                 self.lex_decimal_number(first)
@@ -1053,21 +1106,22 @@ impl<'src> Lexer<'src> {
     }
 
     /// Lex a hex/octal/decimal/binary number without a decimal point.
-    fn lex_number_radix(&mut self, radix: Radix) -> TokenKind {
+    fn lex_number_radix(&mut self, radix: Radix) -> Result<TokenKind, ByteLexFailure> {
         #[cfg(debug_assertions)]
         debug_assert!(matches!(
-            self.cursor.previous().to_ascii_lowercase(),
-            'x' | 'o' | 'b'
+            self.cursor.previous().map(|c| c.to_ascii_lowercase()),
+            Some('x' | 'o' | 'b')
         ));
 
         // Lex the portion of the token after the base prefix (e.g., `9D5` in `0x9D5`).
         let mut number = LexedText::new(self.offset(), self.source);
-        self.radix_run(&mut number, radix);
+        self.radix_run(&mut number, radix)?;
+        self.charge_value()?;
 
         // Extract the entire number, including the base prefix (e.g., `0x9D5`).
-        let token = &self.source[self.token_range()];
+        let token = self.token_text()?;
 
-        let value = match Int::from_str_radix(number.as_str(), radix.as_u32(), token) {
+        let value = match Int::from_str_radix(number.as_str()?, radix.as_u32(), token) {
             Ok(int) => int,
             Err(err) => {
                 return self.push_error(LexicalError::new(
@@ -1077,57 +1131,61 @@ impl<'src> Lexer<'src> {
             }
         };
         self.current_value = TokenValue::Int(value);
-        TokenKind::Int
+        Ok(TokenKind::Int)
     }
 
     /// Lex a normal number, that is, no octal, hex or binary number.
-    fn lex_decimal_number(&mut self, first_digit_or_dot: char) -> TokenKind {
+    fn lex_decimal_number(&mut self, first_digit_or_dot: char) -> Result<TokenKind, ByteLexFailure> {
         #[cfg(debug_assertions)]
-        debug_assert!(self.cursor.previous().is_ascii_digit() || self.cursor.previous() == '.');
+        debug_assert!(self.cursor.previous().is_some_and(|c| c.is_ascii_digit() || c == '.'));
         let start_is_zero = first_digit_or_dot == '0';
 
         let mut number = LexedText::new(self.token_start(), self.source);
         if first_digit_or_dot != '.' {
-            number.push(first_digit_or_dot);
-            self.radix_run(&mut number, Radix::Decimal);
+            self.cursor.control.allocate(64)?;
+            number.push(first_digit_or_dot)?;
+            self.radix_run(&mut number, Radix::Decimal)?;
         }
 
-        let is_float = if first_digit_or_dot == '.' || self.cursor.eat_char('.') {
-            number.push('.');
+        let is_float = if first_digit_or_dot == '.' || self.cursor.eat_char('.')? {
+            self.cursor.control.allocate(64)?;
+            number.push('.')?;
 
-            if self.cursor.eat_char('_') {
+            if self.cursor.eat_char('_')? {
                 return self.push_error(LexicalError::new(
                     LexicalErrorType::OtherError("Invalid Syntax".to_string().into_boxed_str()),
                     TextRange::new(self.offset() - TextSize::new(1), self.offset()),
                 ));
             }
 
-            self.radix_run(&mut number, Radix::Decimal);
+            self.radix_run(&mut number, Radix::Decimal)?;
             true
         } else {
             // Normal number:
             false
         };
 
-        let is_float = match self.cursor.rest().as_bytes() {
+        let is_float = match self.cursor.rest() {
             [b'e' | b'E', b'0'..=b'9', ..] | [b'e' | b'E', b'-' | b'+', b'0'..=b'9', ..] => {
                 // 'e' | 'E'
-                number.push(self.cursor.bump().unwrap());
+                self.cursor.control.allocate(128)?;
+                number.push(self.cursor.bump()?.unwrap())?;
 
-                if let Some(sign) = self.cursor.eat_if(|c| matches!(c, '+' | '-')) {
-                    number.push(sign);
+                if let Some(sign) = self.cursor.eat_if(|c| matches!(c, '+' | '-'))? {
+                    number.push(sign)?;
                 }
 
-                self.radix_run(&mut number, Radix::Decimal);
+                self.radix_run(&mut number, Radix::Decimal)?;
 
                 true
             }
             _ => is_float,
         };
 
-        if is_float {
+        self.charge_value()?;
+        Ok(if is_float {
             // Improvement: Use `Cow` instead of pushing to value text
-            let Ok(value) = f64::from_str(number.as_str()) else {
+            let Ok(value) = f64::from_str(number.as_str()?) else {
                 return self.push_error(LexicalError::new(
                     LexicalErrorType::OtherError(
                         "Invalid decimal literal".to_string().into_boxed_str(),
@@ -1137,7 +1195,7 @@ impl<'src> Lexer<'src> {
             };
 
             // Parse trailing 'j':
-            if self.cursor.eat_if(|c| matches!(c, 'j' | 'J')).is_some() {
+            if self.cursor.eat_if(|c| matches!(c, 'j' | 'J'))?.is_some() {
                 self.current_value = TokenValue::Complex {
                     real: 0.0,
                     imag: value,
@@ -1149,12 +1207,12 @@ impl<'src> Lexer<'src> {
             }
         } else {
             // Parse trailing 'j':
-            if self.cursor.eat_if(|c| matches!(c, 'j' | 'J')).is_some() {
-                let imag = f64::from_str(number.as_str()).unwrap();
+            if self.cursor.eat_if(|c| matches!(c, 'j' | 'J'))?.is_some() {
+                let imag = f64::from_str(number.as_str()?).unwrap();
                 self.current_value = TokenValue::Complex { real: 0.0, imag };
                 TokenKind::Complex
             } else {
-                let value = match Int::from_str(number.as_str()) {
+                let value = match Int::from_str(number.as_str()?) {
                     Ok(value) => {
                         if start_is_zero && value.as_u8() != Some(0) {
                             // Leading zeros in decimal integer literals are not permitted.
@@ -1179,47 +1237,53 @@ impl<'src> Lexer<'src> {
                 self.current_value = TokenValue::Int(value);
                 TokenKind::Int
             }
-        }
+        })
     }
 
     /// Consume a sequence of numbers with the given radix,
     /// the digits can be decorated with underscores
     /// like this: '`1_2_3_4`' == '1234'
-    fn radix_run(&mut self, number: &mut LexedText, radix: Radix) {
+    fn radix_run(&mut self, number: &mut LexedText, radix: Radix) -> Result<(), ByteLexFailure> {
         loop {
-            if let Some(c) = self.cursor.eat_if(|c| radix.is_digit(c)) {
-                number.push(c);
+            if let Some(c) = self.cursor.eat_if(|c| radix.is_digit(c))? {
+                self.cursor.control.allocate(64)?;
+                number.push(c)?;
             }
             // Number that contains `_` separators. Remove them from the parsed text.
-            else if self.cursor.first() == '_' && radix.is_digit(self.cursor.second()) {
+            else if self.cursor.first()? == Some('_') && self.cursor.second()?.is_some_and(|c| radix.is_digit(c)) {
                 // Skip over `_`
-                self.cursor.bump();
-                number.skip_char();
+                self.cursor.bump()?;
+                if matches!(number, LexedText::Source { .. }) {
+                    self.cursor.control.allocate_scaled(number.len(), 2, 0)?;
+                    self.cursor.control.work(number.len())?;
+                }
+                number.skip_char()?;
             } else {
                 break;
             }
         }
+        Ok(())
     }
 
     /// Lex a single comment.
-    fn lex_comment(&mut self) -> TokenKind {
+    fn lex_comment(&mut self) -> Result<TokenKind, ByteLexFailure> {
         #[cfg(debug_assertions)]
-        debug_assert_eq!(self.cursor.previous(), '#');
+        debug_assert_eq!(self.cursor.previous(), Some('#'));
 
-        let bytes = self.cursor.rest().as_bytes();
-        let offset = memchr::memchr2(b'\n', b'\r', bytes).unwrap_or(bytes.len());
-        self.cursor.skip_bytes(offset);
+        self.cursor.skip_comment()?;
 
-        TokenKind::Comment
+        Ok(TokenKind::Comment)
     }
 
     /// Lex a single IPython escape command.
-    fn lex_ipython_escape_command(&mut self, escape_kind: IpyEscapeKind) -> TokenKind {
+    fn lex_ipython_escape_command(&mut self, escape_kind: IpyEscapeKind) -> Result<TokenKind, ByteLexFailure> {
         let mut value = String::new();
 
         loop {
-            match self.cursor.first() {
-                '\\' => {
+            self.cursor.control.allocate(256)?;
+            value.try_reserve(4).map_err(|_| ByteLexFailure::ResourceLimit)?;
+            match self.cursor.first()? {
+                Some('\\') => {
                     // Only skip the line continuation if it is followed by a newline
                     // otherwise it is a normal backslash which is part of the magic command:
                     //
@@ -1229,18 +1293,18 @@ impl<'src> Lexer<'src> {
                     //      && ls -a | sed 's/^/\\    /'
                     //                          ^^
                     //                          Don't skip these backslashes
-                    if self.cursor.second() == '\r' {
-                        self.cursor.bump();
-                        self.cursor.bump();
-                        self.cursor.eat_char('\n');
+                    if self.cursor.second()? == Some('\r') {
+                        self.cursor.bump()?;
+                        self.cursor.bump()?;
+                        self.cursor.eat_char('\n')?;
                         continue;
-                    } else if self.cursor.second() == '\n' {
-                        self.cursor.bump();
-                        self.cursor.bump();
+                    } else if self.cursor.second()? == Some('\n') {
+                        self.cursor.bump()?;
+                        self.cursor.bump()?;
                         continue;
                     }
 
-                    self.cursor.bump();
+                    self.cursor.bump()?;
                     value.push('\\');
                 }
                 // Help end escape commands are those that end with 1 or 2 question marks.
@@ -1255,10 +1319,11 @@ impl<'src> Lexer<'src> {
                 //
                 // Help end escape commands implemented in the IPython codebase using regex:
                 // https://github.com/ipython/ipython/blob/292e3a23459ca965b8c1bfe2c3707044c510209a/IPython/core/inputtransformer2.py#L454-L462
-                '?' => {
-                    self.cursor.bump();
+                Some('?') => {
+                    self.cursor.bump()?;
                     let mut question_count = 1u32;
-                    while self.cursor.eat_char('?') {
+                    while self.cursor.eat_char('?')? {
+                        self.cursor.control.allocate(64)?;
                         question_count += 1;
                     }
 
@@ -1276,10 +1341,10 @@ impl<'src> Lexer<'src> {
                     // tokens.
                     if question_count > 2
                         || value.chars().last().is_none_or(is_python_whitespace)
-                        || !matches!(self.cursor.first(), '\n' | '\r' | EOF_CHAR)
+                        || !matches!(self.cursor.first()?, Some('\n' | '\r' | '\0') | None)
                     {
                         // Not a help end escape command, so continue with the lexing.
-                        value.reserve(question_count as usize);
+                        value.try_reserve(question_count as usize).map_err(|_| ByteLexFailure::ResourceLimit)?;
                         for _ in 0..question_count {
                             value.push('?');
                         }
@@ -1293,12 +1358,20 @@ impl<'src> Lexer<'src> {
                         //
                         // For example, `??foo?` is recognized as `IpyEscapeKind::Help` and
                         // `value` is `foo` instead of `??foo`.
-                        value = value.trim_start_matches([' ', '?']).to_string();
+                        self.cursor.control.allocate_scaled(value.len(), 2, 0)?;
+                        self.cursor.control.work(value.len())?;
+                        let text = value.trim_start_matches([' ', '?']);
+                        let mut trimmed = String::new();
+                        trimmed.try_reserve(text.len()).map_err(|_| ByteLexFailure::ResourceLimit)?;
+                        trimmed.push_str(text);
+                        value = trimmed;
                     } else if escape_kind.is_magic() {
                         // Between `%` and `?` (at the end), the `?` takes priority
                         // over the `%` so `%foo?` is recognized as `IpyEscapeKind::Help`
                         // and `value` is `%foo` instead of `foo`. So, we need to
                         // insert the magic escape token at the start.
+                        value.try_reserve(escape_kind.as_str().len()).map_err(|_| ByteLexFailure::ResourceLimit)?;
+                        self.cursor.control.work(value.len())?;
                         value.insert_str(0, escape_kind.as_str());
                     }
 
@@ -1313,25 +1386,27 @@ impl<'src> Lexer<'src> {
                         value: value.into_boxed_str(),
                     };
 
-                    return TokenKind::IpyEscapeCommand;
+                    return Ok(TokenKind::IpyEscapeCommand);
                 }
-                '\n' | '\r' | EOF_CHAR => {
+                // Retain the legacy IPython command terminator rule for NUL;
+                // it remains an unconsumed scalar, not cursor EOF.
+                Some('\n' | '\r' | '\0') | None => {
                     self.current_value = TokenValue::IpyEscapeCommand {
                         kind: escape_kind,
                         value: value.into_boxed_str(),
                     };
 
-                    return TokenKind::IpyEscapeCommand;
+                    return Ok(TokenKind::IpyEscapeCommand);
                 }
-                c => {
-                    self.cursor.bump();
+                Some(c) => {
+                    self.cursor.bump()?;
                     value.push(c);
                 }
             }
         }
     }
 
-    fn consume_end(&mut self) -> TokenKind {
+    fn consume_end(&mut self) -> Result<TokenKind, ByteLexFailure> {
         // We reached end of file.
         // First of all, we need all nestings to be finished.
         // For Mode::ParenthesizedExpression we start with nesting level 1.
@@ -1345,7 +1420,7 @@ impl<'src> Lexer<'src> {
         }
 
         // Next, insert a trailing newline, if required.
-        if !self.state.is_new_logical_line() {
+        Ok(if !self.state.is_new_logical_line() {
             self.state = State::AfterNewline;
             TokenKind::Newline
         }
@@ -1354,7 +1429,7 @@ impl<'src> Lexer<'src> {
             TokenKind::Dedent
         } else {
             TokenKind::EndOfFile
-        }
+        })
     }
 
     /// Re-lex the [`NonLogicalNewline`] token at the given position in the context of a logical
@@ -1415,9 +1490,10 @@ impl<'src> Lexer<'src> {
     pub(crate) fn re_lex_logical_token(
         &mut self,
         non_logical_newline_start: Option<TextSize>,
-    ) -> bool {
+    ) -> Result<bool, ByteLexFailure> {
+        self.cursor.control.work(1)?;
         if self.nesting == 0 {
-            return false;
+            return Ok(false);
         }
 
         // Reduce the nesting level because the parser recovered from an error inside list parsing
@@ -1427,11 +1503,11 @@ impl<'src> Lexer<'src> {
         // The lexer can't be moved back for a triple-quoted f/t-string because the newlines are
         // part of the f/t-string itself, so there is no newline token to be emitted.
         if self.current_flags.is_triple_quoted_interpolated_string() {
-            return false;
+            return Ok(false);
         }
 
         let Some(new_position) = non_logical_newline_start else {
-            return false;
+            return Ok(false);
         };
 
         // Earlier we reduced the nesting level unconditionally. Now that we know the lexer's
@@ -1454,11 +1530,10 @@ impl<'src> Lexer<'src> {
             self.nesting += 1;
         }
 
-        self.cursor = Cursor::new(self.source);
-        self.cursor.skip_bytes(new_position.to_usize());
+        self.cursor.reposition(new_position.to_usize())?;
         self.state = State::Other;
-        self.next_token();
-        true
+        self.next_token()?;
+        Ok(true)
     }
 
     #[inline]
@@ -1470,8 +1545,72 @@ impl<'src> Lexer<'src> {
     }
 
     #[inline]
-    fn token_text(&self) -> &'src str {
-        &self.source[self.token_range()]
+    fn token_text(&mut self) -> Result<&'src str, ByteLexFailure> {
+        self.source_text(self.token_range())
+    }
+
+    fn source_text(&mut self, range: TextRange) -> Result<&'src str, ByteLexFailure> {
+        let bytes = self.source.get(range.start().to_usize()..range.end().to_usize())
+            .ok_or(ByteLexFailure::InvalidState)?;
+        self.cursor.control.source_text(bytes, range.start())
+    }
+
+    fn owned_text(&mut self, range: TextRange) -> Result<Box<str>, ByteLexFailure> {
+        let text = self.source_text(range)?;
+        let mut owned = String::new();
+        owned.try_reserve(text.len()).map_err(|_| ByteLexFailure::ResourceLimit)?;
+        owned.push_str(text);
+        Ok(owned.into_boxed_str())
+    }
+
+    /// Library normalization and numeric conversions are covered by a conservative
+    /// 64x raw-token envelope, charged cumulatively before entering the library.
+    fn charge_value(&mut self) -> Result<(), ByteLexFailure> {
+        let len = self.cursor.token_len().to_usize();
+        self.cursor.control.allocate_scaled(len, 64, 256)?;
+        self.cursor.control.work(len)?;
+        Ok(())
+    }
+
+    fn append_normalized(&mut self, output: &mut String, range: TextRange) -> Result<(), ByteLexFailure> {
+        self.cursor.control.allocate_scaled(range.len().to_usize(), 4, 0)?;
+        let text = self.source_text(range)?;
+        output.try_reserve(text.len()).map_err(|_| ByteLexFailure::ResourceLimit)?;
+        output.push_str(text);
+        Ok(())
+    }
+
+    /// Scan in bounded chunks so fast string searches still poll on long tokens.
+    fn find_string_boundary(&mut self, quote: u8, newline: bool) -> Result<Option<usize>, ByteLexFailure> {
+        let rest = self.cursor.rest();
+        for (chunk_index, chunk) in rest.chunks(1024).enumerate() {
+            self.cursor.control.work(chunk.len())?;
+            let found = if newline { memchr::memchr3(quote, b'\r', b'\n', chunk) }
+                else { memchr::memchr(quote, chunk) };
+            if let Some(index) = found { return Ok(Some(chunk_index * 1024 + index)) }
+        }
+        Ok(None)
+    }
+
+    fn count_backslashes(&mut self, end: usize) -> Result<usize, ByteLexFailure> {
+        let mut count = 0;
+        for &byte in self.cursor.rest()[..end].iter().rev() {
+            self.cursor.control.work(1)?;
+            if byte != b'\\' { break }
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    fn charge_checkpoint(&mut self) -> Result<(), ByteLexFailure> {
+        self.cursor.control.work(1)?;
+        let bytes = self.current_range.len().to_usize().checked_mul(64)
+            .and_then(|n| n.checked_add(self.indentations.len().checked_mul(32)?))
+            .and_then(|n| n.checked_add(self.interpolated_strings.len().checked_mul(64)?))
+            .and_then(|n| n.checked_add(512)).ok_or(ByteLexFailure::ResourceLimit)?;
+        self.cursor.control.allocate(bytes)?;
+        self.cursor.control.work(bytes)?;
+        Ok(())
     }
 
     /// Retrieves the current offset of the cursor within the source code.
@@ -1489,19 +1628,23 @@ impl<'src> Lexer<'src> {
 
     /// Creates a checkpoint to which the lexer can later return to using [`Self::rewind`].
     pub(crate) fn checkpoint(&self) -> LexerCheckpoint {
-        LexerCheckpoint {
+        legacy_result(self.try_checkpoint())
+    }
+
+    fn try_checkpoint(&self) -> Result<LexerCheckpoint, ByteLexFailure> {
+        Ok(LexerCheckpoint {
             value: self.current_value.clone(),
             current_kind: self.current_kind,
             current_range: self.current_range,
             current_flags: self.current_flags,
-            cursor_offset: self.offset(),
+            cursor: self.cursor.checkpoint(),
             state: self.state,
             nesting: self.nesting,
-            indentations_checkpoint: self.indentations.checkpoint(),
+            indentations_checkpoint: self.indentations.try_checkpoint().map_err(|_| ByteLexFailure::ResourceLimit)?,
             pending_indentation: self.pending_indentation,
-            interpolated_strings_checkpoint: self.interpolated_strings.checkpoint(),
+            interpolated_strings_checkpoint: self.interpolated_strings.try_checkpoint().map_err(|_| ByteLexFailure::ResourceLimit)?,
             errors_position: self.errors.len(),
-        }
+        })
     }
 
     /// Restore the lexer to the given checkpoint.
@@ -1511,7 +1654,7 @@ impl<'src> Lexer<'src> {
             current_kind,
             current_range,
             current_flags,
-            cursor_offset,
+            cursor,
             state,
             nesting,
             indentations_checkpoint,
@@ -1520,15 +1663,11 @@ impl<'src> Lexer<'src> {
             errors_position,
         } = checkpoint;
 
-        let mut cursor = Cursor::new(self.source);
-        // We preserve the previous char using this method.
-        cursor.skip_bytes(cursor_offset.to_usize());
-
         self.current_value = value;
         self.current_kind = current_kind;
         self.current_range = current_range;
         self.current_flags = current_flags;
-        self.cursor = cursor;
+        self.cursor.rewind(cursor);
         self.state = state;
         self.nesting = nesting;
         self.indentations.rewind(indentations_checkpoint);
@@ -1548,7 +1687,7 @@ pub(crate) struct LexerCheckpoint {
     current_kind: TokenKind,
     current_range: TextRange,
     current_flags: TokenFlags,
-    cursor_offset: TextSize,
+    cursor: CursorState,
     state: State,
     nesting: u32,
     indentations_checkpoint: IndentationsCheckpoint,
@@ -1614,10 +1753,6 @@ impl Radix {
     }
 }
 
-const fn is_quote(c: char) -> bool {
-    matches!(c, '\'' | '"')
-}
-
 const fn is_ascii_identifier_start(c: char) -> bool {
     matches!(c, 'a'..='z' | 'A'..='Z' | '_')
 }
@@ -1646,45 +1781,59 @@ fn is_identifier_continuation(c: char, identifier_is_ascii_only: &mut bool) -> b
 }
 
 enum LexedText<'a> {
-    Source { source: &'a str, range: TextRange },
+    Source { source: &'a [u8], range: TextRange },
     Owned(String),
 }
 
 impl<'a> LexedText<'a> {
-    fn new(start: TextSize, source: &'a str) -> Self {
+    fn new(start: TextSize, source: &'a [u8]) -> Self {
         Self::Source {
             range: TextRange::empty(start),
             source,
         }
     }
 
-    fn push(&mut self, c: char) {
+    fn push(&mut self, c: char) -> Result<(), ByteLexFailure> {
         match self {
             LexedText::Source { range, source } => {
                 *range = range.add_end(c.text_len());
-                debug_assert!(source[*range].ends_with(c));
+                debug_assert!(source[range.start().to_usize()..range.end().to_usize()].ends_with(&[c as u8]));
             }
-            LexedText::Owned(owned) => owned.push(c),
+            LexedText::Owned(owned) => {
+                owned.try_reserve(c.len_utf8()).map_err(|_| ByteLexFailure::ResourceLimit)?;
+                owned.push(c);
+            }
         }
+        Ok(())
     }
 
-    fn as_str<'b>(&'b self) -> &'b str
-    where
-        'b: 'a,
-    {
-        match self {
-            LexedText::Source { range, source } => &source[*range],
-            LexedText::Owned(owned) => owned,
-        }
-    }
-
-    fn skip_char(&mut self) {
+    fn as_str(&self) -> Result<&str, ByteLexFailure> {
         match self {
             LexedText::Source { range, source } => {
-                *self = LexedText::Owned(source[*range].to_string());
+                let bytes = source.get(range.start().to_usize()..range.end().to_usize()).ok_or(ByteLexFailure::InvalidState)?;
+                // Only radix digits and punctuation already consumed by the cursor enter this range.
+                std::str::from_utf8(bytes).map_err(|_| ByteLexFailure::InvalidState)
+            }
+            LexedText::Owned(owned) => Ok(owned),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self { Self::Source { range, .. } => range.len().to_usize(), Self::Owned(text) => text.len() }
+    }
+
+    fn skip_char(&mut self) -> Result<(), ByteLexFailure> {
+        match self {
+            LexedText::Source { .. } => {
+                let text = self.as_str()?;
+                let mut owned = String::new();
+                owned.try_reserve(text.len()).map_err(|_| ByteLexFailure::ResourceLimit)?;
+                owned.push_str(text);
+                *self = LexedText::Owned(owned);
             }
             LexedText::Owned(_) => {}
         }
+        Ok(())
     }
 }
 

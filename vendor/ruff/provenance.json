@@ -1,12 +1,30 @@
 {
+  "byte_lexer_experiment": {
+    "crates/ruff_python_parser/src/lexer.rs": {
+      "original_sha256": "6033d74e02e4f5a0e0bda5fda66269ca7c1fa3bb8c3e1b0beb15383b132c790d",
+      "patched_sha256": "b2a695c560189a04302b909d5a44b4634ac1aaa94a145de395d5b2e4a0963479"
+    },
+    "crates/ruff_python_parser/src/lexer/cursor.rs": {
+      "original_sha256": "7631cb23110d75273be440da6d1de187f9ec62fc2d796bf2ddde09f1ce037c47",
+      "patched_sha256": "944e7dda4765d66159fb926e3b2e60d276dc1b1749ccfbff0e478f1195bf03f7"
+    },
+    "crates/ruff_python_parser/src/lexer/indentation.rs": {
+      "original_sha256": "79be3c355b4e6c26d64938ecacb7ef37cf9ce69d8d76f404efffa3b3e1bf17a5",
+      "patched_sha256": "9af13361dbd78142f499b5fce50218277e2ecb58209c336f1ba8404a971dbb86"
+    },
+    "crates/ruff_python_parser/src/lexer/interpolated_string.rs": {
+      "original_sha256": "b47b9cffaebfd681fc679c757d73dfe07cd10f81f0b5a376fc88e9285ae1588d",
+      "patched_sha256": "d0ecf32ab5eb537110ca79a0521dba21cc70f0d1118ece4f95a73f5bffc7c9d7"
+    }
+  },
   "files": {
     "LICENSE": {
       "bytes": 69789,
       "sha256": "3209c0b7fb7257c05b16433728c1e974bac40000fef171b8e9e89f095623c954"
     },
     "README.md": {
-      "bytes": 6123,
-      "sha256": "c59d8f6859275a5ad4be7855cc5b4796e02a6975686eac023a1d426990fde300"
+      "bytes": 7491,
+      "sha256": "d81009b521b7af2e598321377d52e65f337f40ef145847e3403a7ed0af185335"
     },
     "crates/ruff_python_ast/Cargo.toml": {
       "bytes": 972,
@@ -129,20 +147,24 @@
       "sha256": "4d90f522d79ab237799c62a650c7b9da9b94d40974348992c6f720ccc411b69d"
     },
     "crates/ruff_python_parser/src/lexer.rs": {
-      "bytes": 93221,
-      "sha256": "6033d74e02e4f5a0e0bda5fda66269ca7c1fa3bb8c3e1b0beb15383b132c790d"
+      "bytes": 102650,
+      "sha256": "b2a695c560189a04302b909d5a44b4634ac1aaa94a145de395d5b2e4a0963479"
+    },
+    "crates/ruff_python_parser/src/lexer/byte.rs": {
+      "bytes": 16312,
+      "sha256": "d8e617b7bb9401e96263997b99151cfa02e3dd0af1254a384c7569e12d2fec94"
     },
     "crates/ruff_python_parser/src/lexer/cursor.rs": {
-      "bytes": 5574,
-      "sha256": "7631cb23110d75273be440da6d1de187f9ec62fc2d796bf2ddde09f1ce037c47"
+      "bytes": 6402,
+      "sha256": "944e7dda4765d66159fb926e3b2e60d276dc1b1749ccfbff0e478f1195bf03f7"
     },
     "crates/ruff_python_parser/src/lexer/indentation.rs": {
-      "bytes": 4870,
-      "sha256": "79be3c355b4e6c26d64938ecacb7ef37cf9ce69d8d76f404efffa3b3e1bf17a5"
+      "bytes": 5229,
+      "sha256": "9af13361dbd78142f499b5fce50218277e2ecb58209c336f1ba8404a971dbb86"
     },
     "crates/ruff_python_parser/src/lexer/interpolated_string.rs": {
-      "bytes": 5292,
-      "sha256": "b47b9cffaebfd681fc679c757d73dfe07cd10f81f0b5a376fc88e9285ae1588d"
+      "bytes": 5651,
+      "sha256": "d0ecf32ab5eb537110ca79a0521dba21cc70f0d1118ece4f95a73f5bffc7c9d7"
     },
     "crates/ruff_python_parser/src/lib.rs": {
       "bytes": 39503,
@@ -308,6 +330,10 @@
       "bytes": 2672,
       "sha256": "e79a66530f58f63371c0423f5f0469ff82f9b0193f57b6ba8672c3c33aa4e90e"
     },
+    "patches/byte-lexer-experiment.patch": {
+      "bytes": 60159,
+      "sha256": "4f4d3a244236a3e730ab805716f23f581483fa6e7a38060b1ea10c344fe5aac5"
+    },
     "upstream/Cargo.lock": {
       "bytes": 114898,
       "sha256": "ccc843838d16f203d18a3410dd120e72e750a89ee42164145ae9cbf181fb6f47"
@@ -335,6 +361,14 @@
     "upstream/workspace.Cargo.toml": {
       "bytes": 9697,
       "sha256": "c63031c42b75ce1bd4eb249981ce091ccb7a7381a26177542e3a49a9dd7512d4"
+    }
+  },
+  "local_sources": {
+    "crates/ruff_python_parser/src/lexer/byte.rs": {
+      "bytes": 16312,
+      "license": "MIT",
+      "origin": "Ideomancer-authored",
+      "sha256": "d8e617b7bb9401e96263997b99151cfa02e3dd0af1254a384c7569e12d2fec94"
     }
   },
   "policy": {
@@ -617,7 +651,7 @@
       "sha256": "3aef3ac8ac0f1dad4cfa1ccbe1469b2b4a1fcf684f97a985bbe88a0a3d2b0fb3"
     }
   },
-  "schema_version": 1,
+  "schema_version": 2,
   "upstream": {
     "archive_sha256": "e4613ad9fe6f7293510586649aab788e10610ab80fe9dd509ba7ac2364413631",
     "archive_url": "https://codeload.github.com/astral-sh/ruff/tar.gz/87f0feb21a1af67195bebf94d811770393f9f447",

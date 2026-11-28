@@ -90,6 +90,12 @@ pub(super) struct Indentations {
 }
 
 impl Indentations {
+    pub(super) fn len(&self) -> usize { self.stack.len() }
+
+    pub(super) fn try_reserve(&mut self) -> Result<(), std::collections::TryReserveError> {
+        self.stack.try_reserve(1)
+    }
+
     pub(super) fn indent(&mut self, indent: Indentation) {
         debug_assert_eq!(self.current().try_compare(indent), Ok(Ordering::Less));
 
@@ -125,8 +131,11 @@ impl Indentations {
         self.stack.last().unwrap_or(&ROOT)
     }
 
-    pub(crate) fn checkpoint(&self) -> IndentationsCheckpoint {
-        IndentationsCheckpoint(self.stack.clone())
+    pub(super) fn try_checkpoint(&self) -> Result<IndentationsCheckpoint, std::collections::TryReserveError> {
+        let mut stack = Vec::new();
+        stack.try_reserve(self.stack.len())?;
+        stack.extend_from_slice(&self.stack);
+        Ok(IndentationsCheckpoint(stack))
     }
 
     pub(crate) fn rewind(&mut self, checkpoint: IndentationsCheckpoint) {

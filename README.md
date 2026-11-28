@@ -79,7 +79,7 @@ contextual type comments/ignores and bounded span correction, plus UTF-8/BOM/coo
 and finite Latin-1 decoding. Surrogates and literal redaction remain preserved;
 router target limits count at most 128 normalized Python characters. Original-byte
 hashes and 1 MiB/file, 16 MiB/run input caps remain; decoded text is capped at
-2 MiB/file and 32 MiB/run. Four vendor source files now carry reviewed patches:
+2 MiB/file and 32 MiB/run. The historical four-file vendor policy patch covers:
 bare f-string mapping keys are allowed only with `ast_only=true`, and all three
 type-parameter default variants report PY312 version errors independently of that
 option (PY313 accepts them). Other codecs remain unsupported/unresolved. Actual
@@ -132,7 +132,7 @@ helper verification still reported `already_clean`, without rebuilding.
 See the [historical batch ledger](docs/python-analysis.md#ruff-failure-certificate-batch-frontend-3--private-facts-5)
 for interfaces, finite exclusions and the architecture stop decision.
 
-**Current frontend-5/facts-7 private visitor implementation closed:** syntax policy
+**Historical frontend-5/facts-7 visitor closeout (private G2/G3 scope remains closed):** syntax policy
 `python-ruff-private-5-py312-visitor-patterns` targets only the current admitted
 Python 3.12 Module-AST lane. The executable [inventory](docs/python-visitor-contract.json)
 and [20 cross-family witnesses](docs/python-visitor-witnesses.json) cover 111 modern
@@ -178,27 +178,49 @@ modes/constructors; the AST-only predicate adds class-first and later-sequence
 child admission, not singleton-first admission. The independent
 missing-separator controls pass in both modes/constructors, not by weakening tests.
 
-**Current direction: contract-preserving full replacement selected.** The user
-explicitly authorized F0, the bounded byte-aware Ruff feasibility/version study.
-The [feasibility ADR](docs/python-native-replacement-feasibility.md) records the
-completed F0 investigation's **conditional GO**, not an implemented or compiled byte frontend.
-Byte-backed lexical input and narrow checked source views retain Ruff's grammar,
-but are not a thin adapter and may require fork/AST API changes beyond the current
-four-file patch. The 219-input CPython reference study is not native parity.
-G2/G3 remain privately closed; G4 is blocked on byte proof, version policy and the
-other compatibility gates, not on the initial direction choice.
+**Current direction: contract-preserving full replacement; bounded private F1
+lexer goal COMPLETE / PROVED by compiled tests; all delivery gates PASS.** One shared fallible
+byte core serves legacy `Lexer(&str)` and experimental doc-hidden `ByteLexer`;
+there is no independent lexer, source repair, unchecked UTF-8 or byte parser.
+The coordinator reports **all 131 private Ruff tests passed**, including **23 F1
+ordinary + 17 existing opt-in tests**, after fixes. All **364** complete positive
+fact/ID/diagnostic/raw-replay cases matched on the unchanged normal `&str` path.
+Both facades passed all thirteen pre-core frozen trace hashes (298 tokens, all
+four modes); legacy `Send + Sync` compiled/passed in the baseline test. Product
+formatting/all-target Clippy passed, as did **58 vendor script tests**, schema-2
+vendor integrity and the **261-path** source gate. Scripts: **310 discovered,
+297 passed / 13 isolated skips**; explicit byte/visitor/codec **23 / 43 / 24 passed**
+with no skips, covering all 310 unique tests across lanes. See the [F1 ledger](docs/python-analysis.md#f1-shared-byte-lexer-experiment)
+for exact scope, [baseline](docs/python-byte-lexer-baseline.json), tests and
+provenance, and the [ADR](docs/python-native-replacement-feasibility.md) for F2.
+F0's uncompiled finding is historical, superseded only for lexical proof. G2/G3
+remain privately closed; parser/source/debug/admission/failure/version proof and
+G4–G6 remain open. Frontend-5/facts-7 names and production behavior are unchanged;
+the private implementation fingerprint changes with vendor provenance.
 
 Immutable full-bundle native profiles with exact patch membership and a release
 support window are **proposed**, not approved: no fixed profile preserves every
 future/arbitrary selected Python >=3.12 interpreter. Legacy executable selection
-still uses the helper. F1/F2 staged prototypes need separately bounded approval;
-F0 does not authorize production vendor expansion, source repair, tool installation,
-finite-profile policy, public selectors or cutover. F0's reference/script, 256-path
-source and unchanged vendor-integrity gates passed; see the
-[validation ledger](docs/python-analysis.md#f0-byte-input-and-version-feasibility).
-No Rust/consumer rerun was needed for this scripts/docs/CI-only slice. The helper
-reported `already_clean`; owned validation scratch was cleaned with none left.
-The Rust and cleanup receipts above remain historical, not fresh F0 passes.
+still uses the helper. F2 and version/product policy require separate approval;
+no public selector or cutover is authorized. Current preservation passed **708
+library tests (191 ignored), 18 adapter + 8 engine** and explicit **165 reference +
+3 native** tests. With the 17 Ruff opt-ins, **all 185 explicit gates passed**,
+including known-limit assertions—not 185 parity matches. P2 source-view accounting
+is closed; final read-only review found no material P1/P2/P3 findings and schema-2
+guards passed. Offline checkout consumer passed: fresh **105-package** lock,
+**one native TypeScript public-API test**, five contained Ruff crates, ABI **0.1.5**
+and source-hash rechecks. Its snapshot (hash in the [F1 ledger](docs/python-analysis.md#f1-shared-byte-lexer-experiment))
+is not a Git revision or final-docs attestation. Its owned cache `TMPDIR` was cleaned.
+Guarded cleanup removed **1,360,498,688 estimated allocated bytes (~1.27 GiB)**
+after zero blockers/protected outputs; target is absent, follow-up `already_clean`,
+**no Cargo afterward**. No owned debug/test artifacts remain; root cache parent
+is empty; `.ideomancer/` JS artifacts/global caches were untouched. No additional
+core changes are planned; provenance anchors are stable. Final source/Git/helper
+checks are read-only, without rebuilding. Earlier test/cache/HEAD receipts describe historical
+checkpoints, not F1. Actual pre-F1 HEAD was user-reported `fdf4e58` (facts-6 commit,
+initially clean/ahead one), not `523cd7b`; current F1 changes are uncommitted and
+unstaged; no commits or pushes were made. The completed lexer goal does not prove byte parser input, AST/debug
+construction, CPython admission, F2 or full G4, or authorize further implementation.
 
 **Historical frontend-4/facts-6 batch:**
 `python-ruff-private-4-py312-single-byte-codecs` adds a pinned CPython 3.12.11
@@ -308,15 +330,18 @@ it. Consumers can start with an explicit local path, then pin the full actual Gi
 revision of an approved upstream checkout or internal mirror once available.
 Personal/company Git-based distribution is the approved delivery model; no
 crates.io/registry publication is required (`publish = false`). The five local
-Ruff source crates, notices and four-file policy patch travel in `vendor/ruff` with that
-checkout: no external fork, submodule or published Ruff version is needed. Current
-provenance covers 85 vendor files / 65 source files / 1,882,473 bytes; the reviewed
-source inventory was 253 paths at the visitor checkpoint; F0 adds the ADR and two
-reference scripts for 256 paths, verified by the source gate. The closure includes
+Ruff source crates, notices and two disjoint four-file patches travel in `vendor/ruff`
+with that checkout: no external fork, submodule or published Ruff version is needed.
+Current schema-2 provenance covers **87 vendor files / 66 Rust sources /
+1,972,891 bytes**: eight modified upstream, 57 unchanged and one authored MIT byte
+facade, separately hashed rather than labeled pristine upstream. The 65-source
+upstream pristine map and AST-only policy patch are unchanged. The source inventory
+is **261 paths** (+5 from F0's 256); current-tree source and vendor checks passed.
+The closure includes
 codec data, scripts, manifest, provenance and notices alongside the existing
-Unicode data/provenance and notices. The visitor batch updates the existing
-four-file vendor policy patch without changing dependencies; retain the codec
-notice/license closure as well.
+Unicode data/provenance and notices. F1 adds the lexer experiment patch without
+changing manifests/dependencies or notice terms; retain root MIT, Ruff, codec and
+Unicode license closures together.
 Ideomancer is available under the
 [MIT License](LICENSE); copies and substantial portions must retain its notices.
 The scoped [native-parser third-party notices](docs/third-party-notices.md) are

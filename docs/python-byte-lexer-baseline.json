@@ -1,0 +1,15 @@
+[
+  {"id":"module_basics","mode":"Module","source_sha256":"ac54835d96203f0b51763eee4a3540f7817e4a0429461070868dc3deb29d3e33","tokens":50,"trace_sha256":"73ebebdd9b0a80cfec066de527a9cf777e9b05660ac8ea8a7189862d07fc7b05"},
+  {"id":"unicode_names","mode":"Module","source_sha256":"11f9f2744fe8370ce397dc8637fc1a07a4f822b525f772c807ba186eb4ab7712","tokens":16,"trace_sha256":"2b04c240e2feb5ca6f28c2dfc4c957909aec7dab447c93562a56fcdf9b2c25be"},
+  {"id":"number_forms","mode":"Module","source_sha256":"7e6a2e5a7e209620be7d64db2eade49d62fa321a1b161af7cacfe84caf57c3c6","tokens":15,"trace_sha256":"b4043e7fe2c424fae4a17f91d61677f98faa3fc5f010fcaaa59513206af30439"},
+  {"id":"strings","mode":"Module","source_sha256":"7e2a7496d4e047fe4a03f52d6b6b260823e928a5a598fdcde8c13ee6c0f2459c","tokens":14,"trace_sha256":"52266d1356b938e83683a5599cd5fb40ffd1fa0ce87e897cf8c2cc1310d1d9b9"},
+  {"id":"fstring_context","mode":"Module","source_sha256":"9db7bb39857873c3d6f885481618a28a0269ab2f47be035c6fdc539234ba04ae","tokens":38,"trace_sha256":"b3cd08d678af8081b871da713ff914f9e2155472da40058769a63335698258a0"},
+  {"id":"debug_comments","mode":"Module","source_sha256":"fc0c5808664389f18923b52315a9a171d06195deeaa2be97584430bb0d2d2d78","tokens":16,"trace_sha256":"80f7abf4ccf7388a9c1a8f4f86837e90c1f1767611aca05247f2c1277e7ae969"},
+  {"id":"indentation_newlines","mode":"Module","source_sha256":"07f0715f62f7e7192fa55802c81dedbe5e55a91cfb84a080f88ddc01c5f1c145","tokens":27,"trace_sha256":"405374751b831f94bc1a76d715812cdd1ef38836cc80ced6697e4827e51b2648"},
+  {"id":"bom_and_comments","mode":"Module","source_sha256":"b63d2d2e32475c0f2084258db0b5ae864eabeedb355bef60dd0ba494745f545b","tokens":18,"trace_sha256":"a89911b55283c4c04d0da44542e71abb3656fd093dbac89b2a69352ab64ccad9"},
+  {"id":"operators","mode":"Module","source_sha256":"9993c7e96d816c543cff2fea41ccf2b75080c511bb02e5404a5d9007e212bc00","tokens":36,"trace_sha256":"323d6b5e9b6557ec22525fb8d2ca30115b9970e7eceb8064a262992275cef5e4"},
+  {"id":"syntax_lexical_errors","mode":"Module","source_sha256":"685ec2975959870786365dcfe3a668a5d7ab9fd3a2aff2ed2b9042ec01bc100d","tokens":15,"trace_sha256":"bc70204f2bbc01a59f4bdf9f8fafa7eeb033d09d978815c9c95e98ab8e9f1b74"},
+  {"id":"expression","mode":"Expression","source_sha256":"aa0f546ecb836e7edff43095759e4959da0629b8f9ce7b44d5fa49f86792fad5","tokens":30,"trace_sha256":"24ecadffaaa50346494fb4f42db3f9d10d2beb655e5afd0daaed73930a045fdd"},
+  {"id":"parenthesized","mode":"ParenthesizedExpression","source_sha256":"76cf919fbc60be34caedf1dd1c1ad02ae7ee086b85a0064feb749a2757b50415","tokens":13,"trace_sha256":"e62fce67e356a7162a361546a92e406c05b4a09c9a7be0058a4edc7a6eeeaf28"},
+  {"id":"ipython","mode":"Ipython","source_sha256":"1eb0fd9f15cad75862ea0a97af3642d01dc00aae053089cf992ae681ff6320e4","tokens":10,"trace_sha256":"e3d228be489e48ed593963606dd1d002e698cbcd2c86b37a187c07bde24be880"}
+]

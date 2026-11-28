@@ -9,7 +9,7 @@ source ownership, security, framework semantics, or historical clearance.
 The approved personal/company delivery model is Git source, with no registry or
 crates.io publication requirement. Root `Cargo.toml` sets `publish = false` and
 depends on three local Ruff crates under `vendor/ruff/crates`; their closure is
-five source crates. All five, upstream notices and the narrow policy patch travel
+five source crates. All five, upstream notices and two bounded patches travel
 with the Ideomancer checkout. No external fork, submodule, published Ruff version
 or separately maintained unpublished registry-version family is required.
 The reviewed source closure also carries Unicode-15 raw inputs, derived tables,
@@ -18,7 +18,68 @@ manifest, provenance and their permission notice under
 
 ## API / Interfaces
 
-### Current visitor source closure
+### Current F1 experimental source closure
+
+The authorized private F1 lexer shares one fallible byte core with legacy text
+lexing; it is not a public backend, byte parser or production migration. Frontend-5/
+facts-7 names and manifests/dependencies remain unchanged; implementation identity
+changes transitively through schema-2 vendor provenance. Actual pre-F1 HEAD was
+user-reported `fdf4e58` (facts-6 commit, initially clean/ahead one), not `523cd7b`.
+Current F1 changes are uncommitted and unstaged. All earlier HEAD, consumer and
+cleanup receipts below are historical.
+
+Current source inventory: **261 paths**, five additions to F0's 256: two root
+ordinary test modules, [frozen baseline](python-byte-lexer-baseline.json), the
+vendor lexer patch and the authored byte facade. Vendor: **87 files / 66 Rust
+sources / 1,972,891 bytes**. The strict schema-2 closure retains the unchanged
+65-source pristine map: eight modified upstream files, 57 unchanged, plus one
+original MIT `lexer/byte.rs` separately hashed as authored code. Two disjoint
+four-file patches reverse independently: unchanged `ast-only-policy.patch` and
+`byte-lexer-experiment.patch` (`lexer.rs`, `lexer/{cursor,indentation,interpolated_string}.rs`).
+
+SHA-256 anchors:
+
+- Provenance: `83b701ef82cd549d1b01501520f57b9504e3decac32cdc7d151add639f892800`.
+- F1 patch: `4f4d3a244236a3e730ab805716f23f581483fa6e7a38060b1ea10c344fe5aac5`.
+- Authored facade: `d8e617b7bb9401e96263997b99151cfa02e3dd0af1254a384c7569e12d2fec94`.
+
+Retain root MIT and Ruff licenses and existing PSF/Unicode notices unchanged.
+Coordinator-reported current validation: **all 131 private Ruff tests passed**
+after fixes, including **23 F1 ordinary + 17 existing opt-ins**. All **364** complete
+positive facts/IDs/diagnostics/raw replay matched on the unchanged normal text
+path. Both facades passed all thirteen frozen pre-core hashes (298 tokens/all four
+modes), and legacy `Send + Sync` compiled/passed in the baseline test. Product
+formatting/all-target Clippy (`--no-deps -- -D warnings`), **58 vendor script tests**,
+schema-2 checker and **261-path** source gate passed. Scripts: **310 discovered,
+297 passed / 13 isolation skips**; isolated byte/visitor/codec **23 / 43 / 24 passed**,
+no skips, together covering all 310 unique tests across lanes. Existing
+CI ordinary root tests select the new modules without a public backend selector.
+Current preservation passed **708 library tests (191 ignored), 18 adapter + 8
+engine** and explicit **165 reference + 3 native** tests. With the 17 Ruff opt-ins,
+**all 185 explicit gates passed**, including known-limit assertions—not 185 parity
+matches. P2 text-view accounting is closed and its root regression passed; final
+read-only review found no material P1/P2/P3 findings and new schema-2 guards passed.
+No additional core changes are planned and provenance anchors are stable.
+**Bounded F1 lexer goal COMPLETE / PROVED by compiled tests; all delivery gates PASS.**
+The offline checkout consumer passed fresh **105-package** lock resolution,
+**one native TypeScript public-API test**, five-Ruff-crate containment, ABI **0.1.5**
+and source-hash rechecks. Its tested source snapshot is
+`2cea3f996bf4a0e0cbbfd242b681331fb2208a3f0e6ac1fba2e4e81472869c6e`,
+not an actual Git revision or final-docs attestation. Its owned cache `TMPDIR`
+was cleaned, with none left. Guarded preflight found zero blockers/protected
+outputs, normal `debug`/`tmp` only. Cleanup removed **1,360,498,688 estimated
+allocated bytes (~1.27 GiB)**; target absent, follow-up `already_clean`, **no Cargo
+afterward**. No owned debug/test artifacts remain; root cache parent empty,
+`.ideomancer/` JS artifacts/global caches untouched. Final source/Git/helper checks
+are read-only, without rebuilding. No commits or pushes were made. This is not release
+approval or proof of byte parser input, AST/debug construction, CPython admission,
+F2 or full G4; it does not authorize further implementation. F2 parser/source/
+debug/admission/lazy-error precedence and version/product policy still need
+separate approval. See the
+[F1 ledger](python-analysis.md#f1-shared-byte-lexer-experiment) and
+[ADR](python-native-replacement-feasibility.md).
+
+### Historical visitor source closure
 
 Frontend `python-ruff-private-5-py312-visitor-patterns` / facts policy
 `python-ruff-private-facts-7` has a **253-path** Git source inventory, five additions
@@ -29,8 +90,8 @@ to the codec checkpoint's 248: [contract](python-visitor-contract.json),
 helper/Ruff output/raw-replay oracle together; the script does not prove ordering.
 CI adds checker/tests with `-I -S -B` on trusted exact CPython 3.12.11.
 
-The maintained patch still touches four source files, with the same 65-source
-pristine closure; current vendor totals are **85 files / 65 sources / 1,882,473
+At the visitor checkpoint the maintained patch touched four source files, with the
+same 65-source pristine closure; vendor totals were **85 files / 65 sources / 1,882,473
 bytes**. Patch SHA-256:
 `e79a66530f58f63371c0423f5f0469ff82f9b0193f57b6ba8672c3c33aa4e90e`;
 provenance anchor:
@@ -77,7 +138,8 @@ The facts-6 ~1.28 GiB receipt below is historical, as are prior consumer receipt
 No staging, commit or push was performed; all work remains uncommitted at actual
 HEAD `523cd7b`. These are local passes, not hosted/platform or full production approval.
 
-After this bounded gate, **STOP parity expansion**. G4 requires a user choice:
+**Historical STOP at visitor handoff (superseded for F0 and bounded F1 only).**
+At that checkpoint G4 required a user choice:
 preserve the full replacement contract and explicitly authorize the recommended
 bounded byte-aware Ruff feasibility/version-strategy investigation (not a rewrite), or approve a separate limited native
 capability retaining the helper. “Continue” chooses neither. Unchanged Ruff `&str`
@@ -166,7 +228,8 @@ everything that may be tracked in Git. Review the actual authorized revision too
 
 1. Review source additions and inventory changes rather than regenerating blindly.
 2. Check the source closure and `check_ruff_vendor.py`'s anchored provenance,
-   manifests, notices, exact hashes and four-source-file policy-patch reversal.
+   manifests, notices, exact hashes, both disjoint four-file patch reversals and
+   the separate authored-source hash.
    Run `check_python_unicode15.py` to verify independent official-input/table
    hashes, reproducibility and exhaustive Unicode oracle checks; review data
    provenance and permission notices with the source inventory.
@@ -239,8 +302,9 @@ path dependencies. The archive helpers and inventory below remain historical too
 and unit-test coverage, **not active delivery gates**. Do not run archive builds as
 a substitute for checkout-consumer acceptance, or claim CI still runs them.
 
-Keep third-party Rust source pristine except for the reviewed four-source-file
-policy patch in `options.rs`, `expression.rs`, `pattern.rs` and `statement.rs`.
+Keep upstream Rust source pristine except for the two reviewed disjoint four-file
+patches above; the original byte facade is separately authored, not upstream source.
+The unchanged policy patch covers `options.rs`, `expression.rs`, `pattern.rs` and `statement.rs`.
 AST-only mode admits duplicate keywords and adds f-string mapping/pattern-start
 admission; the option defaults to false in both constructors. Valid default-mode
 forms remain unchanged, including upstream singleton f-string first-element

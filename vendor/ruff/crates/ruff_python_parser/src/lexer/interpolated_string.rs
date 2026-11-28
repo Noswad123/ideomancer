@@ -128,6 +128,12 @@ pub(crate) struct InterpolatedStrings {
 }
 
 impl InterpolatedStrings {
+    pub(super) fn len(&self) -> usize { self.stack.len() }
+
+    pub(super) fn try_reserve(&mut self) -> Result<(), std::collections::TryReserveError> {
+        self.stack.try_reserve(1)
+    }
+
     pub(crate) fn push(&mut self, context: InterpolatedStringContext) {
         self.stack.push(context);
     }
@@ -144,8 +150,11 @@ impl InterpolatedStrings {
         self.stack.last_mut()
     }
 
-    pub(crate) fn checkpoint(&self) -> InterpolatedStringsCheckpoint {
-        InterpolatedStringsCheckpoint(self.stack.clone())
+    pub(super) fn try_checkpoint(&self) -> Result<InterpolatedStringsCheckpoint, std::collections::TryReserveError> {
+        let mut stack = Vec::new();
+        stack.try_reserve(self.stack.len())?;
+        stack.extend_from_slice(&self.stack);
+        Ok(InterpolatedStringsCheckpoint(stack))
     }
 
     pub(crate) fn rewind(&mut self, checkpoint: InterpolatedStringsCheckpoint) {

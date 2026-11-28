@@ -8,7 +8,7 @@ can accumulate even in one directory.
 ## Overview
 
 Distribution is approved personal/company Git source, not registry publication.
-Root `publish = false`; five local Ruff crates and their notices/policy patch travel
+Root `publish = false`; five local Ruff crates and their notices/two patches travel
 in the checkout. No external fork, submodule or unpublished registry-version family
 is needed. Private consumer material still stays outside generic source.
 
@@ -74,8 +74,13 @@ Never use `cargo fmt --all`, which recursively touches local path dependencies.
 Scope Clippy to product code with `--all-targets --no-deps -- -D warnings`.
 The preserved Ruff sources are verified by hash and patch provenance instead of
 product formatting/Clippy policy; upstream compiler warnings remain visible.
-Vendored source stays pristine except for the reviewed four-source-file policy
-patch (`options.rs`, `expression.rs`, `pattern.rs`, `statement.rs`). It adds the
+Vendor schema 2 tracks two disjoint reviewed four-file patches: the unchanged
+policy patch (`options.rs`, `expression.rs`, `pattern.rs`, `statement.rs`) and F1's
+lexer patch (`lexer.rs`, `lexer/{cursor,indentation,interpolated_string}.rs`). A
+separately hashed original MIT `lexer/byte.rs` is authored code, not pristine
+upstream or an upstream rewrite. The unchanged 65-source pristine map covers
+eight modified and 57 unchanged upstream files; total Rust sources are 66.
+The policy patch adds the
 default-false duplicate-keyword/AST-only f-string pattern-start policy and completes
 the TypeVarTuple/ParamSpec default version guards independently of AST-only mode.
 The sequence-separator correction requires an actual comma before a closing-token
@@ -126,13 +131,67 @@ delete another session's data or silently claim cleanup succeeded.
 
 ## Edge Cases
 
-### Current direction: completed F0 feasibility, not native implementation
+### Current direction: F1 lexer goal proved, all delivery gates passed
+
+F1 implements one shared fallible byte core behind legacy `Lexer(&str)` and the
+doc-hidden experimental byte facade, not a separate lexer or byte parser. Original
+borrowed bytes/ranges remain unchanged. Metered `source_text(&mut self, range)`
+returns checked zero-copy text; invalid UTF-8 does not poison the stream, but
+resource/cancellation failures latch. Checkpoints restore lexical state, not
+cumulative budgets or terminal control failures. Default bounds are cooperative;
+the final safe UTF-8 validation remains linear/uninterruptible (at most 2 MiB with
+defaults), not a hard timeout/RSS guarantee. Malformed-byte guarantees are Module
+only; all four modes have valid-UTF-8 preservation coverage.
+
+Coordinator-reported current result: **all 131 private Ruff tests passed** after
+fixes, including **23 F1 ordinary + 17 existing opt-ins**. All **364** complete
+positive facts/IDs/diagnostics/raw replay matched on the unchanged normal `&str`
+path. Both facades passed all thirteen frozen pre-core hashes (298 tokens/all four
+modes); legacy `Send + Sync` compiled/passed in the baseline test. Product
+formatting/all-target Clippy (`--no-deps -- -D warnings`), **58 vendor script
+tests**, schema-2 checker and **261-path** source check passed. Scripts: **310
+discovered, 297 passed / 13 isolation skips**; isolated byte/visitor/codec
+**23 / 43 / 24 passed**, no skips, covering all 310 unique tests across lanes. Existing
+ordinary root tests select both new modules in CI; no new public backend is added.
+Use the [F1 ledger](python-analysis.md#f1-shared-byte-lexer-experiment) for frozen
+traces, exact acceptance matrix and provenance. Current inventory is **261 paths**;
+vendor closure is **87 files / 66 Rust sources / 1,972,891 bytes**. No manifests,
+dependencies, engine API, codec/type-comment semantics or production dispatch changed.
+Frontend-5/facts-7 names remain; implementation identity changes transitively.
+
+Current preservation passed **708 library tests (191 ignored), 18 adapter + 8
+engine** and explicit **165 reference + 3 native** tests. With the 17 Ruff opt-ins,
+**all 185 explicit gates passed**, including known-limit assertions—not 185 parity
+matches. The bounded F1 lexer goal is **COMPLETE / PROVED by compiled tests**.
+P2 source-view accounting is closed and its root regression passed; final read-only
+review found no material P1/P2/P3 findings and new schema-2 guards passed. No
+additional core changes are planned and provenance anchors are stable.
+
+**F1 delivery complete:** offline checkout consumer passed with a fresh
+**105-package** lock, **one native TypeScript public-API test**, five contained
+Ruff crates, ABI **0.1.5** and source-hash rechecks. Its tested snapshot is
+`2cea3f996bf4a0e0cbbfd242b681331fb2208a3f0e6ac1fba2e4e81472869c6e`,
+not an actual Git revision or final-docs attestation. Its owned cache `TMPDIR` was
+cleaned, none left. Guarded preflight: zero blockers/protected outputs, normal
+`debug`/`tmp` only. Cleanup removed **1,360,498,688 estimated allocated bytes
+(~1.27 GiB)**; target absent, follow-up `already_clean`, **no Cargo afterward**.
+No owned debug/test artifacts remain; root cache parent empty, `.ideomancer/` JS
+artifacts/global caches untouched. Final source/Git/helper checks are read-only,
+without rebuilding. F1 does not prove byte parser input, AST/debug construction,
+CPython admission, F2 or full G4, and does not authorize further implementation.
+Earlier cache receipts remain historical. Actual pre-F1 HEAD was user-reported
+`fdf4e58` (facts-6 commit, initially clean/ahead one), not `523cd7b`; current F1 work
+remains uncommitted and unstaged; no commits or pushes were made. F2 parser/source/
+debug/admission/lazy-failure precedence and version/product policy require separate
+approval; no source repair, unchecked UTF-8, public selector or cutover is approved.
+
+### Historical F0 feasibility checkpoint
 
 The user explicitly selected contract-preserving full replacement and authorized
 bounded byte-aware Ruff feasibility/version research. Read the main-owned
 [ADR](python-native-replacement-feasibility.md) and [F0 ledger](python-analysis.md#f0-byte-input-and-version-feasibility).
-The source audit conditionally supports proposing F1/F2 staged prototypes, which
-need separate bounded approval. No byte-aware Ruff has been implemented or compiled.
+At F0 handoff, the source audit conditionally supported separately approved F1/F2
+prototypes; no byte-aware Ruff had then been implemented or compiled.
 Byte-backed lexical input plus checked source views retains Ruff grammar, but is
 not a thin adapter: concrete lexer lookahead/rewind/re-lex, `Chars`/`&str` and spanning
 debug strings imply an expanded maintained fork and possible AST/API changes.
@@ -153,8 +212,8 @@ Discovery: **286 tests, 273 passed / 13 isolation-required skips**; isolated
 byte/visitor/codec **23 / 43 / 24 passed**, no skips, together covering all **286
 unique tests**. Source **256 paths**, unchanged vendor **85/65/1,882,473 bytes** and
 Git whitespace checks passed. Independent review found no blocking correction;
-the ADR's F1 scalar/error/EOF/lookahead/rewind and F2 BOM-coordinate requirements
-remain future obligations, not proof. See the F0 ledger for details.
+the ADR assigned scalar/error/EOF/lookahead/rewind proof to F1 and BOM-coordinate
+anchors to F2. See the current F1 ledger above for progress beyond that audit.
 
 This scripts/docs/CI-only slice needed no Rust build or consumer rerun and made no
 native-engine/vendor change. Helper **`already_clean`**; no fresh cache removal
@@ -163,7 +222,7 @@ Rust tests and cleanup below remain historical. Post-doc verification is limited
 to pure-Python source/helper and Git checks, without rebuilding. Production policy,
 profile names, datasets and prior uncommitted implementation remain unchanged.
 
-### Completed visitor gate: frontend-5 / facts-7
+### Historical completed visitor gate: frontend-5 / facts-7
 
 Policies are `python-ruff-private-5-py312-visitor-patterns` and
 `python-ruff-private-facts-7`. Review the executable
@@ -224,7 +283,7 @@ checks are read-only, without rebuilding. Nothing is staged, committed or pushed
 HEAD remains `523cd7b`. Historical facts-6 ~1.28 GiB receipts are separate; these
 local results do not establish hosted/platform or full production approval.
 
-**Prior checkpoint STOP (superseded for F0 authorization only):** “STOP parity
+**Historical prior checkpoint STOP (subsequently superseded for F0 and bounded F1):** “STOP parity
 expansion.” Full replacement and bounded feasibility/version research are now
 explicitly authorized as recorded above and in the ADR; prototype/production
 expansion still needs separate approval. No silent narrowing or public cutover.
@@ -407,8 +466,8 @@ of completion.
 **Historical architecture stop; standing constraint:** unchanged Ruff requires `&str`; CPython-admitted
 malformed non-ASCII UTF-8 comment bytes cannot pass that interface unchanged.
 No rewriting workaround is permitted. The [authorized F0 audit](python-native-replacement-feasibility.md)
-is not a compiled byte frontend; prototype and production compatibility boundaries
-still need separate approval, not
+was not a compiled byte frontend. F1 now supplies lexical evidence only; F2 and
+production compatibility boundaries still need separate approval, not
 permission to narrow production's Python >=3.12 contract. Codec/type-comment and
 platform/resource gaps remain; passing the current validation does not close these
 compatibility gates or approve production cutover.

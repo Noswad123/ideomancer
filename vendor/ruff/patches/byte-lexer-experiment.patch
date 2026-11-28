@@ -1,0 +1,1421 @@
+--- a/crates/ruff_python_parser/src/lexer.rs
++++ b/crates/ruff_python_parser/src/lexer.rs
+@@ -22 +22,2 @@
+-use crate::lexer::cursor::{Cursor, EOF_CHAR};
++use crate::lexer::cursor::{Cursor, CursorState};
++use crate::lexer::byte::{ByteLexFailure, Control};
+@@ -32,0 +34,4 @@
++/// Unstable, private-engine F1 experiment; not a parser byte-input API.
++#[doc(hidden)]
++pub mod byte;
++
+@@ -37,0 +43,32 @@
++    // A concrete, unused callback type preserves the legacy Send/Sync auto-traits.
++    core: CoreLexer<'src, 'static, fn() -> bool>,
++}
++
++impl<'src> Lexer<'src> {
++    pub(crate) fn new(source: &'src str, mode: Mode, start_offset: TextSize) -> Self {
++        assert!(u32::try_from(source.len()).is_ok(), "Lexer only supports files with a size up to 4GB");
++        Self { core: legacy_result(CoreLexer::new(source.as_bytes(), mode, start_offset, Control::unlimited())) }
++    }
++    pub(crate) fn current_kind(&self) -> TokenKind { self.core.current_kind() }
++    pub(crate) fn current_range(&self) -> TextRange { self.core.current_range() }
++    pub(crate) fn current_flags(&self) -> TokenFlags { self.core.current_flags() }
++    pub(crate) fn take_value(&mut self) -> TokenValue { self.core.take_value() }
++    pub fn next_token(&mut self) -> TokenKind { legacy_result(self.core.next_token()) }
++    pub(crate) fn checkpoint(&self) -> LexerCheckpoint { self.core.checkpoint() }
++    pub(crate) fn rewind(&mut self, checkpoint: LexerCheckpoint) { self.core.rewind(checkpoint); }
++    pub(crate) fn re_lex_logical_token(&mut self, start: Option<TextSize>) -> bool {
++        legacy_result(self.core.re_lex_logical_token(start))
++    }
++    pub fn finish(self) -> Vec<LexicalError> { self.core.finish() }
++}
++
++fn legacy_result<T>(result: Result<T, ByteLexFailure>) -> T {
++    match result {
++        Ok(value) => value,
++        Err(ByteLexFailure::Source(_)) => unreachable!("the legacy facade borrows well-typed UTF-8"),
++        Err(error) => panic!("legacy lexer invariant: {error:?}"),
++    }
++}
++
++#[derive(Debug)]
++struct CoreLexer<'src, 'check, Check: ?Sized = dyn FnMut() -> bool + 'check> {
+@@ -39 +76 @@
+-    source: &'src str,
++    source: &'src [u8],
+@@ -42 +79 @@
+-    cursor: Cursor<'src>,
++    cursor: Cursor<'src, 'check, Check>,
+@@ -77 +114 @@
+-impl<'src> Lexer<'src> {
++impl<'src, 'check, Check: FnMut() -> bool + ?Sized> CoreLexer<'src, 'check, Check> {
+@@ -83 +120 @@
+-    pub(crate) fn new(source: &'src str, mode: Mode, start_offset: TextSize) -> Self {
++    fn new(source: &'src [u8], mode: Mode, start_offset: TextSize, control: Control<'check, Check>) -> Result<Self, ByteLexFailure> {
+@@ -95 +132 @@
+-        let mut lexer = Lexer {
++        let mut lexer = CoreLexer {
+@@ -97 +134 @@
+-            cursor: Cursor::new(source),
++            cursor: Cursor::new(source, control),
+@@ -113 +150,2 @@
+-            lexer.cursor.eat_char(BOM);
++            // A byte prefix probe does not decode malformed first source bytes.
++            if source.starts_with("\u{feff}".as_bytes()) { lexer.cursor.skip_bytes(BOM.len_utf8())?; }
+@@ -115,4 +153,4 @@
+-            lexer.cursor.skip_bytes(start_offset.to_usize());
+-        }
+-
+-        lexer
++            lexer.cursor.skip_bytes(start_offset.to_usize())?;
++        }
++
++        Ok(lexer)
+@@ -147 +185,6 @@
+-    fn push_error(&mut self, error: LexicalError) -> TokenKind {
++    fn push_error(&mut self, error: LexicalError) -> Result<TokenKind, ByteLexFailure> {
++        if self.cursor.control.limits.is_some_and(|limit| self.errors.len() >= limit.diagnostics) {
++            return self.cursor.control.fail(ByteLexFailure::ResourceLimit);
++        }
++        self.cursor.control.allocate(256)?;
++        if self.errors.try_reserve(1).is_err() { return self.cursor.control.fail(ByteLexFailure::ResourceLimit); }
+@@ -150 +193 @@
+-        TokenKind::Unknown
++        Ok(TokenKind::Unknown)
+@@ -154 +197,8 @@
+-    pub fn next_token(&mut self) -> TokenKind {
++    fn next_token(&mut self) -> Result<TokenKind, ByteLexFailure> {
++        self.cursor.control.work(1)?;
++        // Reserve a small envelope before any diagnostic payload is constructed.
++        self.cursor.control.allocate(256)?;
++        if let Some(limit) = self.cursor.control.limits {
++            if self.cursor.control.stats.tokens >= limit.tokens { return self.cursor.control.fail(ByteLexFailure::ResourceLimit) }
++            self.cursor.control.stats.tokens += 1;
++        }
+@@ -158 +208 @@
+-        self.current_kind = self.lex_token();
++        self.current_kind = self.lex_token()?;
+@@ -163,4 +213,4 @@
+-        self.current_kind
+-    }
+-
+-    fn lex_token(&mut self) -> TokenKind {
++        Ok(self.current_kind)
++    }
++
++    fn lex_token(&mut self) -> Result<TokenKind, ByteLexFailure> {
+@@ -169 +219 @@
+-                if let Some(token) = self.lex_interpolated_string_middle_or_end() {
++                if let Some(token) = self.lex_interpolated_string_middle_or_end()? {
+@@ -173 +223 @@
+-                    return token;
++                    return Ok(token);
+@@ -188 +238 @@
+-                    return TokenKind::Dedent;
++                    return Ok(TokenKind::Dedent);
+@@ -201,2 +251,2 @@
+-            if let Some(indentation) = self.eat_indentation() {
+-                return indentation;
++            if let Some(indentation) = self.eat_indentation()? {
++                return Ok(indentation);
+@@ -205 +255 @@
+-            if let Err(error) = self.skip_whitespace() {
++            if let Some(error) = self.skip_whitespace()? {
+@@ -213 +263 @@
+-        if let Some(c) = self.cursor.bump() {
++        if let Some(c) = self.cursor.bump()? {
+@@ -217 +267 @@
+-                let identifier = self.lex_identifier(c);
++                let identifier = self.lex_identifier(c)?;
+@@ -220 +270 @@
+-                identifier
++                Ok(identifier)
+@@ -234 +284 @@
+-    fn eat_indentation(&mut self) -> Option<TokenKind> {
++    fn eat_indentation(&mut self) -> Result<Option<TokenKind>, ByteLexFailure> {
+@@ -238,3 +288,3 @@
+-            match self.cursor.first() {
+-                ' ' => {
+-                    self.cursor.bump();
++            match self.cursor.first()? {
++                Some(' ') => {
++                    self.cursor.bump()?;
+@@ -243,2 +293,2 @@
+-                '\t' => {
+-                    self.cursor.bump();
++                Some('\t') => {
++                    self.cursor.bump()?;
+@@ -247,6 +297,6 @@
+-                '\\' => {
+-                    self.cursor.bump();
+-                    if self.cursor.eat_char('\r') {
+-                        self.cursor.eat_char('\n');
+-                    } else if !self.cursor.eat_char('\n') {
+-                        return Some(self.push_error(LexicalError::new(
++                Some('\\') => {
++                    self.cursor.bump()?;
++                    if self.cursor.eat_char('\r')? {
++                        self.cursor.eat_char('\n')?;
++                    } else if !self.cursor.eat_char('\n')? {
++                        return self.push_error(LexicalError::new(
+@@ -255 +305 @@
+-                        )));
++                        )).map(Some);
+@@ -258 +308 @@
+-                        return Some(self.push_error(LexicalError::new(
++                        return self.push_error(LexicalError::new(
+@@ -261 +311 @@
+-                        )));
++                        )).map(Some);
+@@ -266,2 +316,2 @@
+-                '\x0C' => {
+-                    self.cursor.bump();
++                Some('\x0C') => {
++                    self.cursor.bump()?;
+@@ -275 +325 @@
+-        if !matches!(self.cursor.first(), '\n' | '\r' | '#' | EOF_CHAR) {
++        if !matches!(self.cursor.first()?, Some('\n' | '\r' | '#' | '\0') | None) {
+@@ -282,4 +332,4 @@
+-        None
+-    }
+-
+-    fn handle_indentation(&mut self, indentation: Indentation) -> Option<TokenKind> {
++        Ok(None)
++    }
++
++    fn handle_indentation(&mut self, indentation: Indentation) -> Result<Option<TokenKind>, ByteLexFailure> {
+@@ -292 +342 @@
+-                    return Some(self.push_error(LexicalError::new(
++                    return self.push_error(LexicalError::new(
+@@ -295 +345 @@
+-                    )));
++                    )).map(Some);
+@@ -313,4 +363,4 @@
+-                Some(TokenKind::Dedent)
+-            }
+-
+-            Ok(Ordering::Equal) => None,
++                Ok(Some(TokenKind::Dedent))
++            }
++
++            Ok(Ordering::Equal) => Ok(None),
+@@ -319,0 +370,3 @@
++                self.cursor.control.depth(self.indentations.len() + 1)?;
++                self.cursor.control.allocate(32)?;
++                if self.indentations.try_reserve().is_err() { return self.cursor.control.fail(ByteLexFailure::ResourceLimit) }
+@@ -321,3 +374,3 @@
+-                Some(TokenKind::Indent)
+-            }
+-            Err(_) => Some(self.push_error(LexicalError::new(
++                Ok(Some(TokenKind::Indent))
++            }
++            Err(_) => self.push_error(LexicalError::new(
+@@ -326,5 +379,5 @@
+-            ))),
+-        }
+-    }
+-
+-    fn skip_whitespace(&mut self) -> Result<(), LexicalError> {
++            )).map(Some),
++        }
++    }
++
++    fn skip_whitespace(&mut self) -> Result<Option<LexicalError>, ByteLexFailure> {
+@@ -332,13 +385,13 @@
+-            match self.cursor.first() {
+-                ' ' => {
+-                    self.cursor.bump();
+-                }
+-                '\t' => {
+-                    self.cursor.bump();
+-                }
+-                '\\' => {
+-                    self.cursor.bump();
+-                    if self.cursor.eat_char('\r') {
+-                        self.cursor.eat_char('\n');
+-                    } else if !self.cursor.eat_char('\n') {
+-                        return Err(LexicalError::new(
++            match self.cursor.first()? {
++                Some(' ') => {
++                    self.cursor.bump()?;
++                }
++                Some('\t') => {
++                    self.cursor.bump()?;
++                }
++                Some('\\') => {
++                    self.cursor.bump()?;
++                    if self.cursor.eat_char('\r')? {
++                        self.cursor.eat_char('\n')?;
++                    } else if !self.cursor.eat_char('\n')? {
++                        return Ok(Some(LexicalError::new(
+@@ -347 +400 @@
+-                        ));
++                        )));
+@@ -350 +403 @@
+-                        return Err(LexicalError::new(LexicalErrorType::Eof, self.token_range()));
++                        return Ok(Some(LexicalError::new(LexicalErrorType::Eof, self.token_range())));
+@@ -354,2 +407,2 @@
+-                '\x0C' => {
+-                    self.cursor.bump();
++                Some('\x0C') => {
++                    self.cursor.bump()?;
+@@ -361 +414 @@
+-        Ok(())
++        Ok(None)
+@@ -365 +418 @@
+-    fn consume_ascii_character(&mut self, c: char) -> TokenKind {
++    fn consume_ascii_character(&mut self, c: char) -> Result<TokenKind, ByteLexFailure> {
+@@ -367,2 +420,2 @@
+-            c if is_ascii_identifier_start(c) => self.lex_identifier(c),
+-            '0'..='9' => self.lex_number(c),
++            c if is_ascii_identifier_start(c) => self.lex_identifier(c)?,
++            '0'..='9' => self.lex_number(c)?,
+@@ -370 +423 @@
+-            '\'' | '"' => self.lex_string(c),
++            '\'' | '"' => self.lex_string(c)?,
+@@ -372 +425 @@
+-                if self.cursor.eat_char('=') {
++                if self.cursor.eat_char('=')? {
+@@ -376 +429 @@
+-                    return TokenKind::Equal;
++                    return Ok(TokenKind::Equal);
+@@ -380 +433 @@
+-                if self.cursor.eat_char('=') {
++                if self.cursor.eat_char('=')? {
+@@ -387 +440 @@
+-                if self.cursor.eat_char('=') {
++                if self.cursor.eat_char('=')? {
+@@ -389,2 +442,2 @@
+-                } else if self.cursor.eat_char('*') {
+-                    if self.cursor.eat_char('=') {
++                } else if self.cursor.eat_char('*')? {
++                    if self.cursor.eat_char('=')? {
+@@ -406 +459 @@
+-                self.lex_ipython_escape_command(IpyEscapeKind::try_from(c).unwrap())
++                self.lex_ipython_escape_command(IpyEscapeKind::try_from(c).unwrap())?
+@@ -412,2 +465,2 @@
+-                let kind = if let Ok(kind) = IpyEscapeKind::try_from([c, self.cursor.first()]) {
+-                    self.cursor.bump();
++                let kind = if let Some(kind) = self.cursor.first()?.and_then(|next| IpyEscapeKind::try_from([c, next]).ok()) {
++                    self.cursor.bump()?;
+@@ -420 +473 @@
+-                self.lex_ipython_escape_command(kind)
++                self.lex_ipython_escape_command(kind)?
+@@ -426 +479 @@
+-                if self.cursor.eat_char('=') {
++                if self.cursor.eat_char('=')? {
+@@ -428,2 +481,2 @@
+-                } else if self.cursor.eat_char('/') {
+-                    if self.cursor.eat_char('=') {
++                } else if self.cursor.eat_char('/')? {
++                    if self.cursor.eat_char('=')? {
+@@ -439 +492 @@
+-                if self.cursor.eat_char('=') {
++                if self.cursor.eat_char('=')? {
+@@ -446 +499 @@
+-                if self.cursor.eat_char('=') {
++                if self.cursor.eat_char('=')? {
+@@ -453 +506 @@
+-                if self.cursor.eat_char('=') {
++                if self.cursor.eat_char('=')? {
+@@ -460 +513 @@
+-                if self.cursor.eat_char('=') {
++                if self.cursor.eat_char('=')? {
+@@ -467 +520 @@
+-                if self.cursor.eat_char('=') {
++                if self.cursor.eat_char('=')? {
+@@ -469 +522 @@
+-                } else if self.cursor.eat_char('>') {
++                } else if self.cursor.eat_char('>')? {
+@@ -476 +529 @@
+-                if self.cursor.eat_char('=') {
++                if self.cursor.eat_char('=')? {
+@@ -483 +536 @@
+-                if self.cursor.eat_char('=') {
++                if self.cursor.eat_char('=')? {
+@@ -490,0 +544 @@
++                self.cursor.control.depth(self.nesting as usize + 1)?;
+@@ -498,0 +553 @@
++                self.cursor.control.depth(self.nesting as usize + 1)?;
+@@ -506,0 +562 @@
++                self.cursor.control.depth(self.nesting as usize + 1)?;
+@@ -533 +589 @@
+-                } else if self.cursor.eat_char('=') {
++                } else if self.cursor.eat_char('=')? {
+@@ -541,2 +597,2 @@
+-                if self.cursor.eat_char('<') {
+-                    if self.cursor.eat_char('=') {
++                if self.cursor.eat_char('<')? {
++                    if self.cursor.eat_char('=')? {
+@@ -547 +603 @@
+-                } else if self.cursor.eat_char('=') {
++                } else if self.cursor.eat_char('=')? {
+@@ -554,2 +610,2 @@
+-                if self.cursor.eat_char('>') {
+-                    if self.cursor.eat_char('=') {
++                if self.cursor.eat_char('>')? {
++                    if self.cursor.eat_char('=')? {
+@@ -560 +616 @@
+-                } else if self.cursor.eat_char('=') {
++                } else if self.cursor.eat_char('=')? {
+@@ -568,3 +624,3 @@
+-                if self.cursor.first().is_ascii_digit() {
+-                    self.lex_decimal_number('.')
+-                } else if self.cursor.eat_char2('.', '.') {
++                if self.cursor.first()?.is_some_and(|c| c.is_ascii_digit()) {
++                    self.lex_decimal_number('.')?
++                } else if self.cursor.eat_char2('.', '.')? {
+@@ -577 +633 @@
+-                return if self.nesting == 0 && !self.state.is_new_logical_line() {
++                return Ok(if self.nesting == 0 && !self.state.is_new_logical_line() {
+@@ -585 +641 @@
+-                };
++                });
+@@ -588,3 +644,3 @@
+-                self.cursor.eat_char('\n');
+-
+-                return if self.nesting == 0 && !self.state.is_new_logical_line() {
++                self.cursor.eat_char('\n')?;
++
++                return Ok(if self.nesting == 0 && !self.state.is_new_logical_line() {
+@@ -598 +654 @@
+-                };
++                });
+@@ -613 +669 @@
+-        token
++        Ok(token)
+@@ -617 +673 @@
+-    fn lex_identifier(&mut self, first: char) -> TokenKind {
++    fn lex_identifier(&mut self, first: char) -> Result<TokenKind, ByteLexFailure> {
+@@ -619,11 +675,12 @@
+-        let quote = match (first, self.cursor.first()) {
+-            (_, quote @ ('\'' | '"')) => self.try_single_char_prefix(first).then(|| {
+-                self.cursor.bump();
+-                quote
+-            }),
+-            (_, second) if is_quote(self.cursor.second()) => {
+-                self.try_double_char_prefix([first, second]).then(|| {
+-                    self.cursor.bump();
+-                    // SAFETY: Safe because of the `is_quote` check in this match arm's guard
+-                    self.cursor.bump().unwrap()
+-                })
++        let quote = match self.cursor.rest() {
++            [quote @ (b'\'' | b'"'), ..] if self.try_single_char_prefix(first) => {
++                let quote = char::from(*quote);
++                self.cursor.bump()?;
++                Some(quote)
++            }
++            [second, quote @ (b'\'' | b'"'), ..]
++                if second.is_ascii() && self.try_double_char_prefix([first, char::from(*second)]) => {
++                let quote = char::from(*quote);
++                self.cursor.bump()?;
++                self.cursor.bump()?;
++                Some(quote)
+@@ -636,2 +693,2 @@
+-                if let Some(kind) = self.lex_interpolated_string_start(quote) {
+-                    return kind;
++                if let Some(kind) = self.lex_interpolated_string_start(quote)? {
++                    return Ok(kind);
+@@ -653,3 +710,4 @@
+-            .eat_while(|c| is_identifier_continuation(c, &mut is_ascii));
+-
+-        let text = self.token_text();
++            .eat_while(|c| is_identifier_continuation(c, &mut is_ascii))?;
++
++        self.charge_value()?;
++        let text = self.token_text()?;
+@@ -658,2 +716,8 @@
+-            self.current_value = TokenValue::Name(text.nfkc().collect::<Name>());
+-            return TokenKind::Name;
++            let mut normalized = String::new();
++            for c in text.nfkc() {
++                self.cursor.control.work(1)?;
++                normalized.try_reserve(c.len_utf8()).map_err(|_| ByteLexFailure::ResourceLimit)?;
++                normalized.push(c);
++            }
++            self.current_value = TokenValue::Name(Name::from(normalized));
++            return Ok(TokenKind::Name);
+@@ -667,4 +731,4 @@
+-            return TokenKind::Name;
+-        }
+-
+-        match text {
++            return Ok(TokenKind::Name);
++        }
++
++        Ok(match text {
+@@ -713 +777 @@
+-        }
++        })
+@@ -759 +823 @@
+-    fn lex_interpolated_string_start(&mut self, quote: char) -> Option<TokenKind> {
++    fn lex_interpolated_string_start(&mut self, quote: char) -> Result<Option<TokenKind>, ByteLexFailure> {
+@@ -761 +825 @@
+-        debug_assert_eq!(self.cursor.previous(), quote);
++        debug_assert_eq!(self.cursor.previous(), Some(quote));
+@@ -767 +831 @@
+-        if self.cursor.eat_char2(quote, quote) {
++        if self.cursor.eat_char2(quote, quote)? {
+@@ -771 +835 @@
+-        let ftcontext = InterpolatedStringContext::new(self.current_flags, self.nesting)?;
++        let Some(ftcontext) = InterpolatedStringContext::new(self.current_flags, self.nesting) else { return Ok(None) };
+@@ -774,0 +839,3 @@
++        self.cursor.control.depth(self.interpolated_strings.len() + 1)?;
++        self.cursor.control.allocate(64)?;
++        if self.interpolated_strings.try_reserve().is_err() { return self.cursor.control.fail(ByteLexFailure::ResourceLimit) }
+@@ -777 +844 @@
+-        Some(kind.start_token())
++        Ok(Some(kind.start_token()))
+@@ -781 +848 @@
+-    fn lex_interpolated_string_middle_or_end(&mut self) -> Option<TokenKind> {
++    fn lex_interpolated_string_middle_or_end(&mut self) -> Result<Option<TokenKind>, ByteLexFailure> {
+@@ -783 +850 @@
+-        let interpolated_string = self.interpolated_strings.current().unwrap();
++        let interpolated_string = self.interpolated_strings.current().unwrap().clone();
+@@ -789 +856 @@
+-            if self.cursor.eat_char3(quote_char, quote_char, quote_char) {
++            if self.cursor.eat_char3(quote_char, quote_char, quote_char)? {
+@@ -791,3 +858,3 @@
+-                return Some(string_kind.end_token());
+-            }
+-        } else if self.cursor.eat_char(interpolated_string.quote_char()) {
++                return Ok(Some(string_kind.end_token()));
++            }
++        } else if self.cursor.eat_char(interpolated_string.quote_char())? {
+@@ -795 +862 @@
+-            return Some(string_kind.end_token());
++            return Ok(Some(string_kind.end_token()));
+@@ -812,5 +879,3 @@
+-            match self.cursor.first() {
+-                // The condition is to differentiate between the `NUL` (`\0`) character
+-                // in the source code and the one returned by `self.cursor.first()` when
+-                // we reach the end of the source code.
+-                EOF_CHAR if self.cursor.is_eof() => {
++            match self.cursor.first()? {
++                // EOF is distinct from an actual NUL scalar.
++                None => {
+@@ -823 +888 @@
+-                    return Some(self.push_error(LexicalError::new(
++                    return self.push_error(LexicalError::new(
+@@ -826,3 +891,3 @@
+-                    )));
+-                }
+-                '\n' | '\r' if !interpolated_string.is_triple_quoted() => {
++                    )).map(Some);
++                }
++                Some('\n' | '\r') if !interpolated_string.is_triple_quoted() => {
+@@ -837 +902 @@
+-                    return Some(self.push_error(LexicalError::new(
++                    return self.push_error(LexicalError::new(
+@@ -843,5 +908,5 @@
+-                    )));
+-                }
+-                '\\' => {
+-                    self.cursor.bump(); // '\'
+-                    if matches!(self.cursor.first(), '{' | '}') {
++                    )).map(Some);
++                }
++                Some('\\') => {
++                    self.cursor.bump()?; // '\'
++                    if matches!(self.cursor.first()?, Some('{' | '}')) {
+@@ -852 +917 @@
+-                        if self.cursor.eat_char2('N', '{') {
++                        if self.cursor.eat_char2('N', '{')? {
+@@ -858,2 +923,2 @@
+-                    if self.cursor.eat_char('\r') {
+-                        self.cursor.eat_char('\n');
++                    if self.cursor.eat_char('\r')? {
++                        self.cursor.eat_char('\n')?;
+@@ -861 +926 @@
+-                        self.cursor.bump();
++                        self.cursor.bump()?;
+@@ -864 +929 @@
+-                quote @ ('\'' | '"') if quote == interpolated_string.quote_char() => {
++                Some(quote @ ('\'' | '"')) if quote == interpolated_string.quote_char() => {
+@@ -866 +931 @@
+-                        if self.cursor.rest().starts_with(triple_quotes) {
++                        if self.cursor.rest().starts_with(triple_quotes.as_bytes()) {
+@@ -869 +934 @@
+-                        self.cursor.bump();
++                        self.cursor.bump()?;
+@@ -874,6 +939,5 @@
+-                '{' => {
+-                    if self.cursor.second() == '{' && !in_format_spec {
+-                        self.cursor.bump();
+-                        normalized
+-                            .push_str(&self.source[TextRange::new(last_offset, self.offset())]);
+-                        self.cursor.bump(); // Skip the second `{`
++                Some('{') => {
++                    if self.cursor.second()? == Some('{') && !in_format_spec {
++                        self.cursor.bump()?;
++                        self.append_normalized(&mut normalized, TextRange::new(last_offset, self.offset()))?;
++                        self.cursor.bump()?; // Skip the second `{`
+@@ -885 +949 @@
+-                '}' => {
++                Some('}') => {
+@@ -888,6 +952,5 @@
+-                        self.cursor.bump();
+-                    } else if self.cursor.second() == '}' && !in_format_spec {
+-                        self.cursor.bump();
+-                        normalized
+-                            .push_str(&self.source[TextRange::new(last_offset, self.offset())]);
+-                        self.cursor.bump(); // Skip the second `}`
++                        self.cursor.bump()?;
++                    } else if self.cursor.second()? == Some('}') && !in_format_spec {
++                        self.cursor.bump()?;
++                        self.append_normalized(&mut normalized, TextRange::new(last_offset, self.offset()))?;
++                        self.cursor.bump()?; // Skip the second `}`
+@@ -900 +963 @@
+-                    self.cursor.bump();
++                    self.cursor.bump()?;
+@@ -906,3 +969,4 @@
+-            return None;
+-        }
+-
++            return Ok(None);
++        }
++
++        self.charge_value()?;
+@@ -910 +974 @@
+-            self.source[range].to_string()
++            self.owned_text(range)?
+@@ -912,2 +976,2 @@
+-            normalized.push_str(&self.source[TextRange::new(last_offset, self.offset())]);
+-            normalized
++            self.append_normalized(&mut normalized, TextRange::new(last_offset, self.offset()))?;
++            normalized.into_boxed_str()
+@@ -916 +980 @@
+-        self.current_value = TokenValue::InterpolatedStringMiddle(value.into_boxed_str());
++        self.current_value = TokenValue::InterpolatedStringMiddle(value);
+@@ -919 +983 @@
+-        Some(string_kind.middle_token())
++        Ok(Some(string_kind.middle_token()))
+@@ -923 +987 @@
+-    fn lex_string(&mut self, quote: char) -> TokenKind {
++    fn lex_string(&mut self, quote: char) -> Result<TokenKind, ByteLexFailure> {
+@@ -925 +989 @@
+-        debug_assert_eq!(self.cursor.previous(), quote);
++        debug_assert_eq!(self.cursor.previous(), Some(quote));
+@@ -933 +997 @@
+-        if self.cursor.eat_char2(quote, quote) {
++        if self.cursor.eat_char2(quote, quote)? {
+@@ -944,2 +1008,2 @@
+-                let Some(index) = memchr::memchr(quote_byte, self.cursor.rest().as_bytes()) else {
+-                    self.cursor.skip_to_end();
++                let Some(index) = self.find_string_boundary(quote_byte, false)? else {
++                    self.cursor.skip_to_end()?;
+@@ -955,5 +1019 @@
+-                let num_backslashes = self.cursor.rest().as_bytes()[..index]
+-                    .iter()
+-                    .rev()
+-                    .take_while(|&&c| c == b'\\')
+-                    .count();
++                let num_backslashes = self.count_backslashes(index)?;
+@@ -962 +1022 @@
+-                self.cursor.skip_bytes(index + 1);
++                self.cursor.skip_bytes(index + 1)?;
+@@ -970 +1030 @@
+-                if self.cursor.eat_char2(quote, quote) {
++                if self.cursor.eat_char2(quote, quote)? {
+@@ -979 +1039 @@
+-                    memchr::memchr3(quote_byte, b'\r', b'\n', self.cursor.rest().as_bytes())
++                    self.find_string_boundary(quote_byte, true)?
+@@ -981 +1041 @@
+-                    self.cursor.skip_to_end();
++                    self.cursor.skip_to_end()?;
+@@ -991,5 +1051 @@
+-                let num_backslashes = self.cursor.rest().as_bytes()[..index]
+-                    .iter()
+-                    .rev()
+-                    .take_while(|&&c| c == b'\\')
+-                    .count();
++                let num_backslashes = self.count_backslashes(index)?;
+@@ -998 +1054 @@
+-                self.cursor.skip_bytes(index);
++                self.cursor.skip_bytes(index)?;
+@@ -1001 +1057 @@
+-                let quote_or_newline = self.cursor.first();
++                let quote_or_newline = self.cursor.first()?;
+@@ -1005,3 +1061,3 @@
+-                    self.cursor.bump();
+-                    if quote_or_newline == '\r' {
+-                        self.cursor.eat_char('\n');
++                    self.cursor.bump()?;
++                    if quote_or_newline == Some('\r') {
++                        self.cursor.eat_char('\n')?;
+@@ -1013 +1069 @@
+-                    '\r' | '\n' => {
++                    Some('\r' | '\n') => {
+@@ -1019 +1075 @@
+-                    ch if ch == quote => {
++                    Some(ch) if ch == quote => {
+@@ -1021 +1077 @@
+-                        self.cursor.bump();
++                        self.cursor.bump()?;
+@@ -1029,7 +1085,4 @@
+-        self.current_value = TokenValue::String(
+-            self.source[TextRange::new(value_start, value_end)]
+-                .to_string()
+-                .into_boxed_str(),
+-        );
+-
+-        TokenKind::String
++        self.charge_value()?;
++        self.current_value = TokenValue::String(self.owned_text(TextRange::new(value_start, value_end))?);
++
++        Ok(TokenKind::String)
+@@ -1039 +1092 @@
+-    fn lex_number(&mut self, first: char) -> TokenKind {
++    fn lex_number(&mut self, first: char) -> Result<TokenKind, ByteLexFailure> {
+@@ -1041 +1094 @@
+-            if self.cursor.eat_if(|c| matches!(c, 'x' | 'X')).is_some() {
++            if self.cursor.eat_if(|c| matches!(c, 'x' | 'X'))?.is_some() {
+@@ -1043 +1096 @@
+-            } else if self.cursor.eat_if(|c| matches!(c, 'o' | 'O')).is_some() {
++            } else if self.cursor.eat_if(|c| matches!(c, 'o' | 'O'))?.is_some() {
+@@ -1045 +1098 @@
+-            } else if self.cursor.eat_if(|c| matches!(c, 'b' | 'B')).is_some() {
++            } else if self.cursor.eat_if(|c| matches!(c, 'b' | 'B'))?.is_some() {
+@@ -1056 +1109 @@
+-    fn lex_number_radix(&mut self, radix: Radix) -> TokenKind {
++    fn lex_number_radix(&mut self, radix: Radix) -> Result<TokenKind, ByteLexFailure> {
+@@ -1059,2 +1112,2 @@
+-            self.cursor.previous().to_ascii_lowercase(),
+-            'x' | 'o' | 'b'
++            self.cursor.previous().map(|c| c.to_ascii_lowercase()),
++            Some('x' | 'o' | 'b')
+@@ -1065 +1118,2 @@
+-        self.radix_run(&mut number, radix);
++        self.radix_run(&mut number, radix)?;
++        self.charge_value()?;
+@@ -1068,3 +1122,3 @@
+-        let token = &self.source[self.token_range()];
+-
+-        let value = match Int::from_str_radix(number.as_str(), radix.as_u32(), token) {
++        let token = self.token_text()?;
++
++        let value = match Int::from_str_radix(number.as_str()?, radix.as_u32(), token) {
+@@ -1080 +1134 @@
+-        TokenKind::Int
++        Ok(TokenKind::Int)
+@@ -1084 +1138 @@
+-    fn lex_decimal_number(&mut self, first_digit_or_dot: char) -> TokenKind {
++    fn lex_decimal_number(&mut self, first_digit_or_dot: char) -> Result<TokenKind, ByteLexFailure> {
+@@ -1086 +1140 @@
+-        debug_assert!(self.cursor.previous().is_ascii_digit() || self.cursor.previous() == '.');
++        debug_assert!(self.cursor.previous().is_some_and(|c| c.is_ascii_digit() || c == '.'));
+@@ -1091,8 +1145,10 @@
+-            number.push(first_digit_or_dot);
+-            self.radix_run(&mut number, Radix::Decimal);
+-        }
+-
+-        let is_float = if first_digit_or_dot == '.' || self.cursor.eat_char('.') {
+-            number.push('.');
+-
+-            if self.cursor.eat_char('_') {
++            self.cursor.control.allocate(64)?;
++            number.push(first_digit_or_dot)?;
++            self.radix_run(&mut number, Radix::Decimal)?;
++        }
++
++        let is_float = if first_digit_or_dot == '.' || self.cursor.eat_char('.')? {
++            self.cursor.control.allocate(64)?;
++            number.push('.')?;
++
++            if self.cursor.eat_char('_')? {
+@@ -1105 +1161 @@
+-            self.radix_run(&mut number, Radix::Decimal);
++            self.radix_run(&mut number, Radix::Decimal)?;
+@@ -1112 +1168 @@
+-        let is_float = match self.cursor.rest().as_bytes() {
++        let is_float = match self.cursor.rest() {
+@@ -1115,7 +1171,8 @@
+-                number.push(self.cursor.bump().unwrap());
+-
+-                if let Some(sign) = self.cursor.eat_if(|c| matches!(c, '+' | '-')) {
+-                    number.push(sign);
+-                }
+-
+-                self.radix_run(&mut number, Radix::Decimal);
++                self.cursor.control.allocate(128)?;
++                number.push(self.cursor.bump()?.unwrap())?;
++
++                if let Some(sign) = self.cursor.eat_if(|c| matches!(c, '+' | '-'))? {
++                    number.push(sign)?;
++                }
++
++                self.radix_run(&mut number, Radix::Decimal)?;
+@@ -1128 +1185,2 @@
+-        if is_float {
++        self.charge_value()?;
++        Ok(if is_float {
+@@ -1130 +1188 @@
+-            let Ok(value) = f64::from_str(number.as_str()) else {
++            let Ok(value) = f64::from_str(number.as_str()?) else {
+@@ -1140 +1198 @@
+-            if self.cursor.eat_if(|c| matches!(c, 'j' | 'J')).is_some() {
++            if self.cursor.eat_if(|c| matches!(c, 'j' | 'J'))?.is_some() {
+@@ -1152,2 +1210,2 @@
+-            if self.cursor.eat_if(|c| matches!(c, 'j' | 'J')).is_some() {
+-                let imag = f64::from_str(number.as_str()).unwrap();
++            if self.cursor.eat_if(|c| matches!(c, 'j' | 'J'))?.is_some() {
++                let imag = f64::from_str(number.as_str()?).unwrap();
+@@ -1157 +1215 @@
+-                let value = match Int::from_str(number.as_str()) {
++                let value = match Int::from_str(number.as_str()?) {
+@@ -1182 +1240 @@
+-        }
++        })
+@@ -1188 +1246 @@
+-    fn radix_run(&mut self, number: &mut LexedText, radix: Radix) {
++    fn radix_run(&mut self, number: &mut LexedText, radix: Radix) -> Result<(), ByteLexFailure> {
+@@ -1190,2 +1248,3 @@
+-            if let Some(c) = self.cursor.eat_if(|c| radix.is_digit(c)) {
+-                number.push(c);
++            if let Some(c) = self.cursor.eat_if(|c| radix.is_digit(c))? {
++                self.cursor.control.allocate(64)?;
++                number.push(c)?;
+@@ -1194 +1253 @@
+-            else if self.cursor.first() == '_' && radix.is_digit(self.cursor.second()) {
++            else if self.cursor.first()? == Some('_') && self.cursor.second()?.is_some_and(|c| radix.is_digit(c)) {
+@@ -1196,2 +1255,6 @@
+-                self.cursor.bump();
+-                number.skip_char();
++                self.cursor.bump()?;
++                if matches!(number, LexedText::Source { .. }) {
++                    self.cursor.control.allocate_scaled(number.len(), 2, 0)?;
++                    self.cursor.control.work(number.len())?;
++                }
++                number.skip_char()?;
+@@ -1201,0 +1265 @@
++        Ok(())
+@@ -1205 +1269 @@
+-    fn lex_comment(&mut self) -> TokenKind {
++    fn lex_comment(&mut self) -> Result<TokenKind, ByteLexFailure> {
+@@ -1207,7 +1271,5 @@
+-        debug_assert_eq!(self.cursor.previous(), '#');
+-
+-        let bytes = self.cursor.rest().as_bytes();
+-        let offset = memchr::memchr2(b'\n', b'\r', bytes).unwrap_or(bytes.len());
+-        self.cursor.skip_bytes(offset);
+-
+-        TokenKind::Comment
++        debug_assert_eq!(self.cursor.previous(), Some('#'));
++
++        self.cursor.skip_comment()?;
++
++        Ok(TokenKind::Comment)
+@@ -1217 +1279 @@
+-    fn lex_ipython_escape_command(&mut self, escape_kind: IpyEscapeKind) -> TokenKind {
++    fn lex_ipython_escape_command(&mut self, escape_kind: IpyEscapeKind) -> Result<TokenKind, ByteLexFailure> {
+@@ -1221,2 +1283,4 @@
+-            match self.cursor.first() {
+-                '\\' => {
++            self.cursor.control.allocate(256)?;
++            value.try_reserve(4).map_err(|_| ByteLexFailure::ResourceLimit)?;
++            match self.cursor.first()? {
++                Some('\\') => {
+@@ -1232,4 +1296,4 @@
+-                    if self.cursor.second() == '\r' {
+-                        self.cursor.bump();
+-                        self.cursor.bump();
+-                        self.cursor.eat_char('\n');
++                    if self.cursor.second()? == Some('\r') {
++                        self.cursor.bump()?;
++                        self.cursor.bump()?;
++                        self.cursor.eat_char('\n')?;
+@@ -1237,3 +1301,3 @@
+-                    } else if self.cursor.second() == '\n' {
+-                        self.cursor.bump();
+-                        self.cursor.bump();
++                    } else if self.cursor.second()? == Some('\n') {
++                        self.cursor.bump()?;
++                        self.cursor.bump()?;
+@@ -1243 +1307 @@
+-                    self.cursor.bump();
++                    self.cursor.bump()?;
+@@ -1258,2 +1322,2 @@
+-                '?' => {
+-                    self.cursor.bump();
++                Some('?') => {
++                    self.cursor.bump()?;
+@@ -1261 +1325,2 @@
+-                    while self.cursor.eat_char('?') {
++                    while self.cursor.eat_char('?')? {
++                        self.cursor.control.allocate(64)?;
+@@ -1279 +1344 @@
+-                        || !matches!(self.cursor.first(), '\n' | '\r' | EOF_CHAR)
++                        || !matches!(self.cursor.first()?, Some('\n' | '\r' | '\0') | None)
+@@ -1282 +1347 @@
+-                        value.reserve(question_count as usize);
++                        value.try_reserve(question_count as usize).map_err(|_| ByteLexFailure::ResourceLimit)?;
+@@ -1296 +1361,7 @@
+-                        value = value.trim_start_matches([' ', '?']).to_string();
++                        self.cursor.control.allocate_scaled(value.len(), 2, 0)?;
++                        self.cursor.control.work(value.len())?;
++                        let text = value.trim_start_matches([' ', '?']);
++                        let mut trimmed = String::new();
++                        trimmed.try_reserve(text.len()).map_err(|_| ByteLexFailure::ResourceLimit)?;
++                        trimmed.push_str(text);
++                        value = trimmed;
+@@ -1301,0 +1373,2 @@
++                        value.try_reserve(escape_kind.as_str().len()).map_err(|_| ByteLexFailure::ResourceLimit)?;
++                        self.cursor.control.work(value.len())?;
+@@ -1316,3 +1389,5 @@
+-                    return TokenKind::IpyEscapeCommand;
+-                }
+-                '\n' | '\r' | EOF_CHAR => {
++                    return Ok(TokenKind::IpyEscapeCommand);
++                }
++                // Retain the legacy IPython command terminator rule for NUL;
++                // it remains an unconsumed scalar, not cursor EOF.
++                Some('\n' | '\r' | '\0') | None => {
+@@ -1324,4 +1399,4 @@
+-                    return TokenKind::IpyEscapeCommand;
+-                }
+-                c => {
+-                    self.cursor.bump();
++                    return Ok(TokenKind::IpyEscapeCommand);
++                }
++                Some(c) => {
++                    self.cursor.bump()?;
+@@ -1334 +1409 @@
+-    fn consume_end(&mut self) -> TokenKind {
++    fn consume_end(&mut self) -> Result<TokenKind, ByteLexFailure> {
+@@ -1348 +1423 @@
+-        if !self.state.is_new_logical_line() {
++        Ok(if !self.state.is_new_logical_line() {
+@@ -1357 +1432 @@
+-        }
++        })
+@@ -1418 +1493,2 @@
+-    ) -> bool {
++    ) -> Result<bool, ByteLexFailure> {
++        self.cursor.control.work(1)?;
+@@ -1420 +1496 @@
+-            return false;
++            return Ok(false);
+@@ -1430 +1506 @@
+-            return false;
++            return Ok(false);
+@@ -1434 +1510 @@
+-            return false;
++            return Ok(false);
+@@ -1457,2 +1533 @@
+-        self.cursor = Cursor::new(self.source);
+-        self.cursor.skip_bytes(new_position.to_usize());
++        self.cursor.reposition(new_position.to_usize())?;
+@@ -1460,2 +1535,2 @@
+-        self.next_token();
+-        true
++        self.next_token()?;
++        Ok(true)
+@@ -1473,2 +1548,66 @@
+-    fn token_text(&self) -> &'src str {
+-        &self.source[self.token_range()]
++    fn token_text(&mut self) -> Result<&'src str, ByteLexFailure> {
++        self.source_text(self.token_range())
++    }
++
++    fn source_text(&mut self, range: TextRange) -> Result<&'src str, ByteLexFailure> {
++        let bytes = self.source.get(range.start().to_usize()..range.end().to_usize())
++            .ok_or(ByteLexFailure::InvalidState)?;
++        self.cursor.control.source_text(bytes, range.start())
++    }
++
++    fn owned_text(&mut self, range: TextRange) -> Result<Box<str>, ByteLexFailure> {
++        let text = self.source_text(range)?;
++        let mut owned = String::new();
++        owned.try_reserve(text.len()).map_err(|_| ByteLexFailure::ResourceLimit)?;
++        owned.push_str(text);
++        Ok(owned.into_boxed_str())
++    }
++
++    /// Library normalization and numeric conversions are covered by a conservative
++    /// 64x raw-token envelope, charged cumulatively before entering the library.
++    fn charge_value(&mut self) -> Result<(), ByteLexFailure> {
++        let len = self.cursor.token_len().to_usize();
++        self.cursor.control.allocate_scaled(len, 64, 256)?;
++        self.cursor.control.work(len)?;
++        Ok(())
++    }
++
++    fn append_normalized(&mut self, output: &mut String, range: TextRange) -> Result<(), ByteLexFailure> {
++        self.cursor.control.allocate_scaled(range.len().to_usize(), 4, 0)?;
++        let text = self.source_text(range)?;
++        output.try_reserve(text.len()).map_err(|_| ByteLexFailure::ResourceLimit)?;
++        output.push_str(text);
++        Ok(())
++    }
++
++    /// Scan in bounded chunks so fast string searches still poll on long tokens.
++    fn find_string_boundary(&mut self, quote: u8, newline: bool) -> Result<Option<usize>, ByteLexFailure> {
++        let rest = self.cursor.rest();
++        for (chunk_index, chunk) in rest.chunks(1024).enumerate() {
++            self.cursor.control.work(chunk.len())?;
++            let found = if newline { memchr::memchr3(quote, b'\r', b'\n', chunk) }
++                else { memchr::memchr(quote, chunk) };
++            if let Some(index) = found { return Ok(Some(chunk_index * 1024 + index)) }
++        }
++        Ok(None)
++    }
++
++    fn count_backslashes(&mut self, end: usize) -> Result<usize, ByteLexFailure> {
++        let mut count = 0;
++        for &byte in self.cursor.rest()[..end].iter().rev() {
++            self.cursor.control.work(1)?;
++            if byte != b'\\' { break }
++            count += 1;
++        }
++        Ok(count)
++    }
++
++    fn charge_checkpoint(&mut self) -> Result<(), ByteLexFailure> {
++        self.cursor.control.work(1)?;
++        let bytes = self.current_range.len().to_usize().checked_mul(64)
++            .and_then(|n| n.checked_add(self.indentations.len().checked_mul(32)?))
++            .and_then(|n| n.checked_add(self.interpolated_strings.len().checked_mul(64)?))
++            .and_then(|n| n.checked_add(512)).ok_or(ByteLexFailure::ResourceLimit)?;
++        self.cursor.control.allocate(bytes)?;
++        self.cursor.control.work(bytes)?;
++        Ok(())
+@@ -1492 +1631,5 @@
+-        LexerCheckpoint {
++        legacy_result(self.try_checkpoint())
++    }
++
++    fn try_checkpoint(&self) -> Result<LexerCheckpoint, ByteLexFailure> {
++        Ok(LexerCheckpoint {
+@@ -1497 +1640 @@
+-            cursor_offset: self.offset(),
++            cursor: self.cursor.checkpoint(),
+@@ -1500 +1643 @@
+-            indentations_checkpoint: self.indentations.checkpoint(),
++            indentations_checkpoint: self.indentations.try_checkpoint().map_err(|_| ByteLexFailure::ResourceLimit)?,
+@@ -1502 +1645 @@
+-            interpolated_strings_checkpoint: self.interpolated_strings.checkpoint(),
++            interpolated_strings_checkpoint: self.interpolated_strings.try_checkpoint().map_err(|_| ByteLexFailure::ResourceLimit)?,
+@@ -1504 +1647 @@
+-        }
++        })
+@@ -1514 +1657 @@
+-            cursor_offset,
++            cursor,
+@@ -1523,4 +1665,0 @@
+-        let mut cursor = Cursor::new(self.source);
+-        // We preserve the previous char using this method.
+-        cursor.skip_bytes(cursor_offset.to_usize());
+-
+@@ -1531 +1670 @@
+-        self.cursor = cursor;
++        self.cursor.rewind(cursor);
+@@ -1551 +1690 @@
+-    cursor_offset: TextSize,
++    cursor: CursorState,
+@@ -1615,4 +1753,0 @@
+-}
+-
+-const fn is_quote(c: char) -> bool {
+-    matches!(c, '\'' | '"')
+@@ -1649 +1784 @@
+-    Source { source: &'a str, range: TextRange },
++    Source { source: &'a [u8], range: TextRange },
+@@ -1654 +1789 @@
+-    fn new(start: TextSize, source: &'a str) -> Self {
++    fn new(start: TextSize, source: &'a [u8]) -> Self {
+@@ -1661 +1796 @@
+-    fn push(&mut self, c: char) {
++    fn push(&mut self, c: char) -> Result<(), ByteLexFailure> {
+@@ -1665,17 +1800,11 @@
+-                debug_assert!(source[*range].ends_with(c));
+-            }
+-            LexedText::Owned(owned) => owned.push(c),
+-        }
+-    }
+-
+-    fn as_str<'b>(&'b self) -> &'b str
+-    where
+-        'b: 'a,
+-    {
+-        match self {
+-            LexedText::Source { range, source } => &source[*range],
+-            LexedText::Owned(owned) => owned,
+-        }
+-    }
+-
+-    fn skip_char(&mut self) {
++                debug_assert!(source[range.start().to_usize()..range.end().to_usize()].ends_with(&[c as u8]));
++            }
++            LexedText::Owned(owned) => {
++                owned.try_reserve(c.len_utf8()).map_err(|_| ByteLexFailure::ResourceLimit)?;
++                owned.push(c);
++            }
++        }
++        Ok(())
++    }
++
++    fn as_str(&self) -> Result<&str, ByteLexFailure> {
+@@ -1684 +1813,20 @@
+-                *self = LexedText::Owned(source[*range].to_string());
++                let bytes = source.get(range.start().to_usize()..range.end().to_usize()).ok_or(ByteLexFailure::InvalidState)?;
++                // Only radix digits and punctuation already consumed by the cursor enter this range.
++                std::str::from_utf8(bytes).map_err(|_| ByteLexFailure::InvalidState)
++            }
++            LexedText::Owned(owned) => Ok(owned),
++        }
++    }
++
++    fn len(&self) -> usize {
++        match self { Self::Source { range, .. } => range.len().to_usize(), Self::Owned(text) => text.len() }
++    }
++
++    fn skip_char(&mut self) -> Result<(), ByteLexFailure> {
++        match self {
++            LexedText::Source { .. } => {
++                let text = self.as_str()?;
++                let mut owned = String::new();
++                owned.try_reserve(text.len()).map_err(|_| ByteLexFailure::ResourceLimit)?;
++                owned.push_str(text);
++                *self = LexedText::Owned(owned);
+@@ -1687,0 +1836 @@
++        Ok(())
+--- a/crates/ruff_python_parser/src/lexer/cursor.rs
++++ b/crates/ruff_python_parser/src/lexer/cursor.rs
+@@ -1 +1 @@
+-use std::str::Chars;
++use ruff_text_size::{TextRange, TextSize};
+@@ -3 +3 @@
+-use ruff_text_size::{TextLen, TextSize};
++use super::byte::{ByteLexFailure, Control, SourceFault};
+@@ -5,17 +5,5 @@
+-pub(crate) const EOF_CHAR: char = '\0';
+-
+-/// A cursor represents a pointer in the source code.
+-///
+-/// Based on [`rustc`'s `Cursor`](https://github.com/rust-lang/rust/blob/d1b7355d3d7b4ead564dbecb1d240fcc74fff21b/compiler/rustc_lexer/src/cursor.rs)
+-#[derive(Clone, Debug)]
+-pub(super) struct Cursor<'src> {
+-    /// An iterator over the [`char`]'s of the source code.
+-    chars: Chars<'src>,
+-
+-    /// Length of the source code. This is used as a marker to indicate the start of the current
+-    /// token which is being lexed.
+-    source_length: TextSize,
+-
+-    /// Stores the previous character for debug assertions.
+-    #[cfg(debug_assertions)]
+-    prev_char: char,
++#[derive(Clone, Copy, Debug)]
++pub(super) enum Previous {
++    Start,
++    Scalar(char),
++    Opaque,
+@@ -24,2 +12,22 @@
+-impl<'src> Cursor<'src> {
+-    pub(crate) fn new(source: &'src str) -> Self {
++#[derive(Clone, Copy, Debug)]
++pub(super) struct CursorState {
++    offset: usize,
++    token_start: usize,
++    previous: Previous,
++}
++
++/// Byte position and bounded scalar decoding shared by both lexer facades.
++pub(super) struct Cursor<'src, 'check, Check: ?Sized = dyn FnMut() -> bool + 'check> {
++    source: &'src [u8],
++    state: CursorState,
++    pub(super) control: Control<'check, Check>,
++}
++
++impl<Check: ?Sized> std::fmt::Debug for Cursor<'_, '_, Check> {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("Cursor").field("state", &self.state).finish_non_exhaustive()
++    }
++}
++
++impl<'src, 'check, Check: FnMut() -> bool + ?Sized> Cursor<'src, 'check, Check> {
++    pub(super) fn new(source: &'src [u8], control: Control<'check, Check>) -> Self {
+@@ -27,4 +35,3 @@
+-            source_length: source.text_len(),
+-            chars: source.chars(),
+-            #[cfg(debug_assertions)]
+-            prev_char: EOF_CHAR,
++            source,
++            state: CursorState { offset: 0, token_start: 0, previous: Previous::Start },
++            control,
+@@ -34,4 +41,11 @@
+-    /// Returns the previous character. Useful for debug assertions.
+-    #[cfg(debug_assertions)]
+-    pub(super) const fn previous(&self) -> char {
+-        self.prev_char
++    pub(super) fn checkpoint(&self) -> CursorState { self.state }
++
++    pub(super) fn rewind(&mut self, state: CursorState) { self.state = state; }
++
++    /// Reposition without decoding any prefix (which may contain opaque bytes).
++    pub(super) fn reposition(&mut self, offset: usize) -> Result<(), ByteLexFailure> {
++        if offset > self.source.len() || self.source.get(offset).is_some_and(|b| b & 0xc0 == 0x80) {
++            return Err(ByteLexFailure::InvalidState);
++        }
++        self.state = CursorState { offset, token_start: offset, previous: Previous::Start };
++        Ok(())
+@@ -40,4 +54,3 @@
+-    /// Peeks the next character from the input stream without consuming it.
+-    /// Returns [`EOF_CHAR`] if the position is past the end of the file.
+-    pub(super) fn first(&self) -> char {
+-        self.chars.clone().next().unwrap_or(EOF_CHAR)
++    #[cfg(debug_assertions)]
++    pub(super) fn previous(&self) -> Option<char> {
++        match self.state.previous { Previous::Scalar(c) => Some(c), _ => None }
+@@ -46,64 +59,16 @@
+-    /// Peeks the second character from the input stream without consuming it.
+-    /// Returns [`EOF_CHAR`] if the position is past the end of the file.
+-    pub(super) fn second(&self) -> char {
+-        let mut chars = self.chars.clone();
+-        chars.next();
+-        chars.next().unwrap_or(EOF_CHAR)
+-    }
+-
+-    /// Returns the remaining text to lex.
+-    ///
+-    /// Use [`Cursor::text_len`] to get the length of the remaining text.
+-    pub(super) fn rest(&self) -> &'src str {
+-        self.chars.as_str()
+-    }
+-
+-    /// Returns the length of the remaining text.
+-    ///
+-    /// Use [`Cursor::rest`] to get the remaining text.
+-    // SAFETY: The `source.text_len` call in `new` would panic if the string length is larger than a `u32`.
+-    #[expect(clippy::cast_possible_truncation)]
+-    pub(super) fn text_len(&self) -> TextSize {
+-        TextSize::new(self.chars.as_str().len() as u32)
+-    }
+-
+-    /// Returns the length of the current token length.
+-    ///
+-    /// This is to be used after setting the start position of the token using
+-    /// [`Cursor::start_token`].
+-    pub(super) fn token_len(&self) -> TextSize {
+-        self.source_length - self.text_len()
+-    }
+-
+-    /// Mark the current position of the cursor as the start of the token which is going to be
+-    /// lexed.
+-    ///
+-    /// Use [`Cursor::token_len`] to get the length of the lexed token.
+-    pub(super) fn start_token(&mut self) {
+-        self.source_length = self.text_len();
+-    }
+-
+-    /// Returns `true` if the cursor is at the end of file.
+-    pub(super) fn is_eof(&self) -> bool {
+-        self.chars.as_str().is_empty()
+-    }
+-
+-    /// Moves the cursor to the next character, returning the previous character.
+-    /// Returns [`None`] if there is no next character.
+-    pub(super) fn bump(&mut self) -> Option<char> {
+-        let prev = self.chars.next()?;
+-
+-        #[cfg(debug_assertions)]
+-        {
+-            self.prev_char = prev;
+-        }
+-
+-        Some(prev)
+-    }
+-
+-    pub(super) fn eat_char(&mut self, c: char) -> bool {
+-        if self.first() == c {
+-            self.bump();
+-            true
+-        } else {
+-            false
++    fn decode(&self, offset: usize) -> Result<Option<char>, ByteLexFailure> {
++        let Some(&first) = self.source.get(offset) else { return Ok(None) };
++        let width = match first {
++            0..=0x7f => return Ok(Some(char::from(first))),
++            0xc2..=0xdf => 2,
++            0xe0..=0xef => 3,
++            0xf0..=0xf4 => 4,
++            _ => 1,
++        };
++        let end = (offset + width).min(self.source.len());
++        match std::str::from_utf8(&self.source[offset..end]) {
++            Ok(text) => Ok(text.chars().next()),
++            Err(error) => Err(ByteLexFailure::Source(SourceFault {
++                range: TextRange::at(TextSize::new(offset as u32), TextSize::new(error.error_len().unwrap_or(end - offset) as u32)),
++                error_len: error.error_len(),
++            })),
+@@ -113,8 +78,7 @@
+-    pub(super) fn eat_char2(&mut self, c1: char, c2: char) -> bool {
+-        let mut chars = self.chars.clone();
+-        if chars.next() == Some(c1) && chars.next() == Some(c2) {
+-            self.bump();
+-            self.bump();
+-            true
+-        } else {
+-            false
++    /// Pure lookahead: a fault is returned, never committed to cursor state.
++    pub(super) fn first(&self) -> Result<Option<char>, ByteLexFailure> { self.decode(self.state.offset) }
++
++    pub(super) fn second(&self) -> Result<Option<char>, ByteLexFailure> {
++        match self.first()? {
++            Some(c) => self.decode(self.state.offset + c.len_utf8()),
++            None => Ok(None),
+@@ -124,10 +88,6 @@
+-    pub(super) fn eat_char3(&mut self, c1: char, c2: char, c3: char) -> bool {
+-        let mut chars = self.chars.clone();
+-        if chars.next() == Some(c1) && chars.next() == Some(c2) && chars.next() == Some(c3) {
+-            self.bump();
+-            self.bump();
+-            self.bump();
+-            true
+-        } else {
+-            false
+-        }
++    pub(super) fn rest(&self) -> &'src [u8] { &self.source[self.state.offset..] }
++
++    pub(super) fn text_len(&self) -> TextSize { TextSize::new(self.rest().len() as u32) }
++
++    pub(super) fn token_len(&self) -> TextSize {
++        TextSize::new((self.state.offset - self.state.token_start) as u32)
+@@ -136,8 +96,10 @@
+-    pub(super) fn eat_if<F>(&mut self, mut predicate: F) -> Option<char>
+-    where
+-        F: FnMut(char) -> bool,
+-    {
+-        if predicate(self.first()) && !self.is_eof() {
+-            self.bump()
+-        } else {
+-            None
++    pub(super) fn start_token(&mut self) { self.state.token_start = self.state.offset; }
++
++    pub(super) fn is_eof(&self) -> bool { self.state.offset == self.source.len() }
++
++    pub(super) fn bump(&mut self) -> Result<Option<char>, ByteLexFailure> {
++        self.control.work(1)?;
++        let c = self.first()?;
++        if let Some(c) = c {
++            self.state.offset += c.len_utf8();
++            self.state.previous = Previous::Scalar(c);
+@@ -144,0 +107 @@
++        Ok(c)
+@@ -147,8 +110,7 @@
+-    /// Eats symbols while predicate returns true or until the end of file is reached.
+-    #[inline]
+-    pub(super) fn eat_while(&mut self, mut predicate: impl FnMut(char) -> bool) {
+-        // It was tried making optimized version of this for eg. line comments, but
+-        // LLVM can inline all of this and compile it down to fast iteration over bytes.
+-        while predicate(self.first()) && !self.is_eof() {
+-            self.bump();
+-        }
++    pub(super) fn eat_char(&mut self, c: char) -> Result<bool, ByteLexFailure> {
++        // ASCII punctuation probes must not decode an unrelated following byte.
++        if c.is_ascii() {
++            if self.rest().first().copied() != Some(c as u8) { return Ok(false) }
++        } else if self.first()? != Some(c) { return Ok(false) }
++        self.bump()?;
++        Ok(true)
+@@ -157,15 +119,7 @@
+-    /// Skips the next `count` bytes.
+-    ///
+-    /// ## Panics
+-    ///  - If `count` is larger than the remaining bytes in the input stream.
+-    ///  - If `count` indexes into a multi-byte character.
+-    pub(super) fn skip_bytes(&mut self, count: usize) {
+-        #[cfg(debug_assertions)]
+-        {
+-            self.prev_char = self.chars.as_str()[..count]
+-                .chars()
+-                .next_back()
+-                .unwrap_or('\0');
+-        }
+-
+-        self.chars = self.chars.as_str()[count..].chars();
++    pub(super) fn eat_char2(&mut self, c1: char, c2: char) -> Result<bool, ByteLexFailure> {
++        debug_assert!(c1.is_ascii() && c2.is_ascii());
++        if self.rest().starts_with(&[c1 as u8, c2 as u8]) {
++            self.bump()?;
++            self.bump()?;
++            Ok(true)
++        } else { Ok(false) }
+@@ -174,3 +128,38 @@
+-    /// Skips to the end of the input stream.
+-    pub(super) fn skip_to_end(&mut self) {
+-        self.chars = "".chars();
++    pub(super) fn eat_char3(&mut self, c1: char, c2: char, c3: char) -> Result<bool, ByteLexFailure> {
++        debug_assert!(c1.is_ascii() && c2.is_ascii() && c3.is_ascii());
++        if self.rest().starts_with(&[c1 as u8, c2 as u8, c3 as u8]) {
++            self.bump()?;
++            self.bump()?;
++            self.bump()?;
++            Ok(true)
++        } else { Ok(false) }
++    }
++
++    pub(super) fn eat_if(&mut self, mut predicate: impl FnMut(char) -> bool) -> Result<Option<char>, ByteLexFailure> {
++        if self.first()?.is_some_and(&mut predicate) { self.bump() } else { Ok(None) }
++    }
++
++    pub(super) fn eat_while(&mut self, mut predicate: impl FnMut(char) -> bool) -> Result<(), ByteLexFailure> {
++        while self.first()?.is_some_and(&mut predicate) { self.bump()?; }
++        Ok(())
++    }
++
++    /// Validate every consumed byte, including fast and unterminated string paths.
++    pub(super) fn skip_bytes(&mut self, count: usize) -> Result<(), ByteLexFailure> {
++        let end = self.state.offset.checked_add(count).filter(|&end| end <= self.source.len()).ok_or(ByteLexFailure::InvalidState)?;
++        while self.state.offset < end { self.bump()?; }
++        if self.state.offset != end { return Err(ByteLexFailure::InvalidState) }
++        Ok(())
++    }
++
++    pub(super) fn skip_to_end(&mut self) -> Result<(), ByteLexFailure> { self.skip_bytes(self.rest().len()) }
++
++    /// Only the existing comment transition may consume opaque bytes.
++    pub(super) fn skip_comment(&mut self) -> Result<(), ByteLexFailure> {
++        while let Some(&b) = self.rest().first() {
++            if matches!(b, b'\n' | b'\r') { break }
++            self.control.work(1)?;
++            self.state.offset += 1;
++            self.state.previous = Previous::Opaque;
++        }
++        Ok(())
+--- a/crates/ruff_python_parser/src/lexer/indentation.rs
++++ b/crates/ruff_python_parser/src/lexer/indentation.rs
+@@ -92,0 +93,6 @@
++    pub(super) fn len(&self) -> usize { self.stack.len() }
++
++    pub(super) fn try_reserve(&mut self) -> Result<(), std::collections::TryReserveError> {
++        self.stack.try_reserve(1)
++    }
++
+@@ -128,2 +134,5 @@
+-    pub(crate) fn checkpoint(&self) -> IndentationsCheckpoint {
+-        IndentationsCheckpoint(self.stack.clone())
++    pub(super) fn try_checkpoint(&self) -> Result<IndentationsCheckpoint, std::collections::TryReserveError> {
++        let mut stack = Vec::new();
++        stack.try_reserve(self.stack.len())?;
++        stack.extend_from_slice(&self.stack);
++        Ok(IndentationsCheckpoint(stack))
+--- a/crates/ruff_python_parser/src/lexer/interpolated_string.rs
++++ b/crates/ruff_python_parser/src/lexer/interpolated_string.rs
+@@ -130,0 +131,6 @@
++    pub(super) fn len(&self) -> usize { self.stack.len() }
++
++    pub(super) fn try_reserve(&mut self) -> Result<(), std::collections::TryReserveError> {
++        self.stack.try_reserve(1)
++    }
++
+@@ -147,2 +153,5 @@
+-    pub(crate) fn checkpoint(&self) -> InterpolatedStringsCheckpoint {
+-        InterpolatedStringsCheckpoint(self.stack.clone())
++    pub(super) fn try_checkpoint(&self) -> Result<InterpolatedStringsCheckpoint, std::collections::TryReserveError> {
++        let mut stack = Vec::new();
++        stack.try_reserve(self.stack.len())?;
++        stack.extend_from_slice(&self.stack);
++        Ok(InterpolatedStringsCheckpoint(stack))

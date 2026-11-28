@@ -9,6 +9,12 @@ mod literals;
 mod source;
 mod type_comments;
 mod unicode15;
+
+#[cfg(test)]
+mod byte_lexer_tests;
+
+#[cfg(test)]
+mod byte_lexer_acceptance;
 pub(super) use facts::CandidateReport;
 
 pub(super) fn extract_fact_candidates(

@@ -1,7 +1,7 @@
-# Initial reviewed Git-source closure; main-agent final review is still required.
+# Reviewed Git-source closure; additions and changed contents require explicit review.
 # Derived from docs/package-files.txt without Cargo-generated Cargo.toml.orig,
 # plus explicit checkout/Ruff integration paths and the closed Ruff provenance
-# inventory (84 records plus provenance.json). Never regenerate from a workspace walk.
+# inventory (86 records plus provenance.json). Never regenerate from a workspace walk.
 .github/workflows/rust.yml
 .gitignore
 Cargo.lock
@@ -21,6 +21,7 @@ docs/javascript-typescript-analysis.md
 docs/lineage.md
 docs/package-files.txt
 docs/python-analysis.md
+docs/python-byte-lexer-baseline.json
 docs/python-native-replacement-feasibility.md
 docs/python-visitor-contract.json
 docs/python-visitor-witnesses.json
@@ -90,6 +91,8 @@ src/analysis/python_parity/ruff_compat_batch.rs
 src/analysis/python_parity/ruff_codec_batch.rs
 src/analysis/python_parity/ruff_visitor_batch.rs
 src/analysis/python_ruff.rs
+src/analysis/python_ruff/byte_lexer_acceptance.rs
+src/analysis/python_ruff/byte_lexer_tests.rs
 src/analysis/python_ruff/codecs312.rs
 src/analysis/python_ruff/codecs312/LICENSE.txt
 src/analysis/python_ruff/codecs312/NOTICES.md
@@ -206,6 +209,7 @@ vendor/ruff/crates/ruff_python_ast/src/whitespace.rs
 vendor/ruff/crates/ruff_python_parser/Cargo.toml
 vendor/ruff/crates/ruff_python_parser/src/error.rs
 vendor/ruff/crates/ruff_python_parser/src/lexer.rs
+vendor/ruff/crates/ruff_python_parser/src/lexer/byte.rs
 vendor/ruff/crates/ruff_python_parser/src/lexer/cursor.rs
 vendor/ruff/crates/ruff_python_parser/src/lexer/indentation.rs
 vendor/ruff/crates/ruff_python_parser/src/lexer/interpolated_string.rs
@@ -250,6 +254,7 @@ vendor/ruff/notices/unicode_names2-1.3.0/LICENSE-APACHE
 vendor/ruff/notices/unicode_names2-1.3.0/LICENSE-MIT
 vendor/ruff/notices/unicode_names2-1.3.0/data/LICENSE-UNICODE
 vendor/ruff/patches/ast-only-policy.patch
+vendor/ruff/patches/byte-lexer-experiment.patch
 vendor/ruff/provenance.json
 vendor/ruff/upstream/Cargo.lock
 vendor/ruff/upstream/crates/ruff_python_ast/Cargo.toml

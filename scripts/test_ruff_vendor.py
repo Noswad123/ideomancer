@@ -5,8 +5,10 @@ import difflib
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import check_ruff_vendor as checker
 
@@ -81,6 +83,16 @@ class RuffInventoryTests(unittest.TestCase):
             with self.subTest(item=item), self.assertRaises(checker.VendorError):
                 checker.validate_records({"file": item})
 
+    def test_record_count_and_total_bounds(self):
+        records = {f"file{i}": {"bytes": 0, "sha256": "0" * 64} for i in range(100)}
+        checker.validate_records(records)
+        with self.assertRaisesRegex(checker.VendorError, "inventory size"):
+            checker.validate_records({**records, "extra": records["file0"]})
+        for item in records.values():
+            item["bytes"] = checker.MAX_FILE_BYTES
+        with self.assertRaisesRegex(checker.VendorError, "byte bound"):
+            checker.validate_records(records)
+
 
 class RuffProvenanceTests(unittest.TestCase):
     def setUp(self):
@@ -89,8 +101,12 @@ class RuffProvenanceTests(unittest.TestCase):
 
     def test_reviewed_snapshot(self):
         result = checker.check_vendor(VENDOR)
-        self.assertEqual(result["sources"], 65)
-        self.assertEqual(result["files"], 85)
+        self.assertEqual(result["sources"], 66)
+        self.assertEqual(result["files"], 87)
+        self.assertEqual(result["pristine_sources"], 65)
+        self.assertEqual(result["local_sources"], 1)
+        self.assertEqual(result["modified_upstream_sources"], 8)
+        self.assertEqual(result["unmodified_upstream_sources"], 57)
 
     def test_unknown_fields(self):
         self.value["unreviewed"] = True
@@ -98,7 +114,8 @@ class RuffProvenanceTests(unittest.TestCase):
             checker.parse_provenance(json.dumps(self.value).encode())
 
     def test_duplicate_json_keys(self):
-        raw = self.raw.replace(b'"schema_version": 1', b'"schema_version": 1, "schema_version": 1')
+        raw = self.raw.replace(b'"schema_version": 2', b'"schema_version": 2, "schema_version": 2')
+        self.assertNotEqual(raw, self.raw)
         with self.assertRaisesRegex(checker.VendorError, "duplicate JSON"):
             checker.parse_provenance(raw)
 
@@ -143,6 +160,120 @@ class RuffProvenanceTests(unittest.TestCase):
         del self.value["policy"]
         with self.assertRaisesRegex(checker.VendorError, "fields"):
             checker.parse_provenance(json.dumps(self.value).encode())
+
+    def test_schema_version_is_exact(self):
+        for version in (1, 3, True, 2.0, "2", None):
+            self.value["schema_version"] = version
+            with self.subTest(version=version), self.assertRaisesRegex(checker.VendorError, "schema version"):
+                checker.parse_provenance(json.dumps(self.value).encode())
+
+    def test_f1_membership_cannot_expand_shrink_or_cross_groups(self):
+        for name in checker.BYTE_LEXER_FILES:
+            for replacement in (None, checker.POLICY_FILES[0], checker.BYTE_SOURCE, "extra.rs"):
+                value = copy.deepcopy(self.value)
+                record = value["byte_lexer_experiment"].pop(name)
+                if replacement is not None:
+                    value["byte_lexer_experiment"][replacement] = record
+                with self.subTest(name=name, replacement=replacement), self.assertRaisesRegex(
+                        checker.VendorError, "unexpected byte_lexer_experiment files"):
+                    checker.parse_provenance(json.dumps(value).encode())
+
+    def test_patch_mappings_require_both_exact_hashes(self):
+        for group, names in (("policy", checker.POLICY_FILES),
+                             ("byte_lexer_experiment", checker.BYTE_LEXER_FILES)):
+            for name in names:
+                for field in ("original_sha256", "patched_sha256", "unknown"):
+                    value = copy.deepcopy(self.value)
+                    value[group][name][field] = "0" * 64
+                    with self.subTest(group=group, name=name, field=field), self.assertRaisesRegex(
+                            checker.VendorError, "hash mapping"):
+                        checker.parse_provenance(json.dumps(value).encode())
+                value = copy.deepcopy(self.value)
+                del value["files"][name]
+                with self.subTest(name=name), self.assertRaisesRegex(checker.VendorError, "missing .* inventory"):
+                    checker.parse_provenance(json.dumps(value).encode())
+
+    def test_f1_source_and_sidecar_are_not_self_proving(self):
+        for name in checker.BYTE_LEXER_FILES:
+            value = copy.deepcopy(self.value)
+            value["files"][name]["sha256"] = checker.digest((VENDOR / name).read_bytes() + b"// extra\n")
+            value["byte_lexer_experiment"][name]["patched_sha256"] = value["files"][name]["sha256"]
+            with self.subTest(name=name), self.assertRaisesRegex(checker.VendorError, "provenance digest"):
+                checker.parse_provenance(json.dumps(value).encode())
+
+    def test_each_patch_has_an_independent_anchor(self):
+        for name in ("patches/ast-only-policy.patch", "patches/byte-lexer-experiment.patch"):
+            value = copy.deepcopy(self.value)
+            value["files"][name]["sha256"] = checker.digest((VENDOR / name).read_bytes() + b"\n")
+            with self.subTest(name=name), self.assertRaisesRegex(checker.VendorError, "reviewed patch hash"):
+                checker.parse_provenance(json.dumps(value).encode())
+
+    def test_local_source_and_sidecars_have_an_independent_anchor(self):
+        name = checker.BYTE_SOURCE
+        changed_hash = checker.digest((VENDOR / name).read_bytes() + b"// extra\n")
+        self.value["files"][name]["sha256"] = changed_hash
+        self.value["local_sources"][name]["sha256"] = changed_hash
+        with self.assertRaisesRegex(checker.VendorError, "reviewed local source hash"):
+            checker.parse_provenance(json.dumps(self.value).encode())
+
+    def test_local_membership_is_exact(self):
+        for local in ({}, {"extra.rs": {}}, {**self.value["local_sources"], "extra.rs": {}}):
+            self.value["local_sources"] = local
+            with self.subTest(local=local), self.assertRaisesRegex(checker.VendorError, "local source files"):
+                checker.parse_provenance(json.dumps(self.value).encode())
+
+    def test_local_metadata_and_record_must_match_inventory(self):
+        name = checker.BYTE_SOURCE
+        for field, replacement in (("origin", "upstream"), ("license", "Apache-2.0"),
+                                   ("bytes", 0), ("sha256", "0" * 64), ("extra", True)):
+            value = copy.deepcopy(self.value)
+            value["local_sources"][name][field] = replacement
+            with self.subTest(field=field), self.assertRaisesRegex(checker.VendorError, "local source metadata"):
+                checker.parse_provenance(json.dumps(value).encode())
+        for field in self.value["local_sources"][name]:
+            value = copy.deepcopy(self.value)
+            del value["local_sources"][name][field]
+            with self.subTest(missing=field), self.assertRaisesRegex(checker.VendorError, "local source metadata"):
+                checker.parse_provenance(json.dumps(value).encode())
+        del self.value["files"][name]
+        with self.assertRaisesRegex(checker.VendorError, "missing local source inventory"):
+            checker.parse_provenance(json.dumps(self.value).encode())
+
+    def test_local_source_cannot_be_claimed_as_pristine(self):
+        self.value["pristine_sources"][checker.BYTE_SOURCE] = self.value["files"][checker.BYTE_SOURCE]
+        with self.assertRaisesRegex(checker.VendorError, "pristine source membership"):
+            checker.parse_provenance(json.dumps(self.value).encode())
+
+    def test_source_set_is_exact_union(self):
+        for name in ("crates/ruff_python_parser/src/extra.rs", next(iter(self.value["pristine_sources"]))):
+            value = copy.deepcopy(self.value)
+            if name in value["files"]:
+                del value["files"][name]
+            else:
+                value["files"][name] = {"bytes": 0, "sha256": "0" * 64}
+            with self.subTest(name=name), self.assertRaisesRegex(checker.VendorError, "source set"):
+                checker.parse_provenance(json.dumps(value).encode())
+
+    def test_modified_upstream_set_is_exact(self):
+        name = next(name for name in self.value["pristine_sources"]
+                    if name not in checker.POLICY_FILES + checker.BYTE_LEXER_FILES)
+        self.value["files"][name]["sha256"] = "0" * 64
+        with self.assertRaisesRegex(checker.VendorError, "modified upstream source set"):
+            checker.parse_provenance(json.dumps(self.value).encode())
+
+    def test_provenance_cannot_inventory_itself(self):
+        self.value["files"]["provenance.json"] = {"bytes": len(self.raw), "sha256": checker.digest(self.raw)}
+        with self.assertRaisesRegex(checker.VendorError, "inventory itself"):
+            checker.parse_provenance(json.dumps(self.value).encode())
+
+    def test_reviewed_file_count_is_exact(self):
+        self.value["files"]["extra.txt"] = {"bytes": 0, "sha256": "0" * 64}
+        with self.assertRaisesRegex(checker.VendorError, "reviewed file count"):
+            checker.parse_provenance(json.dumps(self.value).encode())
+
+    def test_provenance_byte_bound(self):
+        with self.assertRaisesRegex(checker.VendorError, "provenance exceeds"):
+            checker.parse_provenance(b" " * (128 * 1024 + 1))
 
 
 class RuffManifestTests(unittest.TestCase):
@@ -196,6 +327,105 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)', 'cfg(codspeed)'
         for extra in (b'\n[features]\nserde = []\n', b'\n[workspace]\n', b'\n[build-dependencies]\ncc = "1"\n'):
             with self.subTest(extra=extra), self.assertRaises(checker.VendorError):
                 self.validate(self.MANIFEST + extra)
+
+
+class RuffByteLexerPatchTests(unittest.TestCase):
+    def setUp(self):
+        self.sources = {name: (VENDOR / name).read_bytes() for name in checker.BYTE_LEXER_FILES}
+        self.patch = (VENDOR / "patches/byte-lexer-experiment.patch").read_text()
+        self.originals = checker.reverse_policy_patch(self.patch, self.sources)
+        self.pristine = json.loads((VENDOR / "provenance.json").read_bytes())["pristine_sources"]
+
+    def test_exact_four_file_pristine_reversal(self):
+        self.assertEqual(set(self.originals), set(checker.BYTE_LEXER_FILES))
+        for name, data in self.originals.items():
+            with self.subTest(name=name):
+                self.assertEqual({"bytes": len(data), "sha256": checker.digest(data)}, self.pristine[name])
+
+    def test_canonical_ordered_zero_context_diff(self):
+        expected = "".join("".join(difflib.unified_diff(
+            self.originals[name].decode().splitlines(keepends=True),
+            self.sources[name].decode().splitlines(keepends=True),
+            fromfile=f"a/{name}", tofile=f"b/{name}", n=0)) for name in checker.BYTE_LEXER_FILES)
+        self.assertEqual(self.patch, expected)
+        self.assertEqual(checker.digest(self.patch.encode()), checker.BYTE_PATCH_SHA256)
+
+    def test_each_file_section_is_required_and_unique(self):
+        sections = ["--- a/" + section for section in self.patch.split("--- a/")[1:]]
+        self.assertEqual(len(sections), 4)
+        for index in range(4):
+            for changed in ("".join(sections[:index] + sections[index + 1:]), self.patch + sections[index]):
+                with self.subTest(index=index), self.assertRaises(checker.VendorError):
+                    checker.reverse_policy_patch(changed, self.sources)
+
+    def test_cannot_patch_other_group_or_authored_source(self):
+        name = checker.BYTE_LEXER_FILES[0]
+        for replacement in (*checker.POLICY_FILES, checker.BYTE_SOURCE, "../escape", "/dev/null"):
+            changed = self.patch.replace(f"--- a/{name}\n+++ b/{name}\n",
+                                         f"--- a/{replacement}\n+++ b/{replacement}\n", 1)
+            with self.subTest(replacement=replacement), self.assertRaises(checker.VendorError):
+                checker.reverse_policy_patch(changed, self.sources)
+        with self.assertRaisesRegex(checker.VendorError, "source files"):
+            checker.validate_policy(self.sources, self.originals)
+
+    def test_source_membership_cannot_shrink_or_expand(self):
+        for name in checker.BYTE_LEXER_FILES:
+            with self.subTest(name=name), self.assertRaises(checker.VendorError):
+                checker.reverse_policy_patch(self.patch, {n: s for n, s in self.sources.items() if n != name})
+        with self.assertRaisesRegex(checker.VendorError, "missing policy patch file"):
+            checker.reverse_policy_patch(self.patch, {**self.sources, checker.BYTE_SOURCE: b""})
+
+    def test_real_patch_hunk_offsets_counts_and_contents(self):
+        match = re.search(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@\n", self.patch)
+        self.assertIsNotNone(match)
+        old_start, old_count, new_start, new_count = (int(v) if v is not None else 1 for v in match.groups())
+        headers = (
+            f"@@ -{old_start + 1},{old_count} +{new_start},{new_count} @@\n",
+            f"@@ -{old_start},{old_count} +{new_start + 1},{new_count} @@\n",
+            f"@@ -{old_start},{old_count + 1} +{new_start},{new_count} @@\n",
+            f"@@ -{old_start},{old_count} +{new_start},{new_count + 1} @@\n",
+        )
+        changes = [self.patch[:match.start()] + header + self.patch[match.end():] for header in headers]
+        addition = next(line for line in self.patch.splitlines(True) if line.startswith("+") and not line.startswith("+++"))
+        changes.append(self.patch.replace(addition, "+// tampered\n", 1))
+        changes.append(self.patch.replace("+++ b/", "+++ b/wrong/", 1))
+        for changed in changes:
+            with self.subTest(changed=changed[:200]), self.assertRaises(checker.VendorError):
+                checker.reverse_policy_patch(changed, self.sources)
+
+    def test_outside_hunk_edits_fail_pristine_guard(self):
+        read_bytes = Path.read_bytes
+        for name in checker.BYTE_LEXER_FILES:
+            changed = self.sources[name] + b"// unreviewed trailing edit\n"
+            restored = checker.reverse_policy_patch(self.patch, {**self.sources, name: changed})
+            self.assertNotEqual(checker.digest(restored[name]), self.pristine[name]["sha256"])
+
+            def read(path):
+                return changed if path == VENDOR / name else read_bytes(path)
+
+            # Isolate the deeper reversal guard; the real inventory also rejects this edit.
+            with self.subTest(name=name), patch.object(checker, "validate_inventory"), \
+                    patch.object(Path, "read_bytes", read), \
+                    self.assertRaisesRegex(checker.VendorError, "pristine source mismatch"):
+                checker.check_vendor(VENDOR)
+
+    def test_synthetic_insertions_and_deletions_reverse_exactly(self):
+        for old, new in (("", "new\n"), ("old\n", ""),
+                         ("same\n", "same\nnew\n"), ("same\nold\n", "same\n")):
+            diff = "".join(difflib.unified_diff(old.splitlines(True), new.splitlines(True),
+                                                fromfile="a/demo.rs", tofile="b/demo.rs", n=0))
+            with self.subTest(old=old, new=new):
+                self.assertEqual(checker.reverse_policy_patch(diff, {"demo.rs": new.encode()}),
+                                 {"demo.rs": old.encode()})
+
+    def test_synthetic_malformed_hunks(self):
+        valid = "--- a/demo.rs\n+++ b/demo.rs\n@@ -1 +1 @@\n-old\n+new\n"
+        for changed in ("", valid.replace("@@ -1", "@@ -0"), valid.replace("+1 @@", "+0 @@"),
+                        valid.replace("+new\n", "+wrong\n"), valid.replace("-old\n", "?old\n"),
+                        valid.replace("@@ -1 +1 @@\n", ""), valid + "@@ -1 +1 @@\n-old\n+new\n",
+                        valid.replace("+++ b/demo.rs", "+++ /dev/null")):
+            with self.subTest(changed=changed), self.assertRaises(checker.VendorError):
+                checker.reverse_policy_patch(changed, {"demo.rs": b"new\n"})
 
 
 class RuffPolicyTests(unittest.TestCase):

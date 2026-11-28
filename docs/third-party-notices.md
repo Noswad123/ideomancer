@@ -25,7 +25,7 @@ from https://github.com/astral-sh/ruff at exact revision
 `87f0feb21a1af67195bebf94d811770393f9f447`. Unlike the registry sources below,
 its provenance is recorded in the checkout's
 [`vendor/ruff/provenance.json`](../vendor/ruff/provenance.json). The five source
-crates, adapted manifests, policy patch and upstream notices travel with Ideomancer
+crates, adapted manifests, two reviewed patches and upstream notices travel with Ideomancer
 Git source; there is no separate fork/submodule or registry publication requirement.
 
 - The complete [upstream LICENSE](../vendor/ruff/LICENSE) retains Charles Marsh's
@@ -39,7 +39,64 @@ Git source; there is no separate fork/submodule or registry publication requirem
   admission or CPython compatibility. Registry dependency sources are not vendored
   here; preserve applicable notices for actual selected versions in binary bundles.
 
-There are 65 selected Rust source files in an 85-file vendor snapshot totaling
+### Current F1 provenance and license boundary
+
+The bounded private F1 experiment adds a shared fallible byte lexer core and
+doc-hidden experimental facade, not a public engine backend or byte parser.
+Schema-2 [provenance](../vendor/ruff/provenance.json) records **87 vendor files /
+66 Rust sources / 1,972,891 bytes**. The **65-source upstream pristine map is
+unchanged**: eight upstream files modified by two disjoint four-file patches,
+57 unchanged; one additional original `lexer/byte.rs` is separately hashed as
+authored Ideomancer code under the [root MIT license](../LICENSE), not pristine
+upstream. Keep that license **and** the complete Ruff license/notices. Existing
+PSF/codec and Unicode notices and terms are unchanged; there are no dependency or
+manifest changes.
+
+`ast-only-policy.patch` is unchanged; `byte-lexer-experiment.patch` covers
+`lexer.rs`, `lexer/{cursor,indentation,interpolated_string}.rs`. Current SHA-256:
+provenance `83b701ef82cd549d1b01501520f57b9504e3decac32cdc7d151add639f892800`;
+F1 patch `4f4d3a244236a3e730ab805716f23f581483fa6e7a38060b1ea10c344fe5aac5`;
+authored facade `d8e617b7bb9401e96263997b99151cfa02e3dd0af1254a384c7569e12d2fec94`.
+The active source inventory is **261 paths** (+5 from F0's 256). Coordinator reports
+**all 131 private Ruff tests passed** after fixes, including **23 F1 ordinary + 17
+existing opt-ins**; all **364** complete positive facts/IDs/diagnostics/raw replay
+matched on the unchanged normal text path. Both facades passed all thirteen
+pre-core hashes (298 tokens/all four modes), including compiled legacy `Send + Sync`.
+Product formatting/all-target Clippy, **58 vendor script tests**, schema-2 vendor
+checker and the **261-path** source gate passed. Scripts: **310 discovered,
+297 passed / 13 isolation skips**; isolated byte/visitor/codec **23 / 43 / 24 passed**,
+no skips, covering all 310 unique tests across lanes. Current preservation passed
+**708 library tests (191 ignored), 18 adapter + 8 engine** and explicit **165
+reference + 3 native** tests. With the 17 Ruff opt-ins, **all 185 explicit gates
+passed**, including known-limit assertions—not 185 parity matches. P2 view
+accounting is closed and its root regression passed; final read-only review found
+no material P1/P2/P3 findings and new schema-2 guards passed. No additional core
+changes are planned and provenance anchors are stable. **Bounded F1 lexer goal
+COMPLETE / PROVED by compiled tests; all F1 delivery gates PASS**. Offline consumer
+passed with fresh **105-package** lock resolution, **one native TypeScript
+public-API test**, five contained Ruff crates, ABI **0.1.5** and source-hash rechecks.
+Its snapshot (hash in the [F1 ledger](python-analysis.md#f1-shared-byte-lexer-experiment))
+is not a Git revision or final-docs attestation; its owned cache `TMPDIR` was cleaned.
+Guarded preflight found zero blockers/protected outputs, normal `debug`/`tmp` only;
+cleanup removed **1,360,498,688 estimated allocated bytes (~1.27 GiB)**. Target
+absent, follow-up `already_clean`, **no Cargo afterward**. No owned debug/test
+artifacts remain; root cache parent empty, `.ideomancer/` JS/global caches untouched.
+Final source/Git/helper checks are read-only, without rebuilding.
+This does not prove byte parser input, AST/debug construction, CPython admission,
+F2 or full G4, or authorize further implementation; F2/version approval stays separate.
+These are not binary-release, whole-graph
+license or G4 acceptance. See the [F1 ledger](python-analysis.md#f1-shared-byte-lexer-experiment)
+for tests/baseline and pending F2 parser/source/debug/admission proof.
+
+Actual pre-F1 HEAD was user-reported `fdf4e58` (facts-6 commit, initially clean/ahead
+one), not `523cd7b`; current F1 work is uncommitted and unstaged, with no commits or
+pushes. The source counts,
+HEAD and cleanup statements in the following
+visitor/codec receipts describe historical checkpoints, not current-tree status.
+
+### Historical visitor checkpoint
+
+There were 65 selected Rust source files in an 85-file vendor snapshot totaling
 1,882,473 bytes. Four upstream source files carry the reviewed policy patch:
 duplicate call/class-header keyword validation can be omitted via an explicit
 AST-only option that defaults to false, additional f-string mapping/pattern-start
@@ -53,8 +110,8 @@ and upstream tests. The root lock merge adds five local and thirty registry pack
 while retaining prior product selections; the upstream lock is provenance, not the
 actual product closure. These facts do not constitute a whole-graph license audit.
 
-Frontend-5/facts-7 retains the same four-file patch and 65-source pristine closure.
-Current policy-patch SHA-256 is
+The visitor checkpoint retained the same four-file patch and 65-source pristine closure.
+Its policy-patch SHA-256 (still unchanged by F1) is
 `e79a66530f58f63371c0423f5f0469ff82f9b0193f57b6ba8672c3c33aa4e90e`;
 provenance anchor is
 `b8246ec2c0911719ddd715f80dac504795c97f70ab828bd4375d18538c237ee0`.
@@ -104,7 +161,8 @@ cleanup below is historical, not current-tree or binary-release acceptance. See 
 Maintenance gate: `python3.12 -B scripts/check_ruff_vendor.py` verifies anchored
 provenance, hashes, manifest/notices policy and reversal to pristine source. See
 [snapshot maintenance](../vendor/ruff/README.md) and [Git delivery](releasing.md).
-Keep vendored source pristine except for that patch; format only root product code
+Keep upstream source pristine except for the two reviewed patches above, tracking
+the authored facade separately; format only root product code
 with `RUSTUP_AUTO_INSTALL=0 cargo fmt --package ideomancer --check`, never `--all`.
 
 The private frontend supplies captured-byte syntax classification and a separate
@@ -144,7 +202,7 @@ this does not extend the scoped notices into binary-release or legal clearance.
 ### CPython 3.12.11 Codec Data
 
 The validation and ~1.28 GiB cleanup receipts in this subsection describe the
-historical frontend-4/facts-6 checkpoint only. Current facts-7 cleanup completed,
+historical frontend-4/facts-6 checkpoint only. Historical facts-7 cleanup completed,
 removing **1,374,564,352 estimated allocated bytes (~1.28 GiB)** with target absent
 and follow-up `already_clean`; no Cargo ran afterward. Retain all license texts
 below unchanged.

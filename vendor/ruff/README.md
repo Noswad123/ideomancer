@@ -4,7 +4,9 @@ This Git-distributed subset is derived from Ruff tag `0.12.0`, commit
 `87f0feb21a1af67195bebf94d811770393f9f447`. It is not a registry publication,
 submodule, nested Git repository or independent Cargo workspace.
 
-Only 65 selected Rust source files from five unpublished crates are included.
+There are 65 selected upstream Rust source files from five unpublished crates,
+plus one original Ideomancer-authored source, for 66 selected Rust sources in an
+87-file vendor snapshot (86 inventory records plus `provenance.json`).
 Fixtures, snapshots, examples, benches, test resources and the standalone
 `ruff_python_parser/src/parser/tests.rs` are omitted. Mixed production/test files
 remain intact. Adapted manifests disable library tests, doctests, benchmarks and
@@ -18,15 +20,33 @@ not part of a build. No local crate needs a build script or external generated i
 manifests as provenance, not ancestor Cargo configuration. `LICENSE` is the complete
 upstream license, including RustPython attribution. `provenance.json` records the
 immutable pin, retrieval hashes, pristine source hashes and closed file inventory.
-`patches/ast-only-policy.patch` contains the only source changes: the reviewed
+`patches/ast-only-policy.patch` retains the byte-unchanged reviewed
 four-file AST-only/target-version compatibility patch in parser `options.rs`,
 `expression.rs`, `statement.rs` and `pattern.rs`. Adapted manifests are reviewed
-local changes, not upstream originals. Reversing the exact patch restores all 65
-pristine source hashes; no fuzzy application or additional source edits are allowed.
+local changes, not upstream originals. The separate
+`patches/byte-lexer-experiment.patch` modifies exactly `lexer.rs`,
+`lexer/cursor.rs`, `lexer/indentation.rs` and `lexer/interpolated_string.rs` in
+`ruff_python_parser/src`. Reversing these disjoint four-file patches restores all
+65 unchanged pristine source references: eight upstream sources are modified and
+57 remain unmodified. No fuzzy application or additional source edits are allowed.
+
+`crates/ruff_python_parser/src/lexer/byte.rs` is original Ideomancer-authored MIT
+code, recorded separately in `local_sources`, not claimed as upstream pristine and
+not part of either patch. Retain Ideomancer's root `LICENSE` notice for this source
+alongside the unchanged upstream `vendor/ruff/LICENSE` and notices.
+
+The bounded F1 byte-lexer experiment is not a parser, encoding implementation or
+CPython admission policy. Its public, hidden experimental facade does not change
+the engine v1 API or production helper. The existing string lexer facade is
+preserved against frozen legacy traces. Frontend-5/facts-7 policy identifiers are
+unchanged; the reviewed inventory necessarily changes the transitive development
+fingerprint. F1 does not establish complete compatibility or approve cutover.
 
 Run `python3.12 -B scripts/check_ruff_vendor.py` from the repository root for
 read-only integrity, path, metadata, manifest and policy checks. The verifier
-anchors the reviewed inventory and pristine hashes in script constants. It checks
+anchors the reviewed inventory, pristine hashes, both patches and the authored
+source hash in script constants. Schema 2 keeps the old four-file policy model
+independent of the F1 patch closure and local-source metadata. It checks
 the committed snapshot, not GitHub or archive retrieval again. This is a review
 and accidental-tampering guard, not an attacker-controlled-checkout sandbox.
 Any intentional update requires review of the source pin, inventories, checker
