@@ -1,8 +1,10 @@
 //! Private captured-byte Ruff frontend, not evidence or a compatibility backend.
 //! The separate private fact candidate consumes only validated, borrowed ASTs.
 
+mod codecs312;
 mod expressions;
 mod facts;
+mod failures;
 mod literals;
 mod source;
 mod type_comments;
@@ -25,7 +27,7 @@ use std::io::{self, Write};
 use std::time::Instant;
 
 const COMMIT: &str = "87f0feb21a1af67195bebf94d811770393f9f447";
-const POLICY: &str = "python-ruff-private-2-py312-versioned-compatibility";
+const POLICY: &str = "python-ruff-private-5-py312-visitor-patterns";
 const MAX_METADATA: usize = 4096;
 const MAX_REPORT: usize = 1024 * 1024;
 const MAX_TOKENS: usize = 200_000;
@@ -82,8 +84,8 @@ impl Default for Capabilities {
             encoding_parity: CompatibilityStatus::Pending,
             literal_and_span_normalization: CompatibilityStatus::Pending,
             fact_lowering: CompatibilityStatus::Pending,
-            source_profile: "strict-utf8-and-latin1; eligible-cookies-and-bom; codec-registry-and-invalid-comment-bytes-pending",
-            fact_compatibility_profile: "fact-candidate-only-raw-unicode15-and-named-escapes; bounded-type-comment-attachment; parse-only-guards-pending",
+            source_profile: "pinned-cpython312-ascii-identity-single-byte-family-and-strict-ascii; utf8-cookie-bom-history; multibyte-registry-and-invalid-comment-bytes-pending",
+            fact_compatibility_profile: "shared-unicode15-literal-and-format-admission; finite-exception-line-certificates; bounded-fact-only-type-comment-attachment; full-failure-compatibility-pending",
             resource_policy: "preparse-bytes-and-lexical-tokens; cooperative-before-after-parser; no-hard-timeout-or-rss-bound",
         }
     }
@@ -99,6 +101,9 @@ pub(super) struct FileReport<'a> {
     pub(super) syntax: RuffSyntax,
     pub(super) diagnostic: Option<Diagnostic>,
     pub(super) failure_reason: Option<&'static str>,
+    /// Present only for a finite, independently checked helper-compatible failure.
+    /// Ruff diagnostic locations and physical decoder lines are not certificates.
+    pub(super) failure: Option<failures::Failure>,
     pub(super) syntax_errors: usize,
     pub(super) unsupported_version_errors: usize,
     pub(super) error_counts_capped: bool,
@@ -113,6 +118,7 @@ pub(super) struct FileReport<'a> {
 pub(super) enum Admission {
     Admitted,
     InvalidSource,
+    UnsupportedCompatibility,
     UnsupportedEncoding,
     ResourceLimit,
 }
@@ -130,6 +136,8 @@ pub(super) enum RuffSyntax {
 pub(super) enum Diagnostic {
     EncodingCookieUnsupported,
     SourceSyntax,
+    CompatibilityFailure,
+    CompatibilityLimit,
     UnresolvedCodec,
     DecodedLimit,
     Deadline,
@@ -161,6 +169,7 @@ struct Limits {
     report: usize,
     tokens: usize,
     depth: usize,
+    compatibility_working: usize,
 }
 
 impl Default for Limits {
@@ -172,6 +181,7 @@ impl Default for Limits {
             report: MAX_REPORT,
             tokens: MAX_TOKENS,
             depth: MAX_DEPTH,
+            compatibility_working: 32 * 1024 * 1024,
         }
     }
 }
@@ -185,6 +195,7 @@ enum Checkpoint {
     Token,
     PreParse,
     PostParse,
+    Compatibility,
     Semantic,
     PostConsume,
     PostDrop,
@@ -273,9 +284,14 @@ fn implementation_digest<F: FnMut(Checkpoint) -> bool>(cancel: &mut Cancellation
             "type_comments.rs",
             include_bytes!("python_ruff/type_comments.rs").as_slice(),
         ),
+        (
+            "failures.rs",
+            include_bytes!("python_ruff/failures.rs").as_slice(),
+        ),
     ]
     .into_iter()
     .chain(unicode15::identity_inputs().iter().copied())
+    .chain(codecs312::identity_inputs().iter().copied())
     {
         hash_frame(&mut hash, name, bytes, cancel);
     }
@@ -332,6 +348,7 @@ fn file_report(source: &Source) -> FileReport<'_> {
         syntax: RuffSyntax::NotParsed,
         diagnostic: Some(Diagnostic::Deadline),
         failure_reason: None,
+        failure: None,
         syntax_errors: 0,
         unsupported_version_errors: 0,
         error_counts_capped: false,
@@ -427,10 +444,14 @@ fn run_context<'a, F: FnMut(Checkpoint) -> bool>(
     for (index, source) in sources.iter().enumerate() {
         cancel.at(Checkpoint::Admission);
         let mut worst = file_report(source);
-        worst.admission = Admission::UnsupportedEncoding;
+        worst.admission = Admission::UnsupportedCompatibility;
         worst.syntax = RuffSyntax::SyntaxAndUnsupportedVersion;
         worst.diagnostic = Some(Diagnostic::EncodingCookieUnsupported);
-        worst.failure_reason = Some(source::BOM_CONFLICT);
+        worst.failure_reason = Some("invalid Unicode 15 named escape");
+        worst.failure = Some(failures::Failure {
+            exception: failures::Exception::UnicodeDecodeError,
+            line: usize::MAX,
+        });
         worst.syntax_errors = usize::MAX;
         worst.unsupported_version_errors = usize::MAX;
         worst.syntax_error_line = Some(LogicalLine(usize::MAX));
@@ -471,6 +492,7 @@ fn run_context<'a, F: FnMut(Checkpoint) -> bool>(
             file.syntax = RuffSyntax::NotParsed;
             file.diagnostic = Some(Diagnostic::Deadline);
             file.failure_reason = None;
+            file.failure = None;
             file.syntax_errors = 0;
             file.unsupported_version_errors = 0;
             file.error_counts_capped = false;
@@ -490,6 +512,25 @@ fn classify<F: FnMut(Checkpoint) -> bool>(
     cancel: &mut Cancellation<F>,
     consume: &mut ValidatedFileConsumer<'_>,
 ) {
+    // CPython's byte-input entry point rejects any original NUL before codec
+    // selection. This is distinct from the decoder, whose table oracle must be
+    // able to represent all defined code points, including U+0000.
+    for chunk in raw.chunks(256) {
+        if cancel.at(Checkpoint::Decode) {
+            return;
+        }
+        if chunk.contains(&0) {
+            file.admission = Admission::InvalidSource;
+            file.diagnostic = Some(Diagnostic::SourceSyntax);
+            file.failure_reason = Some(source::NULL_BYTE);
+            file.syntax_error_line = Some(LogicalLine(0));
+            file.failure = Some(failures::Failure {
+                exception: failures::Exception::SyntaxError,
+                line: 0,
+            });
+            return;
+        }
+    }
     // Cumulative reservations remain live until invocation end, even on failure.
     let decoded = match source::decode(
         raw,
@@ -512,6 +553,12 @@ fn classify<F: FnMut(Checkpoint) -> bool>(
                     file.diagnostic = Some(Diagnostic::SourceSyntax);
                     file.failure_reason = Some(reason);
                     file.syntax_error_line = Some(LogicalLine(line));
+                    if source::certified_syntax(error) {
+                        file.failure = Some(failures::Failure {
+                            exception: failures::Exception::SyntaxError,
+                            line,
+                        });
+                    }
                 }
                 source::Error::UnsupportedCodec | source::Error::UnresolvedCodec => {
                     file.admission = Admission::UnsupportedEncoding;
@@ -529,7 +576,7 @@ fn classify<F: FnMut(Checkpoint) -> bool>(
     };
     debug_assert_eq!(
         decoded.allocation_bytes == 0,
-        decoded.encoding == source::Encoding::Utf8
+        matches!(decoded.text, std::borrow::Cow::Borrowed(_))
     );
     let text = decoded.text.as_ref();
     let bytes = text.as_bytes();
@@ -565,7 +612,45 @@ fn classify<F: FnMut(Checkpoint) -> bool>(
         (true, false) => RuffSyntax::UnsupportedVersion,
         (false, false) => RuffSyntax::SyntaxAndUnsupportedVersion,
     };
-    if errors.is_empty() && unsupported.is_empty() && !cancel.at(Checkpoint::Semantic) {
+    // Token-only certificates do not consume even the recovery AST. Every Ruff
+    // diagnostic channel remains authoritative for rejecting semantic callbacks.
+    // Temporary compatibility storage is charged before allocation and dropped
+    // inside inspect; it never escapes into the borrowed AST consumer.
+    let mut working = 0usize;
+    let inspection = failures::inspect(
+        text,
+        &parsed,
+        &mut |bytes| {
+            working = working
+                .checked_add(bytes)
+                .filter(|&total| total <= limits.compatibility_working)
+                .ok_or(failures::Error::ResourceLimit)?;
+            Ok(())
+        },
+        &mut || cancel.at(Checkpoint::Compatibility),
+    );
+    match inspection {
+        Ok(Some(detected)) => {
+            file.admission = if detected.failure.is_some() {
+                Admission::InvalidSource
+            } else {
+                Admission::UnsupportedCompatibility
+            };
+            file.diagnostic = Some(Diagnostic::CompatibilityFailure);
+            file.failure_reason = Some(detected.reason);
+            file.failure = detected.failure;
+        }
+        Ok(None) => {}
+        Err(_) => {
+            file.admission = Admission::ResourceLimit;
+            file.diagnostic = Some(Diagnostic::CompatibilityLimit);
+        }
+    }
+    if file.admission == Admission::Admitted
+        && errors.is_empty()
+        && unsupported.is_empty()
+        && !cancel.at(Checkpoint::Semantic)
+    {
         consume(text, &parsed, &mut || cancel.at(Checkpoint::Semantic));
         cancel.at(Checkpoint::PostConsume);
     }
@@ -800,15 +885,151 @@ mod tests {
     }
 
     #[test]
-    fn errors_in_either_channel_reject_without_facts_or_source_diagnostics() {
-        for text in [
-            "f(x=1, 2)\n",
-            "f(x for x in xs, 1)\n",
-            "def f(:\n",
-            "x=\0\n",
+    fn nested_fstring_pattern_starts_are_ast_only_without_recovery() {
+        let patterns = [
+            "Record(f'{first()}')",
+            "Record(name, f'{later()}')",
+            "Record(left=f'{keyword()}')",
+            "[f'{first()}', f'{later()}']",
+            "(f'{first()}', f'{later()}')",
+            "[name, f'{later()}', *rest]",
+            "Record([f'{nested()}'], left=f'{keyword()}')",
+        ];
+        for pattern in patterns {
+            let text = format!("match subject:\n    case {pattern}: body()\n");
+            for constructor in [
+                ParseOptions::from(Mode::Module),
+                ParseOptions::from(ruff_python_ast::PySourceType::Python),
+            ] {
+                let parsed = parse_unchecked(
+                    &text,
+                    constructor
+                        .with_target_version(PythonVersion::PY312)
+                        .with_ast_only(true),
+                );
+                assert!(parsed.errors().is_empty(), "{text}: {:?}", parsed.errors());
+                assert!(parsed.unsupported_syntax_errors().is_empty());
+            }
+            let inputs = [source(&text)];
+            let mut callbacks = 0;
+            let report = run_consumer(&inputs, Limits::default(), |_| false, &mut |_, _, _, _| {
+                callbacks += 1
+            })
+            .unwrap();
+            assert_eq!(callbacks, 1, "{text}");
+            assert_eq!(report.files[0].admission, Admission::Admitted);
+        }
+        // These entry forms were rejected by the preserved default-false
+        // predicate. The option changes no shared token set or default mode.
+        for pattern in [
+            "Record(f'{first()}')",
+            "[name, f'{later()}']",
+            "(name, f'{later()}')",
         ] {
+            let text = format!("match subject:\n    case {pattern}: pass\n");
+            for constructor in [
+                ParseOptions::from(Mode::Module),
+                ParseOptions::from(ruff_python_ast::PySourceType::Python),
+            ] {
+                let parsed =
+                    parse_unchecked(&text, constructor.with_target_version(PythonVersion::PY312));
+                assert!(!parsed.errors().is_empty(), "{text}");
+            }
+        }
+        // First elements are parsed directly upstream; preserve that pre-existing
+        // acceptance rather than imposing compiler semantics in the default mode.
+        for pattern in ["[f'{first()}']", "(f'{first()}',)"] {
+            let text = format!("match subject:\n    case {pattern}: pass\n");
+            for ast_only in [false, true] {
+                for constructor in [
+                    ParseOptions::from(Mode::Module),
+                    ParseOptions::from(ruff_python_ast::PySourceType::Python),
+                ] {
+                    let parsed = parse_unchecked(
+                        &text,
+                        constructor
+                            .with_target_version(PythonVersion::PY312)
+                            .with_ast_only(ast_only),
+                    );
+                    assert!(parsed.errors().is_empty(), "{text}");
+                    assert!(parsed.unsupported_syntax_errors().is_empty());
+                }
+            }
+        }
+        for pattern in [
+            "Record(f'{value()}' other)",
+            "[f'{value()}' other]",
+            "Record(left=)",
+            "[f'{value()}', **rest]",
+        ] {
+            let inputs = [source(format!(
+                "match subject:\n    case {pattern}: pass\n"
+            ))];
+            let report = run_consumer(&inputs, Limits::default(), |_| false, &mut |_, _, _, _| {
+                panic!("malformed pattern callback: {pattern}")
+            })
+            .unwrap();
+            assert_eq!(report.files[0].syntax, RuffSyntax::StructuredSyntax);
+        }
+        // Independent syntax correction: an arbitrary token before ']' is not
+        // an optional comma. Reject missing separators in both parser modes.
+        for pattern in ["[1 other]", "[first _]", "[f'{value()}' other]"] {
+            let text = format!("match subject:\n    case {pattern}: pass\n");
+            for ast_only in [false, true] {
+                for constructor in [
+                    ParseOptions::from(Mode::Module),
+                    ParseOptions::from(ruff_python_ast::PySourceType::Python),
+                ] {
+                    let parsed = parse_unchecked(
+                        &text,
+                        constructor
+                            .with_target_version(PythonVersion::PY312)
+                            .with_ast_only(ast_only),
+                    );
+                    assert!(!parsed.errors().is_empty(), "{text}");
+                }
+            }
+        }
+        for pattern in [
+            "[first]",
+            "[first,]",
+            "[first, other]",
+            "(first,)",
+            "(first, other)",
+        ] {
+            let text = format!("match subject:\n    case {pattern}: pass\n");
+            for ast_only in [false, true] {
+                let parsed = parse_unchecked(
+                    &text,
+                    ParseOptions::from(Mode::Module)
+                        .with_target_version(PythonVersion::PY312)
+                        .with_ast_only(ast_only),
+                );
+                assert!(parsed.errors().is_empty(), "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn errors_in_either_channel_reject_without_facts_or_source_diagnostics() {
+        for text in ["f(x=1, 2)\n", "f(x for x in xs, 1)\n", "def f(:\n"] {
             assert_eq!(syntax(text), RuffSyntax::StructuredSyntax, "{text:?}");
         }
+        let inputs = [source("x=\0\n")];
+        let report = run_consumer(&inputs, Limits::default(), |_| false, &mut |_, _, _, _| {
+            panic!("NUL source must not reach a validated callback");
+        })
+        .unwrap();
+        assert_eq!(report.files[0].admission, Admission::InvalidSource);
+        assert_eq!(report.files[0].syntax, RuffSyntax::NotParsed);
+        assert_eq!(report.files[0].failure_reason, Some(source::NULL_BYTE));
+        assert_eq!(
+            report.files[0].failure,
+            Some(failures::Failure {
+                exception: failures::Exception::SyntaxError,
+                line: 0,
+            })
+        );
         let text = "type Alias[T = int] = T\n";
         let parsed = parse_unchecked(text, options());
         assert!(parsed.errors().is_empty());
@@ -1052,6 +1273,7 @@ mod tests {
             Checkpoint::Token,
             Checkpoint::PreParse,
             Checkpoint::PostParse,
+            Checkpoint::Compatibility,
             Checkpoint::Output,
             Checkpoint::Final,
         ] {

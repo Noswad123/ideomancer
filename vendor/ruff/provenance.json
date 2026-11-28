@@ -5,8 +5,8 @@
       "sha256": "3209c0b7fb7257c05b16433728c1e974bac40000fef171b8e9e89f095623c954"
     },
     "README.md": {
-      "bytes": 5338,
-      "sha256": "475a57057ca9a7f42c28070019ebb3d6452880ff426143ba099b80bef117da57"
+      "bytes": 6123,
+      "sha256": "c59d8f6859275a5ad4be7855cc5b4796e02a6975686eac023a1d426990fde300"
     },
     "crates/ruff_python_ast/Cargo.toml": {
       "bytes": 972,
@@ -165,8 +165,8 @@
       "sha256": "9aae4bfecf678023dc9bb49159d96318ec956f208d4e72e9b54e4a8e728ae1cf"
     },
     "crates/ruff_python_parser/src/parser/pattern.rs": {
-      "bytes": 29616,
-      "sha256": "61c118ac81260df98fa396741c99cc184a16c009b3c30c2ca19aeab4599ee5c1"
+      "bytes": 29750,
+      "sha256": "4b12b54bad12cccd9f58b5ed99ef7f5845dd868b9358b60c7d1368694851b1f8"
     },
     "crates/ruff_python_parser/src/parser/progress.rs": {
       "bytes": 1454,
@@ -305,8 +305,8 @@
       "sha256": "f858d5fab15f87699a92876e78d7699a92bdb116b57bf64bf6778c374b5cb0fe"
     },
     "patches/ast-only-policy.patch": {
-      "bytes": 2183,
-      "sha256": "c17aba53c8f30e350d14347af4d4f604f6869666cb112bfc0adbf6c348213e9e"
+      "bytes": 2672,
+      "sha256": "e79a66530f58f63371c0423f5f0469ff82f9b0193f57b6ba8672c3c33aa4e90e"
     },
     "upstream/Cargo.lock": {
       "bytes": 114898,
@@ -348,7 +348,7 @@
     },
     "crates/ruff_python_parser/src/parser/pattern.rs": {
       "original_sha256": "cc00902680f518dc8d59375039a82f033cd761417e756b2adbc298fef40aa885",
-      "patched_sha256": "61c118ac81260df98fa396741c99cc184a16c009b3c30c2ca19aeab4599ee5c1"
+      "patched_sha256": "4b12b54bad12cccd9f58b5ed99ef7f5845dd868b9358b60c7d1368694851b1f8"
     },
     "crates/ruff_python_parser/src/parser/statement.rs": {
       "original_sha256": "1a5056abbb77d103d4f4ee72d42cf9a4693e0959154b5dae065aa246b2db6d7a",

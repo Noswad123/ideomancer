@@ -103,7 +103,7 @@ fn integrated_g4_candidates_are_admitted_without_payload_leaks() {
         );
         assert_eq!(report.files[0].failure_line, None);
         assert_eq!(report.files[0].sha256, crate::analysis::hash(&input.bytes));
-        assert_eq!(report.identity.policy, "python-ruff-private-facts-4");
+        assert_eq!(report.identity.policy, "python-ruff-private-facts-7");
         assert_eq!(report.cpython_compatibility, CompatibilityStatus::Pending);
         assert!(!serde_json::to_string(&report)
             .unwrap()
@@ -240,7 +240,7 @@ fn integrated_decoder_taxonomy_does_not_invent_codec_syntax_errors() {
             "unresolved codec membership",
         ),
         (
-            b"# coding: cp1252\ncall()\n".as_slice(),
+            b"# coding: shift_jis\ncall()\n".as_slice(),
             FactStatus::UnsupportedEncoding,
             None,
             "unsupported codec",

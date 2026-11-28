@@ -125,13 +125,51 @@ guidance for coding agents, not an interpretation prompt for analyzed applicatio
 The maintained Ruff 0.12.0 snapshot at
 `87f0feb21a1af67195bebf94d811770393f9f447` is a private syntax frontend, not a
 production fact backend. It now also has private generic fact candidate policy
-`python-ruff-private-facts-4`, with syntax policy
-`python-ruff-private-2-py312-versioned-compatibility`; facts-1 through facts-3 remain
+`python-ruff-private-facts-7`, with syntax policy
+`python-ruff-private-5-py312-visitor-patterns`; facts-1 through facts-6 remain
 historical cross-family checkpoints, not the current exclusion list. CPython compatibility remains Pending. Production
 `python-static-8-generic-facts`, the trusted Python >=3.12 AST helper, public API,
 evidence, CLI and default are unchanged. The same five local crates, dependency
-pins and Git delivery with `publish = false` remain; the maintained vendor patch
-now touches four source files. No public migration is approved by this batch.
+pins and Git delivery with `publish = false` remain; this batch updates the existing
+four-source-file vendor patch closure. No public migration is approved.
+
+**Current direction:** the user explicitly selected contract-preserving full
+replacement and authorized bounded F0 byte-aware Ruff feasibility/version research.
+Read `docs/python-native-replacement-feasibility.md` (main-owned ADR) and the F0
+ledger in `docs/python-analysis.md`. **F0 investigation is complete**; source-audit
+**conditional GO** is not an
+implemented/compiled byte frontend. The proposed byte-backed lexer plus narrow
+checked source views retains Ruff grammar, but is not a thin adapter: concrete
+lexer lookahead/rewind/re-lex, `Chars`/`&str` and spanning debug `String` ranges
+imply expanded fork maintenance and possible AST/API changes beyond four files.
+F1/F2 staged prototypes require separate bounded approval; F0 grants no expanded
+production vendor patch, source repair, tool installation, public selectors or cutover.
+
+Immutable full-bundle profiles, exact patch membership and a release support window
+are **proposed**, requiring product approval before finite-policy narrowing or
+native wire/default changes. Production follows the selected interpreter's grammar,
+stdlib, actual version token and snapshot, dynamically >=3.12 and not CPython-only;
+fixed profiles cannot preserve all future/arbitrary behavior. Legacy
+`Toolchain::Python { python }` keeps the helper; no native probe/fallback, fake
+`pythonVersion`, nearest profile or old-save upgrade. G2/G3 remain privately closed;
+G4 byte proof, version policy and other compatibility gates remain open.
+
+The read-only reference checker has 219 named inputs (107 accepted / 112 failures)
+and 53 AST-attribute control relationships, including admitted debug f-strings with
+malformed comment bytes and comment-free debug constants. This is not native parity.
+F0 validation passed: 219 expected outcomes/AST calls, 20 debug cases; isolated
+byte **23 passed**, no skips. Discovery **286 tests: 273 passed / 13 isolation
+skips**; isolated byte/visitor/codec **23 / 43 / 24 passed**, no skips, covering all
+286 unique tests across lanes. Source **256 paths**, unchanged vendor
+**85/65/1,882,473 bytes** and Git whitespace checks passed. Independent architecture
+review found no blocking correction; F1 typed scalar/error/EOF, lookahead/rewind and
+F2 BOM-coordinate anchors remain future proof obligations in the ADR.
+No Rust/consumer rerun was needed for scripts/docs/CI-only F0; no native-engine or
+vendor change. Helper **`already_clean`**, no fresh cache removal needed; the unique
+owned `TMPDIR` run was cleaned with none left. Final post-doc verification uses only
+pure-Python source/helper and Git checks, no rebuild. Facts-7 validation/cleanup
+below is historical; preserve uncommitted work at HEAD `523cd7b`, profiles, code/data
+and runtime policy.
 
 ### API / Interfaces
 
@@ -148,15 +186,33 @@ Generic `CallObservation` owns an optional preceding fact with an ASCII payload;
 shared `Projection` has no framework fields. The old CST collector still supplies
 `None` and retains its original admission rules.
 
+Private optional `Failure` certificates carry an exception enum and helper line;
+their formatter is exactly `<Class> at line <N>; source not analyzed`.
+`CandidateFile.failure` is present only when certified; legacy `failure_line` may
+instead be a physical decoder/parser location and is not itself a certificate.
+`FactStatus::ParseFailure` covers certified `UnicodeDecodeError`, `SyntaxError`
+covers syntax certificates but also legacy uncertified contextual errors.
+Contextual type-comment `Error::Syntax` keeps its status/line and `failure: None`:
+placement/line oracles do not prove every concrete CPython exception subclass.
+The shared inspector and closed source-failure whitelist supply certificates;
+arbitrary syntax errors and physical UTF-8 lines do not. `IndentationError`, `TabError` and `ValueError` enum
+variants are vocabulary only, not implemented parity. The report's diagnostics
+remain semantic warnings; there is no new public `parse_failure` emission.
+
 ### Data Flow
 
 Captured bytes pass existing input/lexical gates, then one Ruff parse with explicit
-PY312 and `with_ast_only(true)`. Both parse and unsupported-version diagnostics must
-be empty before a callback consumes the validated borrowed AST. No reparse or AST
-escape is allowed. Hash original bytes (including BOM/cookies); all lexer/parser/
+PY312 and `with_ast_only(true)`. After that parse, shared `failures::inspect` uses
+tokens/source spellings/diagnostic ranges only, never AST access, including recovery
+ASTs. Both diagnostic channels must be empty **and** shared compatibility admission
+must succeed before a callback consumes the validated borrowed AST. Classification
+must inspect `Admission`, not only `RuffSyntax::AcceptedByRuff`. No diagnostic waiver,
+reparse, source rewrite or AST escape is allowed. Hash original bytes (including
+BOM/cookies); all lexer/parser/
 literal/span operations use the same decoded UTF-8 view. Original limits remain
-1 MiB/file and 16 MiB/run; decoded limits are 2 MiB/file and 32 MiB/run. The fact
-lane gates raw identifiers against static Unicode-15 XID membership before using
+1 MiB/file and 16 MiB/run; decoded limits are 2 MiB/file and 32 MiB/run. Shared
+frontend admission gates raw identifiers against static Unicode-15 XID membership
+before using
 Ruff's whole-name NFKC, never compiler/latest-Unicode properties. A separately
 accounted contextual type-comment token/statement prepass corrects ranges before
 fact lines/IDs, without parsing payloads or rewalking expressions. Bounded
@@ -169,7 +225,7 @@ bound calls replay after body/return annotations; class bounds replay after the 
 Observations stay unresolved until replay, so body imports affect resolution;
 constraints use tuple bounds. The observation-only header helper avoids rendering
 an unused root shape. Match traversal is subject, pattern, guard, body; mapping
-patterns visit all keys before all patterns. Type aliases visit name, type parameters,
+  patterns visit all keys before all patterns. Type aliases visit name, type parameters,
 value under the same owner; reusing an import alias name does not invalidate it.
 No pattern/capture/type-alias/type-parameter facts, bindings, scopes or alias-map
 mutations are invented. File emission is
@@ -179,6 +235,13 @@ Existing node/edge accounting, including class-pattern wrappers, remains in forc
 An `include_router` preceding fact emits at replay immediately before its call,
 using the replay owner; captured scopes/nodes are not retained. A token keyword
 index corrects Ruff's decorator-inclusive declaration ranges, including async defs.
+The raw Unicode-15, decimal-4300 and named-escape guards now live in the shared
+frontend rather than fact indexing. Inspector frame stacks are capped at 256;
+temporary storage is precharged under a 32 MiB compatibility cap and cancellation
+uses `Checkpoint::Compatibility`. Cumulative original/decoded reservations remain
+unchanged. Unproved mixed-family/actual-type-comment precedence rejects as
+`UnsupportedSyntax` without a certificate and with zero validated callbacks;
+arbitrary Ruff errors and unsupported versions remain uncertified rejections.
 
 ### Edge Cases
 
@@ -213,6 +276,9 @@ index corrects Ruff's decorator-inclusive declaration ranges, including async de
   that rule; misplaced actual type comments still fail contextual syntax checks.
   Nonzero decimal integers over 4300 digits exclude underscores
   from the count; all-zero, base-prefixed, float and imaginary forms are exempt.
+  Exceeding this bound now has a proved syntax failure, not an unsupported outcome.
+  The 4300 limit follows the bounded CPython 3.12.11 oracle, not a narrowing of
+  production's Python >=3.12 contract.
 - Source-backed `TextPart` decoding admits ordinary/u/raw/triple/adjacent text,
   escapes and newline normalization, preserving surrogates as Python code points.
   Do not use Ruff's decoded strings: they replace lone surrogates. Routes retain at
@@ -226,7 +292,7 @@ index corrects Ruff's decorator-inclusive declaration ranges, including async de
   preimages: dotless i, long s and the two ST ligatures. Exhaustive trusted CPython
   3.12.11/Unicode 15 checks cover all `0x110000` code points, including no empty
   uppercase mappings; method recognition does not need general uppercase tables.
-- Decode UTF-8 by default, UTF-8 BOM/eligible cookies and finite Latin-1 aliases;
+- The historical frontend-3 profile decoded UTF-8 by default, BOM/eligible cookies and finite Latin-1 aliases;
   code on the first line blocks a second-line cookie, and a BOM/non-UTF-8 cookie
   conflict is syntax failure. Known other codecs remain unsupported, unknown
   registry membership unresolved, not a fabricated syntax error. Strict UTF-8
@@ -235,14 +301,23 @@ index corrects Ruff's decorator-inclusive declaration ranges, including async de
   Four explicit known differences cover two multiline locations and two malformed
   comment-byte cases CPython admits. Original-byte hashes never use the decoded
   Latin-1 buffer. Full encoding/failure closure remains open.
-- Invalid named escapes in ordinary strings report that token's opening line,
+- Malformed active hex, `\u`, `\U` and named escapes in ordinary strings report
+  that token's opening line,
   including adjacent literals. F-string text errors are deferred to the matching
   closing token, so nested ordinary/f-string failures take precedence over outer
-  invalid text. Format-spec exception taxonomy remains Pending G4.
+  invalid text. Format-spec decoding failures certify `UnicodeDecodeError` at line
+  zero even in raw formats. Format-field depth is three (the fourth nested
+  replacement rejects); nested f-strings reset depth. These finite checks are not
+  a compiler-semantic validator or complete failure parity.
 - Class patterns such as `Record()`, `FastAPI()` and `APIRouter()` are syntax, not
-  constructor calls. The vendor pattern patch permits bare f-string mapping keys
-  only with `ast_only=true`; default-false parsing retains rejection. This is a
-  parser policy, not recovery or a diagnostic waiver/source rewrite.
+  constructor calls. The vendor pattern patch adds bare f-string mapping and
+  pattern-start admission only with `ast_only=true`; both constructors still
+  default to false. Preserve valid default forms, including upstream singleton
+  f-string first-element acceptance. An independent mandatory-comma correction
+  rejects malformed sequences previously accepted erroneously in **both modes**,
+  including default mode. State this exception honestly; do not claim all default
+  behavior is unchanged. This is grammar policy, not recovery, a diagnostic waiver
+  or source rewrite. Malformed controls require zero validated callbacks.
 - The vendor statement patch adds TypeVarTuple/ParamSpec default version guards
   matching TypeVar: all three produce PY312 version errors independently of
   `ast_only`; PY313 accepts defaults. Classification-only `parse_batch` remains
@@ -252,8 +327,198 @@ index corrects Ruff's decorator-inclusive declaration ranges, including async de
   bounds. Parsing and AST destruction are uninterruptible; cooperative accounting
   is not an RSS/stack sandbox or hard deadline. Complete Unicode/encoding/failure,
   resource and full G2–G6 closure remain open; PY312 alone proves no compatibility.
+- Standing architecture constraint (F0 investigation now authorized): malformed non-ASCII UTF-8 comment bytes admitted by CPython
+  cannot reach unchanged Ruff's `&str` interface without rewriting. Do not repair
+  source to force admission. F0's source audit does not authorize prototype or
+  production expansion; those need separate bounded approval. It does not authorize
+  narrowing production. Existing codec, type-comment and platform/resource gaps stay open.
 
 ### Example usage
+
+**Current frontend-5/facts-7 finite visitor gate:** review
+`docs/python-visitor-contract.json` and `docs/python-visitor-witnesses.json` with
+`scripts/check_python_visitor_contract.py`, `scripts/test_python_visitor_contract.py`
+and `src/analysis/python_parity/ruff_visitor_batch.rs`. The closed inventory has
+111 modern classes (108 Module-domain; three other roots outside scope), 188
+fields and 147 in-domain node-bearing fields: 130 obligations with case-unique
+observable call inputs and 17 structural population/neutral witnesses, **not 130
+independent proofs**. Ten field-order obligations establish distinguishable inputs,
+not output order. Require the separate complete helper/Ruff facts/IDs/diagnostics
+and raw unsorted replay oracle; sorted facts alone cannot prove order.
+
+Use installed trusted exact CPython 3.12.11, without provisioning:
+
+```sh
+python3.12 -I -S -B scripts/check_python_visitor_contract.py
+python3.12 -I -S -B scripts/test_python_visitor_contract.py
+```
+
+CI adds these isolated gates. The existing explicit Ruff gate selects the visitor
+oracle as well as all prior Ruff oracles; retain the reference/native gates too.
+Twenty cross-family witnesses cover markers, every argument annotation/default
+group, async/class/decorator/type-bound alias replay, multi-generator comprehensions,
+interleaved callee/star/keyword groups, optional children, f-strings and labelled
+hidden metadata beyond rendering caps. No visitor/normalizer rewrite, framework
+semantics, dependency or public API/default change is part of this batch.
+
+After both parser fixes, **108 Ruff tests passed, including 17 opt-in tests**.
+**344 prior + 20 new = 364** positives matched complete arrays/IDs/diagnostics/raw
+replay; all prior failure/Unicode/codec and **787-outcome contextual** oracles
+passed. Checker, all three visitor tests, both-constructor/both-mode pattern
+controls and **34 vendor script tests** passed. Product formatting and all-target
+Clippy **`--no-deps -- -D warnings`** passed. Scripts: **263 discovered, 257 passed,
+six isolation-required skips**; isolated visitor **43** and codec **24** passed
+without skips. Combined lanes cover **all 263 unique tests**, not 263
+discovery-lane passes. Updated vendor integrity and the **253-path** source check
+passed; data, dependencies and license terms are unchanged.
+
+The earlier singleton-sequence control now expects pre-existing singleton-first
+acceptance for false/true AST-only settings in both constructors. The predicate
+patch adds AST-only class-first/later-sequence admission, not singleton-first
+elements. The real missing-separator bug
+was fixed and controls pass in both modes/constructors with malformed zero-callback
+checks, not by weakening tests. Actual differences are narrow parser predicates/
+separators and proof files, **not a visitor/normalizer rewrite**. No further code
+changes are planned. Preservation passed **685 library tests / 191 ignored**, **18
+adapter + 8 engine**, and **165 reference + 3 native** opt-ins. With **17 Ruff
+opt-ins**, **185 explicit gates passed**, including known-limit assertions—not all
+parity matches. **G2/G3 PRIVATE IMPLEMENTATION COMPLETE/CLOSED** for the current
+admitted Python 3.12 Module-AST lane. Current local macOS / Rust 1.89 delivery
+closeout passed: offline consumer fresh **105-package** lock, **one native TypeScript
+public-API test**, five contained Ruff crates, ABI **0.1.5** and source-hash rechecks.
+Its snapshot is
+`0e71afaa639a38f3ca0022726dc24bb24257eee8a01845ac7f36900fe4471f60`,
+not an actual Git revision or later-documentation byte attestation. Configured
+unique owned cache `TMPDIR` cleaned, none left. Guarded preflight: **zero blockers /
+zero protected outputs**, normal `debug`/`tmp` only. Cleanup removed
+**1,374,564,352 estimated allocated bytes (~1.28 GiB)**; target absent, follow-up
+`already_clean`, no Cargo afterward. No owned debug/test artifacts remain;
+`.ideomancer/` JS artifacts/global caches were untouched. Source **253**, vendor
+**85/65/1,882,473 bytes** and Git diff checks passed before final docs. Final
+source/Git/helper checks are read-only, no rebuild. Nothing staged, committed or
+pushed; HEAD is `523cd7b`. Local delivery passes are not hosted/platform or full
+production approval; facts-6 ~1.28 GiB cleanup receipts remain historical.
+
+Visitor-checkpoint source inventory: **253 paths** (+5); F0 adds three paths for
+**256**, verified by the F0 source gate. Vendor: **85 files / 65 sources /
+1,882,473 bytes**, same four patched files and 65-source pristine closure. Patch
+SHA-256: `e79a66530f58f63371c0423f5f0469ff82f9b0193f57b6ba8672c3c33aa4e90e`;
+provenance anchor: `b8246ec2c0911719ddd715f80dac504795c97f70ab828bd4375d18538c237ee0`.
+All facts-5/6 and current work remains uncommitted at actual HEAD `523cd7b`.
+
+The completed preservation checkpoint supports the bounded conclusion: “Private implementation
+complete for current admitted Python 3.12 Module-AST lane: closed class/field
+inventory + full-output/raw-replay coverage; not complete Python compatibility,
+G4 bytes/admission/failure/resource equivalence, or production cutover.” G4 version
+parity is also open; G5/G6 public integration/cutover is not approved. Do not label
+the named G2 visitor inventory or G3 metadata implementation in progress; local
+consumer/cleanup delivery closeout is also complete.
+
+**Prior checkpoint STOP (superseded for F0 authorization only):** “STOP parity
+expansion after this bounded gate.” The user explicitly selected full replacement
+and authorized the recommended bounded feasibility/version investigation; read the
+ADR and current direction above. Further F1/F2 prototypes and production changes
+still need separate approval. Contextual for/with/class suite
+type-comment errors can be `IndentationError`; legacy `Error::Syntax` fields
+intentionally keep `failure: None`. Never invent placeholder exception certificates.
+Another PEG parser alone cannot close arbitrary type-comment locations/classes;
+this is G4, not new visitor work. Never silently narrow
+production or infer G4 implementation/G5/cutover approval from F0. See the visitor and F0 ledgers in
+`docs/python-analysis.md` for completed local closeout and open G4–G6 decisions.
+
+**Historical frontend-4/facts-6 contract and validation follow.** These receipts do
+not establish current acceptance or cache state. That batch decodes natively without a Python
+runtime. The pinned exact CPython 3.12.11 / Unicode 15 profile has 70 literal
+256-code-point tables (17,920 positions); 62 ASCII-identity tables, including the
+Latin-1 family table, are admitted alongside strict ASCII and existing UTF-8/
+Latin-1 fast paths. Seven EBCDIC tables and cp864 are excluded. Of 23 tables with
+undefined bytes, 21 are admitted; undefined positions still fail strict decoding.
+Maximum defined UTF-8 expansion is three. The 445 combined names preserve all
+326 exact stdlib aliases, including the unreachable `csHPRoman8` typo.
+
+Keep historical `normal_name` before the BOM gate before pinned registry lookup;
+dot fallback is alias-only. UTF-8-SIG equivalence is source-context-only after
+that gate, not general codec identity. Unknown names remain unresolved; known
+unsupported multibyte/stateful codecs and eight excluded tables have no exact
+failure certificate. Non-text/undefined codecs, ASCII high bytes, undefined table
+positions, BOM conflicts and registry-alias UTF-8 decode failures use the closed
+SyntaxError-at-0 whitelist. Root raw-NUL rejection precedes decoding/cookies;
+generic `source::decode` preserves NUL for data-oracle use.
+
+Validate/count before exact once-only successful reservation and allocation;
+ASCII may borrow for any admitted encoding. Test borrowing via `Cow::Borrowed`,
+not encoding identity. All ranges use the same unchanged decoded UTF-8 view;
+hash original bytes, never rewrite newlines or grammar. Existing original
+1 MiB/file / 16 MiB/run and decoded 2 MiB/file / 32 MiB/run caps remain;
+three-byte expansion can reach ResourceLimit before parsing. The UTF-8-comment/
+`&str` architecture stop, contextual type-comment exclusions and complete failure/
+resource gaps remain open. Public production Python >=3.12 is unchanged.
+
+For data maintenance, inspect `codecs312/PROVENANCE.md`, structural stateless
+decode/stream/incremental/getregentry audit and 123 installed stdlib source-file
+hashes together. These do not attest native binaries or prove byte-identical
+upstream source. Use exact trusted installed 3.12.11 / UCD 15 with `-I -S -B` for scripts
+`generate_python_codecs312.py --check`, `check_python_codecs312.py` and
+`test_python_codecs312.py`; generation is offline, without package installation/
+downloads. CI runs the isolated generator check, independent checker and codec
+suite with `-I -S -B`. These tool/oracle pins do not narrow production Python >=3.12.
+Code/data/scripts/manifest/
+provenance/NOTICES/LICENSE are fingerprinted. The Git source closure is 248 paths
+(11 additions to 237). Preserve the full PSF/historical license and all 71 module
+headers/legal mapping comments in NOTICES, alongside existing Unicode notices;
+raw stdlib modules are not embedded and derived data are not MIT-relicensed.
+
+**Historical facts-6 validation:** all **104 Ruff tests passed, including 16 opt-in tests**,
+after the initial 17 focused codec passes. Codec oracles cover 15,872 table positions + 256 ASCII,
+63 mixed streams, 112 AST-location comparisons, 112 complete encoded positive
+fact/raw-order cases, 84 certified helper SyntaxError-at-0 negatives and 10
+uncertified controls (eight helper errors, two helper admissions). All **232
+preserved + 112 new = 344** complete positive fact/raw-order cases passed, plus
+32 prior negatives, 64 actual-helper cases (53 certified, six ambiguous, five
+parser-only), 356 module failure outcomes, 787 type-comment outcomes and Unicode/
+source/HTTP gates. Product package formatting, all-target Clippy
+(`--no-deps -- -D warnings`), source integrity at 248 paths and vendor integrity
+at 85 files / 65 source files / 1,881,065 bytes passed.
+
+Global script discovery: **216 tests, 211 passed, five skipped** for isolated
+profile requirements. Explicit `-I -S -B` codec suite: **24 passed, none skipped**;
+generator check and independent checker (`license_verified: true`) passed with
+those flags, also used in CI. Combined lanes cover all 216 unique script tests,
+not 216 default-lane passes.
+
+The test `Result` alias compile issue was fixed before the 17 focused passes.
+A later root-NUL assertion was corrected from Ruff `StructuredSyntax` to explicit
+`InvalidSource` / `NotParsed`, a SyntaxError-at-0 certificate and zero validated
+callbacks: this checks intended earlier rejection, not a weakened test. Review
+found only a stale facts-5 policy assertion, now facts-6; both full 104-Ruff and
+682-library suites passed after corrections with no engine/codec bug or blocker.
+Broader gates passed **682 library tests / 190 ignored**, **18 adapter + 8
+engine**, and **165 reference + 3 native** explicit opt-in tests. With 16 Ruff
+opt-ins, **184 explicit tests** passed, including known-limit assertions—not all
+parity matches. Original-hash module baselines, source guards and baseline counts
+remain checked. No further code changes are planned.
+Local macOS / Rust 1.89 results are not hosted validation, which remains unknown.
+Product formatting passed before the current offline consumer, which passed
+fresh 105-package lock resolution and one native TypeScript public-API test,
+with five Ruff crates contained, ABI 0.1.5 and source hashes rechecked. The tested
+content snapshot is
+`74e8525de0cb80679435734c0c0ab6f374c2c6818f2008bd67a0fb5064799dc1`,
+not an actual Git revision or later-documentation attestation. The 248-path source
+check matched that snapshot before final documentation edits; Git whitespace
+checks passed.
+
+Its unique owned cache `TMPDIR` was cleaned with no retained scratch. Guarded
+preflight found zero active blockers/protected outputs, normal `debug`/`tmp` only;
+apply removed **1,372,758,016 estimated allocated bytes (~1.28 GiB)**. `target/`
+was absent and follow-up reported `already_clean`; no Cargo ran afterward. The
+owned cache parent was empty, no debugging/test artifacts were retained, and
+`.ideomancer/` JS artifacts/global caches were untouched. Final source/Git/cache
+verification is read-only, without rebuilding. All codec-family and prior facts-5
+work remains uncommitted at actual HEAD `523cd7b`; the facts-5 ~1.27 GiB cleanup
+is historical only, separate from the current ~1.28 GiB removal.
+
+**Historical checkpoint examples and evidence follow.** Their results and cache
+receipts do not establish frontend-4/facts-6 acceptance or current cache state.
 
 For developer validation, use the existing `--lib analysis::python_ruff -- --ignored`
 oracle command above with a trusted Python 3.12 interpreter. Keep the existing active
@@ -273,7 +538,7 @@ and Clippy `-D warnings` passed after the `StringLiteralFlags` API fix; the 19
 unmodified vendor compiler warnings remain outside product `--no-deps` Clippy policy.
 These results describe facts-3 only, not the current batch's validation.
 
-**Current facts-4 evidence:** all **75 Ruff tests**, including **nine opt-in tests**,
+**Historical facts-4 evidence:** all **75 Ruff tests**, including **nine opt-in tests**,
 passed. All **117 preserved + 71 new = 188** complete positive facts/IDs/diagnostics/
 raw-order cases and **32 negative matching-line cases** passed (16 new multiline
 named-escape cases). The **787-case contextual oracle** passed its asserted
@@ -290,7 +555,7 @@ at 200 seconds; processes were checked stopped and exact owned temporary data
 removed. Its ten-minute rerun completed all tests before a single Clippy
 `nonminimal_bool` finding in the parameter lookahead; no test failed.
 
-**Final reruns passed:** after the coordinator's equivalent boolean simplification,
+**Historical facts-4 final reruns passed:** after the equivalent boolean simplification,
 product formatting, all eight type-comment tests (including the 787-case oracle)
 and all-target product Clippy with `--no-deps -- -D warnings` passed. The offline
 exported-checkout consumer passed fresh 105-package resolution and one full
@@ -298,11 +563,53 @@ independent native TypeScript public-API test, including five-crate containment,
 ABI 0.1.5 and source-hash rechecks. Its explicitly configured unique owned scratch
 was cleaned. The tested snapshot is not an actual Git commit and predates final
 documentation edits; see the Python ledger for its hash and guarded cache-cleanup
-record. Historical facts-3 passes cannot satisfy current-tree gates; these results
+record. These historical facts-4 results cannot satisfy current-tree gates and
 are not production cutover approval.
 
-The current source inventory is **235 paths**. Vendor provenance is **85 files /
-65 source files / 1,881,065 bytes**, with the four-source-file patch and reversal
+**Historical prior facts-5 validation:** the broad run passed **670 library tests / 186
+ignored**, **18 adapter + 8 engine** tests and the corrected policy assertion.
+The initial focused run had 87 passes and one stale facts-4 assertion among 88 tests;
+that assertion was corrected to facts-5. Explicit opt-in gates passed
+**165 reference + 3 native + 12 Ruff = 180** across initial/final runs, including known-difference
+assertions, not 180 parity matches. Scripts passed **192** tests; vendor integrity
+passed at **85 files / 65 source files / 1,881,065 bytes** and source integrity at
+**237 paths**. Broad product formatting and all-target Clippy passed.
+
+After the broad run, the conservative metadata fix stopped synthesizing syntax
+certificates for contextual type-comment errors. Final gates passed all **eight
+failure-batch tests** (including the new ordinary
+`contextual_locations_do_not_fabricate_exception_certificates` regression and
+64-helper/44-positive oracles), all **eight type-comment tests** (including 787
+outcomes), product formatting and all-target product Clippy. The broader count
+remains 670 plus one added regression passed focused, not a full 671-test run or
+a single full 89-test Ruff run. Final read-only review found no material P0–P3
+findings after the earlier precedence fix.
+
+Passing oracles cover 356 module outcomes (312 exact admission/certificates, 39
+ambiguous, five parser-only), 64 actual-helper failure cases (53 certified, six
+ambiguous, five parser-only), and 44 new + 188 preserved = 232 complete positive
+facts/IDs/diagnostics/raw-order cases. The 32 prior negatives, 787-case contextual
+oracle and exhaustive Unicode/source/HTTP checks passed. Original-hash module
+baselines, rollback without failed warnings and siblings in both orders passed.
+Do not call ambiguous/parser-only assertions parity. The facts-4 checkpoint was
+user-committed at `523cd7b`, observed clean before this batch; its 1.41 GiB cleanup
+is historical. That checkpoint's offline consumer passed fresh 105-package lock
+resolution and one native TypeScript public-API test, with all five Ruff crates
+contained, ABI 0.1.5 and source hashes rechecked. Its unique owned cache `TMPDIR`
+was automatically cleaned. Guarded helper preflight found zero active blockers
+and zero protected outputs, with only normal `debug`/`tmp` entries. Cleanup removed
+**1,363,083,264 estimated allocated bytes (~1.27 GiB)**; `target/` was absent and
+follow-up reported `already_clean`. No Cargo ran after cleanup. No debugging/test
+artifacts were retained; the owned cache parent was empty, and existing
+`.ideomancer/` JS outputs and global caches were untouched.
+
+Changes remain uncommitted at HEAD `523cd7b`. The tested consumer snapshot (hash in
+the Python ledger) is not a Git revision and does not attest later documentation
+bytes. Final 237-path inventory and Git whitespace checks passed; read-only helper
+verification reported `already_clean`, without running Cargo or rebuilding.
+
+That checkpoint's source inventory was **237 paths** (two new failure modules). Vendor
+provenance is **85 files / 65 source files / 1,881,065 bytes**, with the four-source-file patch and reversal
 anchors. The five local crates, manifests/dependency pins and Git-source delivery
 are unchanged. Unicode data/notices, generator/check scripts and manifest belong
 to the implementation fingerprint/source closure; never silently regenerate them
@@ -310,11 +617,19 @@ using a different Python/Unicode version.
 
 ### Related files
 
+- `src/analysis/python_ruff/{codecs312,source}.rs` and
+  `codecs312/{PROVENANCE.md,manifest.json,NOTICES.md,LICENSE.txt}`: codec boundary.
+- `scripts/{generate,check,test}_python_codecs312.py`,
+  `src/analysis/python_parity/ruff_codec_batch.rs`: isolated profile and encoded oracles.
+
 See `docs/python-analysis.md` for the completion ledger and historical Tree-sitter/
-Ruff probes; `src/analysis/python_ruff/{facts,expressions,metadata,literals,source,type_comments,unicode15}.rs`
+Ruff probes; `src/analysis/python_ruff/{failures,facts,expressions,metadata,literals,source,type_comments,unicode15}.rs`
 and `python_ruff/unicode15/PROVENANCE.md` for the candidate/data contract;
 `src/analysis/python_facts.rs` and `src/analysis/python_native/{projection,scalars}.rs`
 for shared primitives. Keep fixtures generic; consumer-private source/paths stay out.
+`src/analysis/python_parity/ruff_failure_batch.rs` checks actual-helper failure
+records, module baselines and sibling isolation; the separate ignored Ruff gate
+above selects it as well as the existing compatibility oracles.
 
 ## Finish the feature
 

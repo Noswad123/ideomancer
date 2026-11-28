@@ -1,6 +1,7 @@
 """Bounded integrity tests; TemporaryDirectory honors the caller's TMPDIR."""
 
 import copy
+import difflib
 import json
 import os
 from pathlib import Path
@@ -241,14 +242,61 @@ class RuffPolicyTests(unittest.TestCase):
                 with self.subTest(fixture=fixture, changed=changed):
                     self.validate_change(2, locus, changed + b"            // test_err " + fixture)
 
-    def test_mapping_entry_is_ast_only_and_fstring_only(self):
+    def test_pattern_entries_are_ast_only_and_fstring_only(self):
         gate = b"(self.options.ast_only && self.at(TokenKind::FStringStart))"
-        for changed in (b"self.at(TokenKind::FStringStart)",
-                        gate.replace(b"ast_only", b"fake_version_flag"),
-                        gate.replace(b"FStringStart", b"TStringStart"), b"false"):
-            with self.subTest(changed=changed):
-                self.validate_change(3, gate, changed)
+        for token_set in (b"PATTERN_START_SET", b"MAPPING_PATTERN_START_SET"):
+            locus = (b"        self.at_ts(" + token_set + b")\n"
+                     b"            || self.at_soft_keyword()\n"
+                     b"            || " + gate + b"\n")
+            self.assertEqual(self.sources[checker.POLICY_FILES[3]].count(locus), 1)
+            for changed in (b"self.at(TokenKind::FStringStart)",
+                            gate.replace(b"ast_only", b"fake_version_flag"),
+                            gate.replace(b"FStringStart", b"TStringStart"), b"false"):
+                with self.subTest(token_set=token_set, changed=changed):
+                    self.validate_change(3, locus, locus.replace(gate, changed))
         self.validate_change(3, b"let str = self.parse_strings();", b"let str = self.parse_expression();")
+
+    def test_reviewed_patch_restores_pristine_hashes(self):
+        pristine = json.loads((VENDOR / "provenance.json").read_bytes())["pristine_sources"]
+        self.assertEqual(len(self.originals), 4)
+        for name, source in self.originals.items():
+            with self.subTest(name=name):
+                self.assertEqual(len(source), pristine[name]["bytes"])
+                self.assertEqual(checker.digest(source), pristine[name]["sha256"])
+
+    def test_sequence_separator_check_is_unconditional_and_exact(self):
+        locus = (b"            self.at(parentheses.closing_kind())\n"
+                 b"                || (self.at(TokenKind::Comma) && self.peek() == parentheses.closing_kind())\n")
+        for changed in (
+            locus.replace(b"self.at(TokenKind::Comma) && ", b""),
+            locus.replace(b"self.at(TokenKind::Comma)", b"self.options.ast_only"),
+            locus.replace(b"self.at(TokenKind::Comma)", b"!self.options.ast_only || self.at(TokenKind::Comma)"),
+            locus.replace(b"TokenKind::Comma", b"TokenKind::Name"),
+            locus.replace(b"self.at(parentheses.closing_kind())", b"false"),
+        ):
+            with self.subTest(changed=changed):
+                self.validate_change(3, locus, changed)
+
+    def test_reviewed_patch_is_exact_zero_context_diff(self):
+        expected = "".join(
+            "".join(difflib.unified_diff(
+                self.originals[name].decode().splitlines(keepends=True),
+                self.sources[name].decode().splitlines(keepends=True),
+                fromfile=f"a/{name}", tofile=f"b/{name}", n=0))
+            for name in checker.POLICY_FILES
+        )
+        self.assertEqual((VENDOR / "patches/ast-only-policy.patch").read_text(), expected)
+
+    def test_pattern_patch_gate_and_offset_tampering(self):
+        patch = (VENDOR / "patches/ast-only-policy.patch").read_text()
+        for old, new in (("@@ -57 +57,3 @@", "@@ -57 +58,3 @@"),
+                         ("@@ -62 +64,3 @@", "@@ -62 +62,3 @@"),
+                         ("@@ -355 +359,2 @@", "@@ -355 +355,2 @@"),
+                         ("self.at(TokenKind::Comma) && ", ""),
+                         ("self.options.ast_only && ", "")):
+            self.assertIn(old, patch)
+            with self.subTest(old=old), self.assertRaises(checker.VendorError):
+                checker.reverse_policy_patch(patch.replace(old, new, 1), self.sources)
 
     def test_extra_source_edit_is_not_policy(self):
         for index in range(4):

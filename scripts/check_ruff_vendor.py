@@ -19,7 +19,7 @@ import tomllib
 COMMIT = "87f0feb21a1af67195bebf94d811770393f9f447"
 ARCHIVE_SHA256 = "e4613ad9fe6f7293510586649aab788e10610ab80fe9dd509ba7ac2364413631"
 LOCK_SHA256 = "ccc843838d16f203d18a3410dd120e72e750a89ee42164145ae9cbf181fb6f47"
-PROVENANCE_SHA256 = "50bd49e58b189782d00921ed6b2e6fb2229fe244cabfb6de3901cf08105205c4"
+PROVENANCE_SHA256 = "b8246ec2c0911719ddd715f80dac504795c97f70ab828bd4375d18538c237ee0"
 PRISTINE_SHA256 = "7e25402b858763700567914d71410161c80128b29605de3cdb29c8f03eafe44b"
 MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_TOTAL_BYTES = 4 * 1024 * 1024
@@ -296,12 +296,16 @@ def apply_policy(options, expression, statement, pattern):
             }
 
 """ + locus)
+    for token_set in (b"PATTERN_START_SET", b"MAPPING_PATTERN_START_SET"):
+        pattern = replace_once(pattern,
+                               b"        self.at_ts(" + token_set + b") || self.at_soft_keyword()\n",
+                               b"        self.at_ts(" + token_set + b")\n"
+                               b"            || self.at_soft_keyword()\n"
+                               b"            || (self.options.ast_only && self.at(TokenKind::FStringStart))\n")
     pattern = replace_once(pattern,
-                           b"        self.at_ts(MAPPING_PATTERN_START_SET) || self.at_soft_keyword()\n",
-                           b"""        self.at_ts(MAPPING_PATTERN_START_SET)
-            || self.at_soft_keyword()
-            || (self.options.ast_only && self.at(TokenKind::FStringStart))
-""")
+                           b"            self.at(parentheses.closing_kind()) || self.peek() == parentheses.closing_kind()\n",
+                           b"            self.at(parentheses.closing_kind())\n"
+                           b"                || (self.at(TokenKind::Comma) && self.peek() == parentheses.closing_kind())\n")
     return options, expression, statement, pattern
 
 

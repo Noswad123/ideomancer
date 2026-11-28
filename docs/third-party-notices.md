@@ -40,14 +40,66 @@ Git source; there is no separate fork/submodule or registry publication requirem
   here; preserve applicable notices for actual selected versions in binary bundles.
 
 There are 65 selected Rust source files in an 85-file vendor snapshot totaling
-1,881,065 bytes. Four upstream source files carry the reviewed policy patch:
+1,882,473 bytes. Four upstream source files carry the reviewed policy patch:
 duplicate call/class-header keyword validation can be omitted via an explicit
-AST-only option that defaults to false, bare f-string mapping keys are admitted
-only in that mode, and tuple/parameter-specification defaults receive the existing
-type-variable target-version guard. Adapted manifests disable optional features
+AST-only option that defaults to false, additional f-string mapping/pattern-start
+forms are admitted only in that mode, and tuple/parameter-specification defaults
+receive the existing type-variable target-version guard. Valid default-mode forms remain unchanged,
+including upstream singleton f-string first-element acceptance. An independent
+sequence-separator correction now requires an actual comma before closing-token
+lookahead in both modes; it deliberately rejects previously erroneously accepted
+malformed default-mode sequences. Adapted manifests disable optional features
 and upstream tests. The root lock merge adds five local and thirty registry packages
 while retaining prior product selections; the upstream lock is provenance, not the
 actual product closure. These facts do not constitute a whole-graph license audit.
+
+Frontend-5/facts-7 retains the same four-file patch and 65-source pristine closure.
+Current policy-patch SHA-256 is
+`e79a66530f58f63371c0423f5f0469ff82f9b0193f57b6ba8672c3c33aa4e90e`;
+provenance anchor is
+`b8246ec2c0911719ddd715f80dac504795c97f70ab828bd4375d18538c237ee0`.
+The source inventory is 253 paths (+5 visitor contract/check/oracle files).
+Dependencies, Unicode/codec data and notice/license terms are unchanged. After both
+parser fixes, **108 Ruff tests (17 opt-in)** and **364 complete positive
+array/ID/diagnostic/raw-replay cases** passed (344 preserved + 20 new), along with
+prior failure/Unicode/codec and 787-outcome contextual oracles. Product formatting,
+all-target Clippy (`--no-deps -- -D warnings`), 34 vendor script tests, updated
+vendor integrity and the 253-path source check passed. Scripts: **263 discovered,
+257 passed, six isolation-required skips**; isolated visitor **43** and codec **24**
+passed without skips, covering all **263 unique tests across lanes**, not 263
+discovery-lane passes. Preservation passed **685 library tests (191 ignored)**,
+**18 adapter + 8 engine** and **165 reference + 3 native** opt-ins. With **17 Ruff
+opt-ins**, **185 explicit gates passed**, including known-limit assertions—not all
+parity matches. **G2/G3 PRIVATE IMPLEMENTATION COMPLETE/CLOSED for current admitted
+Python 3.12 Module-AST lane: closed class/field inventory + full-output/raw-replay
+coverage; not complete Python compatibility, G4 bytes/admission/failure/resource/
+version equivalence, or production cutover.** G5/G6 remain open. Current local
+macOS / Rust 1.89 delivery closeout passed: offline consumer fresh **105-package**
+lock and **one native TypeScript public-API test**, five-Ruff-crate containment,
+ABI **0.1.5** and source-hash rechecks. Its configured unique owned cache `TMPDIR`
+was cleaned with none left. Guarded preflight found **zero blockers / zero protected
+outputs**, normal `debug`/`tmp` only; cleanup removed **1,374,564,352 estimated
+allocated bytes (~1.28 GiB)**. Target absent, follow-up `already_clean`, no Cargo
+afterward. No owned debug/test artifacts remain; `.ideomancer/` JS artifacts/global
+caches were untouched. Source **253**, vendor **85/65/1,882,473 bytes** and Git diff
+checks passed before final docs. The consumer snapshot (hash in the ledger) is not
+a Git revision or later-docs byte attestation. Final source/Git/helper checks are
+read-only, no rebuild. Nothing was staged, committed or pushed; HEAD is `523cd7b`.
+Local delivery passes do not establish hosted/platform or full production approval.
+The G4 STOP still requires a user decision: recommended bounded byte-aware Ruff
+feasibility preserving the contract and an explicit fixed-PY312 versus production
+>=3.12 version strategy, or a separately limited native capability retaining the
+helper. “Continue” authorizes neither narrowing nor replacement. Type-comment
+syntax fields remain intentionally uncertified (`failure: None`), including
+for/with/class suite cases whose helper exception can be `IndentationError`;
+another PEG parser alone cannot close arbitrary failure-location/class parity.
+No further code changes are planned; actual differences are narrow parser fixes
+and proof files, not a visitor/normalizer rewrite. Pattern controls now pass in
+both modes/constructors, preserving pre-existing singleton-first acceptance and
+adding only AST-only class-first/later-sequence predicate admission, while
+rejecting real missing-separator errors, not weakening tests. The codec validation/
+cleanup below is historical, not current-tree or binary-release acceptance. See the
+[current visitor ledger](python-analysis.md#ruff-visitor-contract-batch-frontend-5--private-facts-7).
 
 Maintenance gate: `python3.12 -B scripts/check_ruff_vendor.py` verifies anchored
 provenance, hashes, manifest/notices policy and reversal to pristine source. See
@@ -65,7 +117,7 @@ bundle. `make install` copies only the executable and is not license clearance.
 
 ### Unicode 15 Compatibility Data
 
-The fact candidate separately carries pinned Unicode **15.0.0** source inputs and
+The shared private frontend and fact candidate use pinned Unicode **15.0.0** source inputs and
 derived identifier/name tables in
 [`src/analysis/python_ruff/unicode15/`](../src/analysis/python_ruff/unicode15/).
 Its [provenance](../src/analysis/python_ruff/unicode15/PROVENANCE.md) and
@@ -82,8 +134,72 @@ reproduction anchor. These data are not relicensed under Ideomancer's MIT licens
 `python3.12 -B scripts/check_python_unicode15.py` checks the separate input/table
 anchors and the trusted CPython 3.12.11 / Unicode 15.0.0 derivation profile. This
 finite admission/name layer does not establish complete CPython compatibility.
+The frontend-3/facts-5 failure-certificate work changes neither these data/notices
+nor the vendored snapshot, policy patch or dependency selection.
+Its offline exported-checkout consumer passed containment and source-hash checks;
+this does not extend the scoped notices into binary-release or legal clearance.
 
 ## Sources and Pinned Revisions
+
+### CPython 3.12.11 Codec Data
+
+The validation and ~1.28 GiB cleanup receipts in this subsection describe the
+historical frontend-4/facts-6 checkpoint only. Current facts-7 cleanup completed,
+removing **1,374,564,352 estimated allocated bytes (~1.28 GiB)** with target absent
+and follow-up `already_clean`; no Cargo ran afterward. Retain all license texts
+below unchanged.
+
+The frontend-4/facts-6 private source decoder embeds derived tables and aliases in
+[`src/analysis/python_ruff/codecs312/`](../src/analysis/python_ruff/codecs312/),
+not raw stdlib modules. Preserve its full
+[`LICENSE.txt`](../src/analysis/python_ruff/codecs312/LICENSE.txt) and
+[`NOTICES.md`](../src/analysis/python_ruff/codecs312/NOTICES.md) together in Git
+source and applicable binary distributions. These are not MIT-relicensed data.
+Existing Unicode, Ruff and other applicable notices remain required.
+
+The full PSF and historical license stack is the exact raw upstream CPython
+v3.12.11 LICENSE: **13,936 bytes**, SHA-256
+`3b2f81fe21d181c499c59a256c8e1968455d6689d269aa85373bfb6af41da3bf`,
+separately verified against upstream. NOTICES retains headers and legal/provenance
+mapping comments from all **71** table/aliases modules, including module-specific
+credits and permission/no-warranty statements rather than blanket PSF attribution.
+See the [audit/provenance](../src/analysis/python_ruff/codecs312/PROVENANCE.md).
+
+The profile structurally audits 70 literal 256-code-point tables and stateless
+decode/stream/incremental/registry wiring against a 123-file installed stdlib
+source closure. Only 62 ASCII-identity tables are admitted; eight nonidentity
+tables remain excluded. The installed Python-source hash is not native-binary
+attestation or independent byte-identical comparison with an upstream commit.
+Data/code/scripts/manifest/provenance/notices/license are fingerprinted in the
+248-path source closure (11 additions to 237). Dependencies, vendored Ruff patch
+and existing Unicode notices are unchanged. The 248-path source and vendor
+85-file / 65-source / 1,881,065-byte checks passed. The isolated codec suite passed
+24 tests with none skipped; generator check and independent checker passed with
+`license_verified: true`, using `-I -S -B`; CI explicitly runs generator check,
+independent checker and the isolated codec suite with those flags. Global script discovery was
+216 tests: 211 passed, five isolated-profile skips; the combined lanes cover all
+216 unique tests, not 216 default passes. All 104 Ruff tests (16 opt-in), product
+package formatting and all-target product Clippy passed locally on macOS / Rust
+1.89; hosted results remain unknown. Broader gates passed **682 library tests
+(190 ignored)**, **18 adapter + 8 engine**, and **165 reference + 3 native**
+explicit opt-in tests. With 16 Ruff opt-ins, **184 explicit tests** passed,
+including known-limit assertions—not all parity matches. The current offline
+consumer passed fresh 105-package lock resolution and one native TypeScript
+public-API test, five-crate containment, ABI 0.1.5 and source-hash rechecks;
+product formatting passed beforehand. Its owned scratch was cleaned. Guarded
+cleanup removed **1,372,758,016 estimated allocated bytes (~1.28 GiB)** with
+zero preflight blockers/protected outputs; `target/` was absent and follow-up
+reported `already_clean`, with no Cargo afterward. No debug/test artifacts were
+retained; the owned cache parent was empty and `.ideomancer/` JS artifacts/global
+caches were untouched. Source (248 paths) and Git whitespace checks passed before
+final documentation edits; the tested snapshot in the Python ledger is not a Git
+revision or later-documentation attestation. Final source/Git/cache verification
+is read-only, without rebuilding. Codec-family and prior facts-5 work remains
+uncommitted at actual HEAD `523cd7b`; the historical facts-5 ~1.27 GiB cleanup is
+separate. Ideomancer's MIT library license does
+not replace these codec-data terms or authorize binary release.
+
+### Registry crate revisions
 
 Versions below are the reviewed Cargo.lock versions. Revisions and repository
 subdirectories are from each exact crate's `.cargo_vcs_info.json`, not inferred

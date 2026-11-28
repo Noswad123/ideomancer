@@ -54,7 +54,9 @@ const MAPPING_PATTERN_START_SET: TokenSet = TokenSet::new([
 impl Parser<'_> {
     /// Returns `true` if the current token is a valid start of a pattern.
     pub(super) fn at_pattern_start(&self) -> bool {
-        self.at_ts(PATTERN_START_SET) || self.at_soft_keyword()
+        self.at_ts(PATTERN_START_SET)
+            || self.at_soft_keyword()
+            || (self.options.ast_only && self.at(TokenKind::FStringStart))
     }
 
     /// Returns `true` if the current token is a valid start of a mapping pattern.
@@ -354,7 +356,8 @@ impl Parser<'_> {
         parentheses: Option<SequenceMatchPatternParentheses>,
     ) -> ast::PatternMatchSequence {
         if parentheses.is_some_and(|parentheses| {
-            self.at(parentheses.closing_kind()) || self.peek() == parentheses.closing_kind()
+            self.at(parentheses.closing_kind())
+                || (self.at(TokenKind::Comma) && self.peek() == parentheses.closing_kind())
         }) {
             // The comma is optional if it is a single-element sequence
             self.eat(TokenKind::Comma);

@@ -12,7 +12,7 @@ use ruff_python_ast::{self as ast, Expr, Mod, Stmt};
 use ruff_python_parser::Parsed;
 use ruff_text_size::{Ranged, TextRange};
 
-const FACT_POLICY: &str = "python-ruff-private-facts-4";
+const FACT_POLICY: &str = "python-ruff-private-facts-7";
 const OUTPUT: usize = 32 * 1024 * 1024;
 
 #[path = "metadata.rs"]
@@ -35,6 +35,7 @@ pub(in crate::analysis) struct CandidateFile<'a> {
     pub(in crate::analysis) status: FactStatus,
     pub(in crate::analysis) reason: Option<&'static str>,
     pub(in crate::analysis) failure_line: Option<usize>,
+    pub(in crate::analysis) failure: Option<failures::Failure>,
     pub(in crate::analysis) compatibility_nodes: usize,
     pub(in crate::analysis) compatibility_work: usize,
     pub(in crate::analysis) compatibility_depth: usize,
@@ -48,6 +49,7 @@ pub(in crate::analysis) enum FactStatus {
     AcceptedFacts,
     UnsupportedSyntax,
     SyntaxError,
+    ParseFailure,
     UnsupportedEncoding,
     ResourceLimit,
 }
@@ -117,6 +119,7 @@ fn fact_identity<F: FnMut(Checkpoint) -> bool>(cancel: &mut Cancellation<F>) -> 
         ),
         ("metadata.rs", include_bytes!("metadata.rs").as_slice()),
         ("literals.rs", include_bytes!("literals.rs").as_slice()),
+        ("failures.rs", include_bytes!("failures.rs").as_slice()),
         ("source.rs", include_bytes!("source.rs").as_slice()),
         (
             "type_comments.rs",
@@ -142,6 +145,7 @@ fn fact_identity<F: FnMut(Checkpoint) -> bool>(cancel: &mut Cancellation<F>) -> 
     ]
     .into_iter()
     .chain(unicode15::identity_inputs().iter().copied())
+    .chain(codecs312::identity_inputs().iter().copied())
     {
         hash_frame(&mut hash, name, bytes, cancel);
     }
@@ -216,6 +220,7 @@ fn extract_impl<'a, F: FnMut(Checkpoint) -> bool>(
                 status: FactStatus::ResourceLimit,
                 reason: Some("deadline"),
                 failure_line: None,
+                failure: None,
                 compatibility_nodes: 0,
                 compatibility_work: 0,
                 compatibility_depth: 0,
@@ -237,7 +242,7 @@ fn extract_impl<'a, F: FnMut(Checkpoint) -> bool>(
         shared::measure(&report, OUTPUT, &mut || false).map_err(|_| FrontEndError::ReportLimit)?;
     sink.reserve_output_baseline(
         overhead
-            .checked_add(sources.len() * 256)
+            .checked_add(sources.len() * 512)
             .ok_or(FrontEndError::ReportLimit)?,
     )
     .map_err(|_| FrontEndError::ReportLimit)?;
@@ -307,6 +312,9 @@ fn extract_impl<'a, F: FnMut(Checkpoint) -> bool>(
                     (file.status, file.reason) = match error {
                         Error::Syntax { line, reason } => {
                             file.failure_line = Some(line);
+                            // Contextual-comment oracles establish placement and
+                            // lines, not every concrete CPython exception class.
+                            // Only the shared inspector supplies certificates.
                             (FactStatus::SyntaxError, Some(reason))
                         }
                         Error::Unsupported(reason) => (FactStatus::UnsupportedSyntax, Some(reason)),
@@ -322,9 +330,25 @@ fn extract_impl<'a, F: FnMut(Checkpoint) -> bool>(
     for (file, parsed) in report.files.iter_mut().zip(parser.files) {
         file.sha256 = parsed.sha256;
         if parsed.admission == Admission::InvalidSource {
-            file.status = FactStatus::SyntaxError;
+            file.failure = parsed.failure;
+            file.status = if parsed
+                .failure
+                .is_some_and(|failure| failure.exception == failures::Exception::UnicodeDecodeError)
+            {
+                FactStatus::ParseFailure
+            } else {
+                FactStatus::SyntaxError
+            };
             file.reason = parsed.failure_reason;
-            file.failure_line = parsed.syntax_error_line.map(|line| line.0);
+            file.failure_line = parsed
+                .failure
+                .map(|failure| failure.line)
+                .or(parsed.syntax_error_line.map(|line| line.0));
+        } else if parsed.admission == Admission::UnsupportedCompatibility {
+            file.status = FactStatus::UnsupportedSyntax;
+            file.reason = parsed.failure_reason;
+            file.failure_line = None;
+            file.failure = None;
         } else if parsed.admission == Admission::UnsupportedEncoding {
             file.status = FactStatus::UnsupportedEncoding;
             file.reason = Some(if parsed.diagnostic == Some(Diagnostic::UnresolvedCodec) {
@@ -359,6 +383,7 @@ fn extract_impl<'a, F: FnMut(Checkpoint) -> bool>(
             file.status = FactStatus::ResourceLimit;
             file.reason = Some("run finalization");
             file.failure_line = None;
+            file.failure = None;
         }
     }
     (report.facts, report.diagnostics) = sink.into_records();
@@ -378,6 +403,7 @@ fn extract_impl<'a, F: FnMut(Checkpoint) -> bool>(
             file.status = FactStatus::ResourceLimit;
             file.reason = Some("deadline");
             file.failure_line = None;
+            file.failure = None;
         }
         shared::measure(&report, OUTPUT, &mut || false).map_err(|_| FrontEndError::ReportLimit)?;
     }
@@ -581,120 +607,15 @@ impl Driver<'_> {
         }
         let mut stack = Vec::new();
         let mut parent = None;
-        let mut fstrings = Vec::new();
         let mut temporary = 0usize;
         let mut stack_slots = 0;
-        let mut string_slots = 0;
         for token in parsed.tokens() {
             self.tick()?;
             let range = token.range();
-            let raw = &text[range.start().to_usize()..range.end().to_usize()];
             match token.kind() {
                 TokenKind::Def | TokenKind::Class | TokenKind::Async => {
                     self.charge(4 * std::mem::size_of::<(TokenKind, TextRange)>())?;
                     self.keywords.push((token.kind(), range));
-                }
-                TokenKind::Name if !raw.is_ascii() => {
-                    if !unicode15::valid_identifier(raw, self.check)
-                        .map_err(|_| Error::Cancelled)?
-                    {
-                        return Err(Error::Syntax {
-                            line: logical_line(bytes, range.start().to_usize()).0,
-                            reason: "invalid Unicode 15 identifier",
-                        });
-                    }
-                }
-                TokenKind::Int => {
-                    let b = raw.as_bytes();
-                    let prefixed = b.len() >= 2
-                        && b[0] == b'0'
-                        && matches!(b[1], b'x' | b'X' | b'o' | b'O' | b'b' | b'B');
-                    if !prefixed {
-                        let mut digits = 0usize;
-                        let mut nonzero = false;
-                        for chunk in b.chunks(256) {
-                            self.tick()?;
-                            for &c in chunk {
-                                digits += usize::from(c.is_ascii_digit());
-                                nonzero |= matches!(c, b'1'..=b'9');
-                            }
-                        }
-                        if nonzero && digits > 4300 {
-                            return Err(Error::Unsupported("decimal conversion limit"));
-                        }
-                    }
-                }
-                TokenKind::FStringStart => {
-                    if fstrings.len() == string_slots {
-                        let bytes = 4 * std::mem::size_of::<(bool, bool)>();
-                        temporary = temporary.checked_add(bytes).ok_or(Error::Resource)?;
-                        self.charge(bytes)?;
-                        string_slots += 1;
-                    }
-                    fstrings.push((token.unwrap_string_flags().is_raw_string(), false));
-                }
-                TokenKind::FStringEnd => {
-                    // CPython decodes f-string text after its replacement fields,
-                    // locating this failure at the matching closing token. Nested
-                    // literal failures therefore take precedence over outer text.
-                    // Format-spec exception taxonomy remains Pending G4.
-                    if fstrings.pop().is_some_and(|(_, invalid)| invalid) {
-                        return Err(Error::Syntax {
-                            line: logical_line(bytes, range.start().to_usize()).0,
-                            reason: "invalid Unicode 15 named escape",
-                        });
-                    }
-                }
-                TokenKind::String | TokenKind::FStringMiddle => {
-                    let flags = token.unwrap_string_flags();
-                    let raw_string = if token.kind() == TokenKind::FStringMiddle {
-                        fstrings.last().is_some_and(|&(raw, _)| raw)
-                    } else {
-                        flags.is_raw_string()
-                    };
-                    if !raw_string && !flags.is_byte_string() {
-                        let mut i = 0;
-                        while i < raw.len() {
-                            self.tick()?;
-                            if raw.as_bytes()[i] != b'\\' {
-                                i += 1;
-                                continue;
-                            }
-                            if raw.as_bytes().get(i + 1) != Some(&b'N') {
-                                i += 2;
-                                continue;
-                            }
-                            i += 2;
-                            let braced = raw.as_bytes().get(i) == Some(&b'{');
-                            i += usize::from(braced);
-                            let name_start = i;
-                            while i < raw.len() && raw.as_bytes()[i] != b'}' {
-                                self.tick()?;
-                                i += 1;
-                            }
-                            if !braced
-                                || i == raw.len()
-                                || unicode15::lookup_name_15(&raw[name_start..i], self.check)
-                                    .map_err(|_| Error::Cancelled)?
-                                    .is_none()
-                            {
-                                if token.kind() == TokenKind::FStringMiddle {
-                                    let Some((_, invalid)) = fstrings.last_mut() else {
-                                        return Err(Error::Unsupported("f-string index"));
-                                    };
-                                    *invalid = true;
-                                    break;
-                                }
-                                // Adjacent ordinary literals retain their own
-                                // opening-token location, not the group's start.
-                                return Err(Error::Syntax {
-                                    line: logical_line(bytes, range.start().to_usize()).0,
-                                    reason: "invalid Unicode 15 named escape",
-                                });
-                            }
-                            i += 1;
-                        }
-                    }
                 }
                 TokenKind::Lpar | TokenKind::Lsqb | TokenKind::Lbrace => {
                     if stack.len() == stack_slots {
@@ -738,7 +659,6 @@ impl Driver<'_> {
             }
         }
         drop(stack);
-        drop(fstrings);
         self.release(temporary)?;
         Ok(())
     }
@@ -1778,3 +1698,15 @@ mod ruff_facts_batch;
 #[cfg(test)]
 #[path = "../python_parity/ruff_compat_batch.rs"]
 mod ruff_compat_batch;
+
+#[cfg(test)]
+#[path = "../python_parity/ruff_failure_batch.rs"]
+mod ruff_failure_batch;
+
+#[cfg(test)]
+#[path = "../python_parity/ruff_codec_batch.rs"]
+mod ruff_codec_batch;
+
+#[cfg(test)]
+#[path = "../python_parity/ruff_visitor_batch.rs"]
+mod ruff_visitor_batch;

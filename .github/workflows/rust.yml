@@ -52,6 +52,13 @@ jobs:
           python -B scripts/check_checkout.py --source-dir .
           python -B scripts/check_ruff_vendor.py
           python -B scripts/check_python_unicode15.py
+          python -I -S -B scripts/generate_python_codecs312.py --check
+          python -I -S -B scripts/check_python_codecs312.py
+          python -I -S -B scripts/test_python_codecs312.py
+          python -I -S -B scripts/check_python_visitor_contract.py
+          python -I -S -B scripts/test_python_visitor_contract.py
+          python -I -S -B scripts/check_python_byte_contract.py
+          python -I -S -B scripts/test_python_byte_contract.py
       - name: Verify an independent native JS/TS checkout consumer
         run: >-
           python -B scripts/check_checkout_consumer.py

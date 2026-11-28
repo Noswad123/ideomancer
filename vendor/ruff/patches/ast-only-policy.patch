@@ -47,8 +47,17 @@
 +            }
 --- a/crates/ruff_python_parser/src/parser/pattern.rs
 +++ b/crates/ruff_python_parser/src/parser/pattern.rs
-@@ -62 +62,3 @@
+@@ -57 +57,3 @@
+-        self.at_ts(PATTERN_START_SET) || self.at_soft_keyword()
++        self.at_ts(PATTERN_START_SET)
++            || self.at_soft_keyword()
++            || (self.options.ast_only && self.at(TokenKind::FStringStart))
+@@ -62 +64,3 @@
 -        self.at_ts(MAPPING_PATTERN_START_SET) || self.at_soft_keyword()
 +        self.at_ts(MAPPING_PATTERN_START_SET)
 +            || self.at_soft_keyword()
 +            || (self.options.ast_only && self.at(TokenKind::FStringStart))
+@@ -355 +359,2 @@
+-            self.at(parentheses.closing_kind()) || self.peek() == parentheses.closing_kind()
++            self.at(parentheses.closing_kind())
++                || (self.at(TokenKind::Comma) && self.peek() == parentheses.closing_kind())

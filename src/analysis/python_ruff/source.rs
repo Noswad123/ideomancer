@@ -3,16 +3,41 @@
 //! The caller hashes the original bytes and uses `text` for ALL subsequent byte
 //! ranges (lexer, parser, tokens, literal parts, line indices and Driver source).
 //! Decoded offsets must never index the original Latin-1 bytes.
+use super::codecs312::{self, Codec, Resolution};
 use std::borrow::Cow;
 
 const CHUNK: usize = 256;
 pub(super) const INVALID_UTF8: &str = "invalid UTF-8 source";
 pub(super) const BOM_CONFLICT: &str = "encoding problem with BOM";
+pub(super) const CODEC_DECODE: &str = "source codec decoding failure";
+pub(super) const NON_TEXT_CODEC: &str = "non-text source codec";
+pub(super) const UNDEFINED_CODEC: &str = "undefined source codec";
+pub(super) const NULL_BYTE: &str = "null byte in source";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Encoding {
     Utf8,
     Latin1,
+    Ascii,
+    SingleByte(usize),
+}
+
+impl Encoding {
+    fn point(self, byte: u8) -> Option<char> {
+        match self {
+            Self::Latin1 => Some(char::from(byte)),
+            Self::Ascii => byte.is_ascii().then_some(char::from(byte)),
+            Self::SingleByte(index) => codecs312::decode_point(index, byte),
+            Self::Utf8 => unreachable!("UTF-8 is validated as a stream"),
+        }
+    }
+}
+
+/// Only closed, proved source categories with the helper's normalized zero line.
+/// A physical UTF-8 line or an unknown codec is never promoted to a certificate.
+pub(super) fn certified_syntax(error: Error) -> bool {
+    matches!(error, Error::Syntax { line: 0, reason } if matches!(reason,
+        BOM_CONFLICT | CODEC_DECODE | NON_TEXT_CODEC | UNDEFINED_CODEC | NULL_BYTE | INVALID_UTF8))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,7 +111,28 @@ pub(super) fn decode<'a>(
     let encoding = match (cookie, canonical.flatten()) {
         (None, _) => Encoding::Utf8,
         (_, Some(encoding)) => encoding,
-        (Some(name), None) => registry_profile(name)?,
+        (Some(name), None) => {
+            match codecs312::lookup(name, cancel).map_err(|_| Error::Cancelled)? {
+                Resolution::Supported(Codec::Utf8) => Encoding::Utf8,
+                Resolution::Supported(Codec::Latin1) => Encoding::Latin1,
+                Resolution::Supported(Codec::Ascii) => Encoding::Ascii,
+                Resolution::Supported(Codec::SingleByte(index)) => Encoding::SingleByte(index),
+                Resolution::UnsupportedText => return Err(Error::UnsupportedCodec),
+                Resolution::Unresolved => return Err(Error::UnresolvedCodec),
+                Resolution::NonText => {
+                    return Err(Error::Syntax {
+                        line: 0,
+                        reason: NON_TEXT_CODEC,
+                    })
+                }
+                Resolution::AlwaysFails => {
+                    return Err(Error::Syntax {
+                        line: 0,
+                        reason: UNDEFINED_CODEC,
+                    })
+                }
+            }
+        }
     };
     if bytes.len() > decoded_limit {
         return Err(Error::ResourceLimit);
@@ -127,18 +173,35 @@ pub(super) fn decode<'a>(
                 allocation_bytes: 0,
             })
         }
-        Encoding::Latin1 => {
-            let mut needed = bytes.len();
+        Encoding::Latin1 | Encoding::Ascii | Encoding::SingleByte(_) => {
+            let mut needed = 0usize;
+            let mut ascii = true;
             for chunk in bytes.chunks(CHUNK) {
                 checkpoint(cancel)?;
-                needed = needed
-                    .checked_add(chunk.iter().filter(|&&byte| byte >= 0x80).count())
-                    .filter(|&length| length <= decoded_limit)
-                    .ok_or(Error::ResourceLimit)?;
+                for &byte in chunk {
+                    ascii &= byte.is_ascii();
+                    let point = encoding.point(byte).ok_or(Error::Syntax {
+                        line: 0,
+                        reason: CODEC_DECODE,
+                    })?;
+                    needed = needed
+                        .checked_add(point.len_utf8())
+                        .filter(|&length| length <= decoded_limit)
+                        .ok_or(Error::ResourceLimit)?;
+                }
             }
             checkpoint(cancel)?;
             reserve(needed)?;
             checkpoint(cancel)?;
+            if ascii {
+                return Ok(DecodedSource {
+                    text: Cow::Borrowed(
+                        std::str::from_utf8(bytes).expect("ASCII identity profile"),
+                    ),
+                    encoding,
+                    allocation_bytes: 0,
+                });
+            }
             let mut text = String::new();
             text.try_reserve_exact(needed)
                 .map_err(|_| Error::ResourceLimit)?;
@@ -149,7 +212,11 @@ pub(super) fn decode<'a>(
             for chunk in bytes.chunks(CHUNK) {
                 checkpoint(cancel)?;
                 for &byte in chunk {
-                    text.push(char::from(byte));
+                    text.push(
+                        encoding
+                            .point(byte)
+                            .expect("validated immutable codec table"),
+                    );
                 }
             }
             checkpoint(cancel)?;
@@ -292,43 +359,6 @@ fn normal_name(name: &[u8]) -> Option<Encoding> {
     }
 }
 
-fn registry_profile(name: &[u8]) -> Result<Encoding, Error> {
-    // All admitted registry aliases fit in this fixed buffer. Do not allocate or
-    // infer that an arbitrary long/different codec name is a nonexistent codec.
-    if name.len() > 64 {
-        return Err(Error::UnresolvedCodec);
-    }
-    let mut buffer = [0; 64];
-    let mut length = 0;
-    let mut separator = false;
-    for &byte in name {
-        if matches!(byte, b'-' | b'_') {
-            separator = length != 0;
-        } else {
-            if separator {
-                buffer[length] = b'_';
-                length += 1;
-                separator = false;
-            }
-            buffer[length] = byte.to_ascii_lowercase();
-            length += 1;
-        }
-    }
-    match &buffer[..length] {
-        b"utf_8" | b"utf8" | b"u8" | b"cp65001" | b"utf" | b"utf_8_sig" => Ok(Encoding::Utf8),
-        // CPython 3.12 encodings.aliases entries targeting latin_1, plus its
-        // canonical module name. Tokenizer-normalized product names are above.
-        b"8859" | b"cp819" | b"csisolatin1" | b"ibm819" | b"iso8859" | b"iso8859_1"
-        | b"iso_8859_1" | b"iso_8859_1_1987" | b"iso_ir_100" | b"l1" | b"latin" | b"latin1"
-        | b"latin_1" => Ok(Encoding::Latin1),
-        b"ascii" | b"us_ascii" | b"646" | b"shift_jis" | b"shiftjis" | b"sjis" | b"cp932"
-        | b"cp1252" | b"windows_1252" | b"utf_16" | b"utf_32" | b"big5" | b"gbk" => {
-            Err(Error::UnsupportedCodec)
-        }
-        _ => Err(Error::UnresolvedCodec),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,8 +426,10 @@ mod tests {
             Encoding::Latin1
         );
         assert_eq!(
-            decoded(b"# coding: ascii coding: latin-1\n").unwrap_err(),
-            Error::UnsupportedCodec
+            decoded(b"# coding: ascii coding: latin-1\n")
+                .unwrap()
+                .encoding,
+            Encoding::Ascii
         );
     }
 
@@ -493,7 +525,7 @@ mod tests {
 
     #[test]
     fn errors_are_closed_and_codec_registry_uncertainty_is_explicit() {
-        for name in ["shift_jis", "ascii", "cp1252"] {
+        for name in ["shift_jis", "cp037", "cp864"] {
             assert_eq!(
                 decoded(format!("# coding: {name}\n").as_bytes()).unwrap_err(),
                 Error::UnsupportedCodec

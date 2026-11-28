@@ -52,13 +52,25 @@ crate, optional serialization/schema feature or upstream dev dependency is enabl
 ## Narrow Parser Policy
 
 `ParseOptions::with_ast_only(true)` omits duplicate call/class-header keyword
-validation before its diagnostic is emitted and admits bare f-string mapping-pattern
-keys through the existing literal/string parser, matching the CPython AST contract
+validation before its diagnostic is emitted and admits bare f-string patterns and
+mapping-pattern keys through the existing literal/string parser, matching the CPython AST contract
 rather than compiled-code validation. It defaults to false in both option
-constructors; default-false mapping-key and duplicate-keyword behavior is unchanged.
-The shared pattern token sets are unchanged; this entry path does not admit t-strings.
-It is not a general Python AST-versus-compiler semantic mode. Generator,
-argument-order and other syntax validation remain unchanged.
+constructors; default-false f-string pattern, mapping-key and duplicate-keyword
+admission behavior is unchanged.
+The generic pattern-start predicate covers first/later class arguments, keyword
+patterns and sequence items, including grouped forms. Both pattern-start predicates
+gate only `FStringStart` on `ast_only`; the shared token sets are unchanged and these
+entry paths do not admit t-strings.
+It is not a general Python AST-versus-compiler semantic mode. Generator and
+argument-order validation remain unchanged.
+
+An independent sequence-pattern grammar correction applies in both AST modes:
+the single-element shortcut allows a closing delimiter directly, or a comma
+followed by that delimiter, not an arbitrary token before the delimiter. Missing
+separators such as `[1 other]`, `[first _]` and `[f'{call()}' other]` must report
+syntax errors. This intentionally corrects pre-existing invalid-syntax acceptance
+in default mode too; it does not broaden default-false f-string admission. Valid
+single-element and comma-separated list/tuple patterns retain their behavior.
 
 TypeVarTuple and ParamSpec defaults now use the same unsupported-version diagnostic
 and `=`-through-default range as TypeVar defaults, independently of AST-only policy.

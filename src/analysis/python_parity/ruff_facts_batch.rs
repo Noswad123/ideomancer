@@ -500,7 +500,7 @@ fn ruff_facts_hidden_framework_metadata_and_calls_survive_render_clips() {
 fn ruff_facts_decimal_and_byte_admission_is_explicit() {
     for (digits, expected) in [
         ("1".repeat(4300), FactStatus::AcceptedFacts),
-        ("1".repeat(4301), FactStatus::UnsupportedSyntax),
+        ("1".repeat(4301), FactStatus::SyntaxError),
         ("0".repeat(4301), FactStatus::AcceptedFacts),
         (format!("0x{}", "f".repeat(4301)), FactStatus::AcceptedFacts),
         (vec!["1"; 4300].join("_"), FactStatus::AcceptedFacts),
@@ -865,7 +865,7 @@ fn ruff_facts_structural_hidden_metadata_survives_shape_caps() {
     ] {
         let sources = [source(text)];
         let report = extract_fact_candidates(&sources).unwrap();
-        assert_eq!(report.files[0].status, FactStatus::UnsupportedSyntax);
+        assert_eq!(report.files[0].status, FactStatus::SyntaxError);
         assert_eq!(report.facts.len(), 1);
         assert!(report.diagnostics.is_empty());
     }
