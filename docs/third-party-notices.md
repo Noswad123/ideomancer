@@ -25,7 +25,7 @@ from https://github.com/astral-sh/ruff at exact revision
 `87f0feb21a1af67195bebf94d811770393f9f447`. Unlike the registry sources below,
 its provenance is recorded in the checkout's
 [`vendor/ruff/provenance.json`](../vendor/ruff/provenance.json). The five source
-crates, adapted manifests, two reviewed patches and upstream notices travel with Ideomancer
+crates, adapted manifests, maintained patches and upstream notices travel with Ideomancer
 Git source; there is no separate fork/submodule or registry publication requirement.
 
 - The complete [upstream LICENSE](../vendor/ruff/LICENSE) retains Charles Marsh's
@@ -39,7 +39,37 @@ Git source; there is no separate fork/submodule or registry publication requirem
   admission or CPython compatibility. Registry dependency sources are not vendored
   here; preserve applicable notices for actual selected versions in binary bundles.
 
-### Current F1 provenance and license boundary
+### Current F2 provenance and license boundary: bounded delivery PASS
+
+The bounded private byte Module parser/source/debug implementation passed final
+preservation/oracles, scripts and provenance checks; current consumer/cleanup also
+passed. **All bounded F2 delivery gates PASS**, target absent, no Cargo afterward.
+This authorizes no further implementation. It changes neither production
+`python-static-8-generic-facts`/selected Python >=3.12 helper nor notice terms,
+dependencies or manifests. Frontend-5/facts-7 names stay fixed; fingerprints change.
+User-reported HEAD `805edb0` contains committed F1, initially clean; F2 is uncommitted
+and unstaged, with no commit or push.
+
+The schema-3 live checker passed: **89 vendor files / 67 Rust sources / 2,219,373
+bytes** (65 upstream + two authored), **14 modified / 51 unchanged upstream**;
+**264 source paths verified**, and **84 vendor tests passed** after the final fix.
+The third **nine-file F2 patch layers
+after the old policy patch**; old two patches and the 65-source pristine map are
+unchanged. Preserve ordered reversal and both authored-source hashes: authored
+MIT code is not pristine upstream or a relicensing of Ruff. Retain root MIT,
+complete Ruff/RustPython, Unicode and PSF/codec licenses/notices together.
+Exact implementation hashes and full validation receipts are recorded in the
+primary ledger, including completed current consumer/cleanup delivery receipts.
+The tested snapshot is not a Git commit and does not attest final receipt prose;
+do not reuse F1 consumer/cache PASS. See the primary
+[F2 ledger](python-analysis.md#f2-byte-module-parser-source-and-debug-experiment).
+Finite tests are not CPython parity, G4 acceptance or binary/whole-graph license
+clearance. No public cutover or native immutable-profile policy is approved.
+
+### Historical F1 provenance and license boundary
+
+All counts, hashes, tests, authorization and cache receipts in the F1 section
+below describe that handoff only, not current F2 validation or cache state.
 
 The bounded private F1 experiment adds a shared fallible byte lexer core and
 doc-hidden experimental facade, not a public engine backend or byte parser.
@@ -83,13 +113,14 @@ absent, follow-up `already_clean`, **no Cargo afterward**. No owned debug/test
 artifacts remain; root cache parent empty, `.ideomancer/` JS/global caches untouched.
 Final source/Git/helper checks are read-only, without rebuilding.
 This does not prove byte parser input, AST/debug construction, CPython admission,
-F2 or full G4, or authorize further implementation; F2/version approval stays separate.
+F2 or full G4, or itself authorize further implementation. Bounded F2 was later
+authorized; version-policy approval remains separate.
 These are not binary-release, whole-graph
 license or G4 acceptance. See the [F1 ledger](python-analysis.md#f1-shared-byte-lexer-experiment)
 for tests/baseline and pending F2 parser/source/debug/admission proof.
 
 Actual pre-F1 HEAD was user-reported `fdf4e58` (facts-6 commit, initially clean/ahead
-one), not `523cd7b`; current F1 work is uncommitted and unstaged, with no commits or
+one), not `523cd7b`; F1 work was then uncommitted and unstaged, with no agent commits or
 pushes. The source counts,
 HEAD and cleanup statements in the following
 visitor/codec receipts describe historical checkpoints, not current-tree status.
@@ -161,8 +192,9 @@ cleanup below is historical, not current-tree or binary-release acceptance. See 
 Maintenance gate: `python3.12 -B scripts/check_ruff_vendor.py` verifies anchored
 provenance, hashes, manifest/notices policy and reversal to pristine source. See
 [snapshot maintenance](../vendor/ruff/README.md) and [Git delivery](releasing.md).
-Keep upstream source pristine except for the two reviewed patches above, tracking
-the authored facade separately; format only root product code
+Keep upstream source pristine except for the maintained patch closure above,
+tracking both authored sources separately and respecting F2-after-policy layer
+order; the two-patch receipt is historical. Format only root product code
 with `RUSTUP_AUTO_INSTALL=0 cargo fmt --package ideomancer --check`, never `--all`.
 
 The private frontend supplies captured-byte syntax classification and a separate

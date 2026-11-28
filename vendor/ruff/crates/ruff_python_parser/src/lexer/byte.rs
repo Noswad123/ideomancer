@@ -77,7 +77,7 @@ pub enum ByteLexFailure {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ByteViewError { InvalidRange, InvalidUtf8, ResourceLimit, Cancelled }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ByteLexerStats {
     pub work: usize,
     pub tokens: usize,
@@ -198,6 +198,61 @@ pub struct ByteLexerCheckpoint<'src> {
     source: std::marker::PhantomData<&'src [u8]>,
 }
 
+/// Parser-owned continuation of the original lexical control session.
+/// Moving the control preserves cumulative charges, terminal failures and the
+/// caller's callback borrow; it must not be reconstructed from the limits.
+pub(crate) struct SourceControl<'src, 'check> {
+    source: &'src [u8],
+    control: Control<'check>,
+}
+
+impl<'src> SourceControl<'src, '_> {
+    pub(crate) fn original_bytes(&self) -> &'src [u8] { self.source }
+
+    pub(crate) fn check_terminal(&self) -> Result<(), ByteViewError> {
+        match &self.control.terminal {
+            Some(error) => Err(view_error(error.clone())),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn source_bytes(&self, range: TextRange) -> Result<&'src [u8], ByteViewError> {
+        self.check_terminal()?;
+        self.source.get(range.start().to_usize()..range.end().to_usize())
+            .ok_or(ByteViewError::InvalidRange)
+    }
+
+    pub(crate) fn source_text(&mut self, range: TextRange) -> Result<&'src str, ByteViewError> {
+        self.control.poll().map_err(view_error)?;
+        let bytes = self.source_bytes(range)?;
+        self.control.source_text(bytes, range.start()).map_err(view_error)
+    }
+
+    pub(crate) fn work(&mut self, count: usize) -> Result<(), ByteLexFailure> {
+        self.control.work(count)
+    }
+
+    pub(crate) fn allocate(&mut self, count: usize) -> Result<(), ByteLexFailure> {
+        self.control.allocate(count)
+    }
+
+    pub(crate) fn resource_limit<T>(&mut self) -> Result<T, ByteLexFailure> {
+        self.control.poll()?;
+        self.control.fail(ByteLexFailure::ResourceLimit)
+    }
+
+    pub(crate) fn stats(&self) -> ByteLexerStats { self.control.stats }
+}
+
+fn view_error(error: ByteLexFailure) -> ByteViewError {
+    match error {
+        ByteLexFailure::Source(_) => ByteViewError::InvalidUtf8,
+        ByteLexFailure::ResourceLimit => ByteViewError::ResourceLimit,
+        ByteLexFailure::Cancelled => ByteViewError::Cancelled,
+        ByteLexFailure::InvalidState | ByteLexFailure::ForeignCheckpoint | ByteLexFailure::Incomplete => ByteViewError::InvalidRange,
+    }
+}
+
 impl std::fmt::Debug for ByteLexer<'_, '_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ByteLexer").field("initialized", &self.initialized).finish_non_exhaustive()
@@ -262,6 +317,39 @@ impl<'src, 'check> ByteLexer<'src, 'check> {
     pub fn take_value(&mut self) -> Result<ByteTokenValue, ByteLexFailure> {
         self.current_ready()?;
         Ok(ByteTokenValue::from_legacy(self.core.take_value()))
+    }
+
+    pub(crate) fn take_value_for_parser(&mut self) -> Result<crate::token::TokenValue, ByteLexFailure> {
+        self.current_ready()?;
+        Ok(self.core.take_value())
+    }
+
+    pub(crate) fn flags_for_parser(&self) -> Result<crate::token::TokenFlags, ByteLexFailure> {
+        self.current_ready()?;
+        Ok(self.core.current_flags)
+    }
+
+    pub(crate) fn parser_work(&mut self, count: usize) -> Result<(), ByteLexFailure> {
+        self.ready()?;
+        self.core.cursor.control.work(count)
+    }
+
+    pub(crate) fn parser_allocate(&mut self, count: usize) -> Result<(), ByteLexFailure> {
+        self.ready()?;
+        self.core.cursor.control.allocate(count)
+    }
+
+    pub(crate) fn parser_resource_limit<T>(&mut self) -> Result<T, ByteLexFailure> {
+        self.ready()?;
+        self.core.cursor.control.poll()?;
+        self.core.cursor.control.fail(ByteLexFailure::ResourceLimit)
+    }
+
+    pub(crate) fn rewind_for_parser(&mut self, checkpoint: ByteLexerCheckpoint<'src>) -> Result<(), ByteLexFailure> {
+        // Unlike ordinary parser work, restoration is allowed after a source
+        // fault. It still charges and polls the original monotonic control.
+        self.core.cursor.control.work(1)?;
+        self.rewind(checkpoint)
     }
 
     pub fn original_bytes(&self) -> &'src [u8] { self.core.source }
@@ -353,6 +441,18 @@ impl<'src, 'check> ByteLexer<'src, 'check> {
             return Err(ByteLexFailure::Incomplete);
         }
         Ok(self.core.finish())
+    }
+
+    pub(crate) fn finish_for_parser(mut self) -> Result<(Vec<LexicalError>, SourceControl<'src, 'check>), ByteLexFailure> {
+        self.ready()?;
+        self.core.cursor.control.poll()?;
+        if !self.initialized || !self.core.current_kind.is_eof() || !self.core.cursor.is_eof() {
+            return Err(ByteLexFailure::Incomplete);
+        }
+        Ok((self.core.errors, SourceControl {
+            source: self.core.source,
+            control: self.core.cursor.control,
+        }))
     }
 }
 

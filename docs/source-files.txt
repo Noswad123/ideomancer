@@ -1,7 +1,7 @@
 # Reviewed Git-source closure; additions and changed contents require explicit review.
 # Derived from docs/package-files.txt without Cargo-generated Cargo.toml.orig,
 # plus explicit checkout/Ruff integration paths and the closed Ruff provenance
-# inventory (86 records plus provenance.json). Never regenerate from a workspace walk.
+# inventory (88 records plus provenance.json). Never regenerate from a workspace walk.
 .github/workflows/rust.yml
 .gitignore
 Cargo.lock
@@ -93,6 +93,7 @@ src/analysis/python_parity/ruff_visitor_batch.rs
 src/analysis/python_ruff.rs
 src/analysis/python_ruff/byte_lexer_acceptance.rs
 src/analysis/python_ruff/byte_lexer_tests.rs
+src/analysis/python_ruff/byte_parser_tests.rs
 src/analysis/python_ruff/codecs312.rs
 src/analysis/python_ruff/codecs312/LICENSE.txt
 src/analysis/python_ruff/codecs312/NOTICES.md
@@ -207,6 +208,7 @@ vendor/ruff/crates/ruff_python_ast/src/visitor/source_order.rs
 vendor/ruff/crates/ruff_python_ast/src/visitor/transformer.rs
 vendor/ruff/crates/ruff_python_ast/src/whitespace.rs
 vendor/ruff/crates/ruff_python_parser/Cargo.toml
+vendor/ruff/crates/ruff_python_parser/src/byte.rs
 vendor/ruff/crates/ruff_python_parser/src/error.rs
 vendor/ruff/crates/ruff_python_parser/src/lexer.rs
 vendor/ruff/crates/ruff_python_parser/src/lexer/byte.rs
@@ -255,6 +257,7 @@ vendor/ruff/notices/unicode_names2-1.3.0/LICENSE-MIT
 vendor/ruff/notices/unicode_names2-1.3.0/data/LICENSE-UNICODE
 vendor/ruff/patches/ast-only-policy.patch
 vendor/ruff/patches/byte-lexer-experiment.patch
+vendor/ruff/patches/byte-parser-experiment.patch
 vendor/ruff/provenance.json
 vendor/ruff/upstream/Cargo.lock
 vendor/ruff/upstream/crates/ruff_python_ast/Cargo.toml

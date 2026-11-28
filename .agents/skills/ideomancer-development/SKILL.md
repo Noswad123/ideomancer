@@ -95,7 +95,15 @@ guidance for coding agents, not an interpretation prompt for analyzed applicatio
 - Vendored Ruff changes: run `python3.12 -B scripts/check_ruff_vendor.py`; review
   immutable pin, checker anchors, provenance, patch reversal, manifests and notices
   together. Never use `cargo fmt --all`: recursive formatting touches path dependencies.
-   Schema 2 tracks two disjoint four-file patches: unchanged AST-only policy
+    F2 schema 3 passed: 89 vendor files / 67 Rust sources / 2,219,373 bytes
+    (65 upstream + two authored), 14 modified / 51 unchanged upstream;
+    264 source paths verified before docs freeze; 84 vendor tests passed after
+    the final fix. The third nine-file parser/source/debug
+    patch layers after the old policy patch; old two patches and pristine 65-source
+    map remain unchanged. Review ordered reversals and both authored hashes, not
+    three disjoint patches. Exact hashes/results are in the F2 ledger;
+    completed current consumer/cleanup receipts are recorded there too.
+    Historical F1 schema 2 tracked two disjoint four-file patches: unchanged AST-only policy
    (`options.rs`, `expression.rs`, `pattern.rs`, `statement.rs`) and F1 lexer
    (`lexer.rs`, `lexer/{cursor,indentation,interpolated_string}.rs`). Eight modified
    upstream files and 57 unchanged retain the original 65-source pristine map;
@@ -138,7 +146,55 @@ evidence, CLI and default are unchanged. The same five local crates, dependency
 pins and Git delivery with `publish = false` remain; F1 extends the reviewed
 vendor patch closure. No public migration is approved.
 
-**Current direction:** contract-preserving full replacement selected; bounded
+**Current direction: authorized private F2 byte Module parser/source/debug
+experiment: all bounded implementation/delivery gates PASS.** Coordinator
+reports 743 library passes / 191 ignored (including 35 F2 + 23 F1), 18 adapter +
+8 engine passes, 185 explicit reference/native/Ruff gates passed (including known
+limits, not all parity matches), plus formatting/Clippy, scripts and schema-3/source
+checks passed. Ruff's 166 total passes are 149 ordinary + 17 opt-ins across commands,
+not one filter invocation. Current independent consumer and guarded cleanup passed;
+target absent, follow-up `already_clean`, no Cargo afterward. No owned scratch/debug/
+test artifacts remain; `.ideomancer/` JS/global caches/installed binaries untouched.
+Use the current F2 receipts, not inherited F1 consumer/cache PASS. The tested source
+snapshot does not attest final receipt prose. No Cargo/build checks follow this
+docs-only closeout; no further implementation is authorized. User-reported HEAD
+`805edb0` is user-committed F1, initially clean; current F2 is uncommitted and
+unstaged, with no commit or push. See the primary
+[F2 ledger](../../../../docs/python-analysis.md#f2-byte-module-parser-source-and-debug-experiment)
+and `docs/python-native-replacement-feasibility.md`.
+
+One existing Ruff grammar/shared fallible `CoreLexer` serves closed Legacy/Bytes
+providers; all effectful grammar propagates typed errors. Eight legacy text entries
+remain. Experimental `parse_module_checked` allows AST callbacks only after both
+diagnostic channels and provider finish; errors expose no AST. Source-backed
+`DebugText::Source` owner plus leading/expression/trailing byte ranges preserve
+opaque comments; legacy Text strings retain content. Source equality is owner/range
+identity, not semantic equality or CPython debug-constant synthesis. Checked text
+views are metered zero-copy; invalid UTF-8 is local, control failures latch.
+Checkpoints restore token prefix/lexical state, not cumulative quotas; re-lex is live.
+Raw BOM offsets remain, first-line columns subtract three; CRLF is one newline.
+
+Lexer defaults: 2 MiB input / 32M work / 32 MiB conservative cumulative allocation /
+200000 tokens / depth 256 / 1024 checkpoints / 10000 diagnostics. Parser defaults:
+200000 work / depth 256 / 4096 diagnostics / 32 MiB cumulative charges. Depth bounds
+both active grammar/reduction depth and nonrefundable construction entries per
+complete top-level statement; nested suites/speculation share the quota. The
+derived node-bearing layer envelope is `4 * depth + 1` (1025 default), not measured
+AST height 256, a hard stack/RSS bound or deadline. Recovery pattern conversion is
+precharged before folding; never expose a recovery AST callback.
+
+Later source faults can still win over earlier syntax: explicit unresolved control,
+never a fabricated exception certificate. Scope excludes codecs/type-comment payload
+semantics, lazy CPython priority, F3/facts dispatch, full G4, version policy and
+cutover. Production helper/Python >=3.12 and frontend-5/facts-7 names remain;
+fingerprints change. Immutable profiles remain proposed, not approved; no fallback,
+Python probe, fake version or old-save upgrade. Tests are finite bounded evidence,
+not CPython parity.
+
+**Historical F1 handoff receipts follow.** Counts, hashes, authorization, HEAD and
+cache statements describe F1 only, superseded by current bounded F2 authorization.
+
+**Historical direction:** contract-preserving full replacement selected; bounded
 private F1 lexer goal **COMPLETE / PROVED by compiled tests; all delivery gates PASS**,
 including checkout consumer and guarded cache cleanup.
 Read the F1 ledger in `docs/python-analysis.md` and the
@@ -164,7 +220,8 @@ Default bounds: 2 MiB input, 32M work units, 200000 tokens, depth 256, 32 MiB
 cumulative conservative allocation charges, 1024 checkpoints, 10000 diagnostics.
 Legacy control remains unlimited/no callback. Safe final UTF-8 validation is
 precharged but linear/uninterruptible (at most 2 MiB under defaults); no hard
-deadline or live-RSS claim. F2 parser/source/debug/admission/lazy-precedence proof,
+deadline or live-RSS claim. At F1 handoff F2 needed approval; bounded parser/source/
+debug work is now authorized above. Admission/lazy precedence remains open;
 version/product policy and cutover still require separate approval.
 
 Immutable full-bundle profiles, exact patch membership and a release support window
@@ -214,7 +271,7 @@ approval for further implementation or version/product-policy changes.
 Existing CI ordinary root tests
 select the new test modules; no new public backend/runtime Python path.
 Actual pre-F1 HEAD was user-reported `fdf4e58` (facts-6 commit, initially clean/ahead
-one), not `523cd7b`; current F1 work is uncommitted and unstaged, with no commits or
+one), not `523cd7b`; F1 work was then uncommitted and unstaged, with no agent commits or
 pushes. Earlier
 HEAD/uncommitted/cache receipts below are historical.
 
@@ -392,9 +449,9 @@ arbitrary Ruff errors and unsupported versions remain uncertified rejections.
   is not an RSS/stack sandbox or hard deadline. Complete Unicode/encoding/failure,
   resource and full G2–G6 closure remain open; PY312 alone proves no compatibility.
 - Standing architecture constraint for unchanged text input: malformed non-ASCII UTF-8 comment bytes admitted by CPython
-  cannot reach unchanged Ruff's `&str` interface without rewriting. Do not repair
-  source to force admission. F1 authorizes lexical experimentation only; F2 and
-  production expansion need separate bounded approval. It does not authorize
+   cannot reach unchanged Ruff's `&str` interface without rewriting. Do not repair
+  source to force admission. Bounded F2 now authorizes private parser/source/debug
+  experimentation; production expansion still needs separate approval. It does not authorize
   narrowing production. Existing codec, type-comment and platform/resource gaps stay open.
 
 ### Example usage
@@ -481,8 +538,8 @@ consumer/cleanup delivery closeout is also complete.
 **Historical prior checkpoint STOP (superseded for F0 and bounded F1 only):** “STOP parity
 expansion after this bounded gate.” The user explicitly selected full replacement
 and authorized the recommended bounded feasibility/version investigation; read the
-ADR and current direction above. F1 is now authorized; F2 and production changes
-still need separate approval. Contextual for/with/class suite
+ADR and current direction above. F1 and bounded F2 are now authorized; production
+changes still need separate approval. Contextual for/with/class suite
 type-comment errors can be `IndentationError`; legacy `Error::Syntax` fields
 intentionally keep `failure: None`. Never invent placeholder exception certificates.
 Another PEG parser alone cannot close arbitrary type-comment locations/classes;

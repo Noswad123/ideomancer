@@ -178,7 +178,27 @@ modes/constructors; the AST-only predicate adds class-first and later-sequence
 child admission, not singleton-first admission. The independent
 missing-separator controls pass in both modes/constructors, not by weakening tests.
 
-**Current direction: contract-preserving full replacement; bounded private F1
+**Current: authorized private F2 byte Module parser/source/debug experiment.**
+The bounded implementation is validated: 743 library tests passed (191 ignored),
+including 35 F2 tests; preservation/oracles and schema-3 provenance checks passed.
+**All bounded F2 delivery gates PASS**, including current consumer validation and
+guarded cleanup; target absent, no Cargo afterward. One existing Ruff grammar and shared fallible
+lexer serve a closed Legacy/Bytes provider; the checked byte entry permits AST
+callbacks only after both diagnostic channels and provider finish succeed.
+Source-backed debug spans preserve original bytes, not synthesized CPython constants;
+identity equality is not semantic equality. See the primary
+[F2 architecture/evidence/limits ledger](docs/python-analysis.md#f2-byte-module-parser-source-and-debug-experiment).
+This is not full CPython admission, F3/facts integration, full G4 or cutover,
+and does not authorize further implementation.
+Production `python-static-8-generic-facts` and selected Python >=3.12 helper remain
+unchanged; frontend-5/facts-7 names remain, fingerprints change. Immutable native
+profiles remain proposed, not approved. User-reported HEAD `805edb0` contains
+committed F1 (initially clean); current F2 is uncommitted and unstaged, no commit/push.
+
+**Historical F1 handoff receipts follow:** counts, hashes, cache and authorization
+statements describe F1 only, superseded by the bounded F2 authorization above.
+
+**Historical direction: contract-preserving full replacement; bounded private F1
 lexer goal COMPLETE / PROVED by compiled tests; all delivery gates PASS.** One shared fallible
 byte core serves legacy `Lexer(&str)` and experimental doc-hidden `ByteLexer`;
 there is no independent lexer, source repair, unchecked UTF-8 or byte parser.
@@ -201,7 +221,8 @@ the private implementation fingerprint changes with vendor provenance.
 Immutable full-bundle native profiles with exact patch membership and a release
 support window are **proposed**, not approved: no fixed profile preserves every
 future/arbitrary selected Python >=3.12 interpreter. Legacy executable selection
-still uses the helper. F2 and version/product policy require separate approval;
+still uses the helper. At F1 handoff F2 needed approval; F2 is now authorized as
+bounded above. Version/product policy still requires separate approval;
 no public selector or cutover is authorized. Current preservation passed **708
 library tests (191 ignored), 18 adapter + 8 engine** and explicit **165 reference +
 3 native** tests. With the 17 Ruff opt-ins, **all 185 explicit gates passed**,
@@ -218,8 +239,8 @@ is empty; `.ideomancer/` JS artifacts/global caches were untouched. No additiona
 core changes are planned; provenance anchors are stable. Final source/Git/helper
 checks are read-only, without rebuilding. Earlier test/cache/HEAD receipts describe historical
 checkpoints, not F1. Actual pre-F1 HEAD was user-reported `fdf4e58` (facts-6 commit,
-initially clean/ahead one), not `523cd7b`; current F1 changes are uncommitted and
-unstaged; no commits or pushes were made. The completed lexer goal does not prove byte parser input, AST/debug
+initially clean/ahead one), not `523cd7b`; F1 changes were then uncommitted and
+unstaged; no agent commits or pushes were made. The completed lexer goal alone does not prove byte parser input, AST/debug
 construction, CPython admission, F2 or full G4, or authorize further implementation.
 
 **Historical frontend-4/facts-6 batch:**
@@ -330,13 +351,19 @@ it. Consumers can start with an explicit local path, then pin the full actual Gi
 revision of an approved upstream checkout or internal mirror once available.
 Personal/company Git-based distribution is the approved delivery model; no
 crates.io/registry publication is required (`publish = false`). The five local
-Ruff source crates, notices and two disjoint four-file patches travel in `vendor/ruff`
+Ruff source crates, notices and maintained patches travel in `vendor/ruff`
 with that checkout: no external fork, submodule or published Ruff version is needed.
-Current schema-2 provenance covers **87 vendor files / 66 Rust sources /
+F2 schema-3 provenance passed: **89 vendor files / 67 Rust sources / 2,219,373 bytes**
+(65 upstream + two authored; 14 modified / 51 unchanged upstream),
+with a third nine-file patch layered after the old policy patch. The old two
+patches and 65-source pristine map remain unchanged; **264 source paths** were
+verified. Current consumer and guarded cleanup passed; exact snapshot, hashes and
+receipt limits are in the F2 ledger. The snapshot does not attest these final
+receipt prose bytes. **Historical F1 schema-2 provenance** covered **87 vendor files / 66 Rust sources /
 1,972,891 bytes**: eight modified upstream, 57 unchanged and one authored MIT byte
 facade, separately hashed rather than labeled pristine upstream. The 65-source
 upstream pristine map and AST-only policy patch are unchanged. The source inventory
-is **261 paths** (+5 from F0's 256); current-tree source and vendor checks passed.
+was **261 paths** (+5 from F0's 256); F1 source and vendor checks passed.
 The closure includes
 codec data, scripts, manifest, provenance and notices alongside the existing
 Unicode data/provenance and notices. F1 adds the lexer experiment patch without

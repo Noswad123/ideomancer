@@ -23,7 +23,7 @@ or that a whole application is understood. There are no promised dates.
 | I2 | Read-only facts and validated class-model augmentation | Synthetic integration and a bounded real-source explicit-configuration slice accepted | Preserve immutability, identity checks and provenance; broader framework/runtime interpretation remains separate |
 | I3 | Harden and release the consumable engine | **Next: release and history review** | An approved immutable release works as an upstream or mirrored dependency |
 | P0 | Shared parser backend and native JS/TS Tree-sitter migration | Scoped source/facts, rendered-diagram usefulness and external explicit-configuration boundary accepted; release gates separate | Preserve fact/proof/output contracts; no Node discovery prerequisite; package/consumer checks and supported-platform release validation |
-| P1 | Native Python backend | Frontend-5/facts-7 **G2/G3 private implementation complete/closed** for current admitted Python 3.12 Module-AST lane. **Bounded F1 lexer goal COMPLETE / PROVED**; all tests/delivery gates passed, consumer and cache cleanup complete; production helper retained | [F1 evidence](docs/python-analysis.md#f1-shared-byte-lexer-experiment), not byte parser, AST/debug, CPython admission or full G4 proof. F2 and version/product policy require separate approval; hosted/platform and G5/G6/public cutover open |
+| P1 | Native Python backend | Frontend-5/facts-7 **G2/G3 privately closed** for the admitted Python 3.12 Module-AST lane; **all bounded F2 implementation/delivery gates PASS**, including current consumer/cleanup; production helper retained | [F2 ledger](docs/python-analysis.md#f2-byte-module-parser-source-and-debug-experiment): CPython semantics/admission, debug constants, codecs/type comments, lazy failure priority, resources, F3, full G4, version policy and G5/G6/cutover remain open; no further implementation authorized |
 | P2 | Rust Tree-sitter backend and language facts | Next parser milestone; Rust analysis not implemented | Model Rust structs, enums, traits, impls, functions and modules honestly; no build scripts or macro execution |
 | I4 | Broader language/model capabilities | Later | Independent use cases justify each extension without weakening the boundary |
 
@@ -38,7 +38,27 @@ Node/Chromium tooling independently of JS/TS discovery.
 
 ### Parser Acceptance
 
-**Current F1 checkpoint: bounded lexer goal COMPLETE / PROVED by tests.** One shared
+**Current F2 checkpoint:** authorized private byte Module parser/source/debug
+experiment; one existing Ruff grammar/shared fallible core, closed Legacy/Bytes
+provider, accepted AST callbacks only after both diagnostic channels and provider
+finish. Source-backed debug owner/ranges are identity, not semantic values or
+CPython constants. Bounded implementation validation passed: 743 library tests
+(191 ignored), including all 35 F2; preservation/oracles and provenance passed.
+Current consumer and guarded cleanup passed: **all bounded F2 delivery gates PASS**;
+target absent, no Cargo afterward. Finite tests are not CPython parity and this
+closeout authorizes no further implementation. See the primary
+[F2 ledger](docs/python-analysis.md#f2-byte-module-parser-source-and-debug-experiment)
+for construction/reduction bounds, regression fix, exact evidence/hashes and open
+gates. Verified schema-3 closure: 89 vendor files / 67 Rust sources / 2,219,373
+bytes; 264 source paths verified before docs freeze. Production helper/Python >=3.12 and
+frontend-5/facts-7 names remain unchanged; fingerprints change. User-reported HEAD
+`805edb0` is committed F1, initially clean; F2 remains uncommitted and unstaged,
+with no commit or push. The consumer snapshot does not attest final receipt prose.
+
+**Historical F1 receipts follow.** Authorization, counts, hashes and cleanup below
+describe F1 handoff, not current F2 status.
+
+**Historical F1 checkpoint: bounded lexer goal COMPLETE / PROVED by tests.** One shared
 fallible byte core serves legacy `Lexer(&str)`
 and a doc-hidden experimental byte facade; no separate lexer, source repair,
 unchecked UTF-8, parser/AST/debug construction, semantic admission, facts dispatch
@@ -75,8 +95,8 @@ facade. Manifests/dependencies and frontend-5/facts-7 names are unchanged; the
 implementation fingerprint changes transitively. See the
 [F1 ledger](docs/python-analysis.md#f1-shared-byte-lexer-experiment) for tests,
 baseline and provenance anchors. Actual pre-F1 HEAD was user-reported `fdf4e58`
-(facts-6 commit, initially clean/ahead one), not `523cd7b`; current F1 changes remain
-uncommitted and unstaged; no commits or pushes were made. The detailed F0/visitor
+(facts-6 commit, initially clean/ahead one), not `523cd7b`; F1 changes were then
+uncommitted and unstaged; no agent commits or pushes were made. The detailed F0/visitor
 and earlier receipts below are historical, including HEAD and cache assertions.
 
 Python completion now follows a finite six-gate program, rather than an open-ended
@@ -285,7 +305,8 @@ lookahead/rewind/re-lex, `Chars`/`&str` and debug-string ranges imply an expande
 maintained fork and possible AST/API changes beyond the current four-file policy.
 
 **At F0 handoff: separately bounded F1/F2 proposal, not implementation approval.**
-F1 has since been authorized and compiled as recorded above; F2 still needs approval.
+F1 and bounded F2 have since been authorized and compiled as recorded above;
+this historical proposal does not describe current authorization.
 Proposed immutable full-bundle profiles need exact patch membership, a release
 support window and product approval. Production follows the selected interpreter's
 grammar/stdlib/version token and snapshot, dynamically >=3.12 and not CPython-only;
@@ -303,8 +324,9 @@ with none left. Facts-7 validation/cleanup remains historical.
 
 **Standing architecture constraint (unchanged text interface):** CPython's admission of malformed non-ASCII UTF-8
 comment bytes cannot be reproduced with unchanged Ruff's `&str` input and no source
-rewriting. F1 demonstrates the lexical seam only; parser integration and production
-compatibility boundaries require separate approval—not permission to narrow production's
+rewriting. F1 demonstrated the lexical seam; bounded F2 now implements private
+parser/source/debug integration. Production compatibility still requires separate
+acceptance—not permission to narrow production's
 Python >=3.12 contract. Existing codec, type-comment and platform/resource gaps
 remain; private G2/G3 implementation is closed, but G4–G6 and public cutover are not.
 Contextual type-comment errors can be `IndentationError` (including for/with/class

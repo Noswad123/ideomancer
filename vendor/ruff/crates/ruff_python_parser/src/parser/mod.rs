@@ -6,15 +6,25 @@ use ruff_python_ast::{AtomicNodeIndex, Mod, ModExpression, ModModule};
 use ruff_text_size::{Ranged, TextRange, TextSize};
 
 use crate::error::UnsupportedSyntaxError;
+use crate::byte::{ParserFailure, ByteParseLimits, ParseGuard};
 use crate::parser::expression::ExpressionContext;
 use crate::parser::progress::{ParserProgress, TokenId};
 use crate::token::TokenValue;
 use crate::token_set::TokenSet;
-use crate::token_source::{TokenSource, TokenSourceCheckpoint};
+use crate::token_source::{FinishedSource, TokenSource, TokenSourceCheckpoint};
 use crate::{Mode, ParseError, ParseErrorType, TokenKind, UnsupportedSyntaxErrorKind};
 use crate::{Parsed, Tokens};
 
 pub use crate::parser::options::ParseOptions;
+
+pub(crate) type PResult<T> = Result<T, ParserFailure>;
+
+fn legacy_result<T>(result: PResult<T>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(error) => panic!("legacy parser invariant: {error:?}"),
+    }
+}
 
 mod expression;
 mod helpers;
@@ -27,11 +37,9 @@ mod statement;
 mod tests;
 
 #[derive(Debug)]
-pub(crate) struct Parser<'src> {
-    source: &'src str,
-
+pub(crate) struct Parser<'src, 'check> {
     /// Token source for the parser that skips over any non-trivia token.
-    tokens: TokenSource<'src>,
+    tokens: TokenSource<'src, 'check>,
 
     /// Stores all the syntax errors found during the parsing.
     errors: Vec<ParseError>,
@@ -56,7 +64,7 @@ pub(crate) struct Parser<'src> {
     start_offset: TextSize,
 }
 
-impl<'src> Parser<'src> {
+impl<'src, 'check> Parser<'src, 'check> {
     /// Create a new parser for the given source code.
     pub(crate) fn new(source: &'src str, options: ParseOptions) -> Self {
         Parser::new_starts_at(source, TextSize::new(0), options)
@@ -68,11 +76,23 @@ impl<'src> Parser<'src> {
         start_offset: TextSize,
         options: ParseOptions,
     ) -> Self {
-        let tokens = TokenSource::from_source(source, options.mode, start_offset);
+        let tokens = legacy_result(TokenSource::from_source(source, options.mode, start_offset));
+        Self::from_tokens(tokens, start_offset, options)
+    }
 
-        Parser {
+    pub(crate) fn new_bytes(
+        source: &'src [u8],
+        options: ParseOptions,
+        limits: ByteParseLimits,
+        check: &'check mut dyn FnMut() -> bool,
+    ) -> PResult<Self> {
+        let tokens = TokenSource::from_bytes(source, options.mode, limits, check)?;
+        Ok(Self::from_tokens(tokens, TextSize::new(0), options))
+    }
+
+    fn from_tokens(tokens: TokenSource<'src, 'check>, start_offset: TextSize, options: ParseOptions) -> Self {
+        Self {
             options,
-            source,
             errors: Vec::new(),
             unsupported_syntax_errors: Vec::new(),
             tokens,
@@ -84,12 +104,25 @@ impl<'src> Parser<'src> {
     }
 
     /// Consumes the [`Parser`] and returns the parsed [`Parsed`].
-    pub(crate) fn parse(mut self) -> Parsed<Mod> {
+    pub(crate) fn parse(self) -> Parsed<Mod> {
+        // This wrapper is only for the shipped, unlimited text API. The byte
+        // entry calls parse_inner directly and never converts an error to panic.
+        assert!(self.tokens.is_legacy(), "parse() requires the legacy text lane");
+        let (parsed, finished) = legacy_result(self.parse_inner());
+        match finished {
+            FinishedSource::Legacy => parsed,
+            FinishedSource::Bytes { .. } => unreachable!("text parser changed source banks"),
+        }
+    }
+
+    pub(crate) fn parse_inner(mut self) -> PResult<(Parsed<Mod>, FinishedSource<'src, 'check>)> {
+        self.tokens.begin_parse()?;
+        let _guard = self.enter_parse()?;
         let syntax = match self.options.mode {
             Mode::Expression | Mode::ParenthesizedExpression => {
-                Mod::Expression(self.parse_single_expression())
+                Mod::Expression(self.parse_single_expression()?)
             }
-            Mode::Module | Mode::Ipython => Mod::Module(self.parse_module()),
+            Mode::Module | Mode::Ipython => Mod::Module(self.parse_module()?),
         };
 
         self.finish(syntax)
@@ -103,18 +136,19 @@ impl<'src> Parser<'src> {
     ///
     /// After parsing a single expression, an error is reported and all remaining tokens are
     /// dropped by the parser.
-    fn parse_single_expression(&mut self) -> ModExpression {
+    fn parse_single_expression(&mut self) -> PResult<ModExpression> {
+        let _guard = self.enter_parse()?;
         let start = self.node_start();
-        let parsed_expr = self.parse_expression_list(ExpressionContext::default());
+        let parsed_expr = self.parse_expression_list(ExpressionContext::default())?;
 
         // All remaining newlines are actually going to be non-logical newlines.
-        self.eat(TokenKind::Newline);
+        self.eat(TokenKind::Newline)?;
 
         if !self.at(TokenKind::EndOfFile) {
             self.add_error(
                 ParseErrorType::UnexpectedExpressionToken,
                 self.current_token_range(),
-            );
+            )?;
 
             // TODO(dhruvmanila): How should error recovery work here? Just truncate after the expression?
             let mut progress = ParserProgress::default();
@@ -123,38 +157,43 @@ impl<'src> Parser<'src> {
                 if self.at(TokenKind::EndOfFile) {
                     break;
                 }
-                self.bump_any();
+                self.bump_any()?;
             }
         }
 
-        self.bump(TokenKind::EndOfFile);
+        self.bump(TokenKind::EndOfFile)?;
 
-        ModExpression {
+        Ok(ModExpression {
             body: Box::new(parsed_expr.expr),
             range: self.node_range(start),
             node_index: AtomicNodeIndex::dummy(),
-        }
+        })
     }
 
     /// Parses a Python module.
     ///
     /// This is to be used for [`Mode::Module`] and [`Mode::Ipython`].
-    fn parse_module(&mut self) -> ModModule {
+    fn parse_module(&mut self) -> PResult<ModModule> {
+        let _guard = self.enter_parse()?;
         let body = self.parse_list_into_vec(
             RecoveryContextKind::ModuleStatements,
-            Parser::parse_statement,
-        );
+            |parser| {
+                let statement = parser.parse_statement()?;
+                parser.tokens.finish_top_level_statement()?;
+                Ok(statement)
+            },
+        )?;
 
-        self.bump(TokenKind::EndOfFile);
+        self.bump(TokenKind::EndOfFile)?;
 
-        ModModule {
+        Ok(ModModule {
             body,
             range: TextRange::new(self.start_offset, self.current_token_range().end()),
             node_index: AtomicNodeIndex::dummy(),
-        }
+        })
     }
 
-    fn finish(self, syntax: Mod) -> Parsed<Mod> {
+    fn finish(self, syntax: Mod) -> PResult<(Parsed<Mod>, FinishedSource<'src, 'check>)> {
         assert_eq!(
             self.current_token_kind(),
             TokenKind::EndOfFile,
@@ -163,26 +202,34 @@ impl<'src> Parser<'src> {
 
         // TODO consider re-integrating lexical error handling into the parser?
         let parse_errors = self.errors;
-        let (tokens, lex_errors) = self.tokens.finish();
+        let (tokens, lex_errors, mut finished) = self.tokens.finish()?;
 
         // Fast path for when there are no lex errors.
         // There's no fast path for when there are no parse errors because a lex error
         // always results in a parse error.
         if lex_errors.is_empty() {
-            return Parsed {
+            return Ok((Parsed {
                 syntax,
                 tokens: Tokens::new(tokens),
                 errors: parse_errors,
                 unsupported_syntax_errors: self.unsupported_syntax_errors,
-            };
+            }, finished));
         }
 
-        let mut merged = Vec::with_capacity(parse_errors.len().saturating_add(lex_errors.len()));
+        finished.diagnostics(lex_errors.len())?;
+        let capacity = parse_errors.len().saturating_add(lex_errors.len());
+        let mut merged = if matches!(&finished, FinishedSource::Legacy) {
+            Vec::with_capacity(capacity)
+        } else {
+            Vec::new()
+        };
+        finished.reserve(&mut merged, capacity)?;
 
         let mut parse_errors = parse_errors.into_iter().peekable();
         let mut lex_errors = lex_errors.into_iter().peekable();
 
         while let (Some(parse_error), Some(lex_error)) = (parse_errors.peek(), lex_errors.peek()) {
+            finished.work(1)?;
             match parse_error
                 .location
                 .start()
@@ -198,15 +245,21 @@ impl<'src> Parser<'src> {
             }
         }
 
-        merged.extend(parse_errors);
-        merged.extend(lex_errors.map(ParseError::from));
+        for error in parse_errors {
+            finished.work(1)?;
+            merged.push(error);
+        }
+        for error in lex_errors {
+            finished.work(1)?;
+            merged.push(ParseError::from(error));
+        }
 
-        Parsed {
+        Ok((Parsed {
             syntax,
             tokens: Tokens::new(tokens),
             errors: merged,
             unsupported_syntax_errors: self.unsupported_syntax_errors,
-        }
+        }, finished))
     }
 
     /// Returns the start position for a node that starts at the current token.
@@ -288,7 +341,7 @@ impl<'src> Parser<'src> {
     }
 
     /// Moves the parser to the next token.
-    fn do_bump(&mut self, kind: TokenKind) {
+    fn do_bump(&mut self, kind: TokenKind) -> PResult<()> {
         if !matches!(
             self.current_token_kind(),
             // TODO explore including everything up to the dedent as part of the body.
@@ -302,17 +355,18 @@ impl<'src> Parser<'src> {
             self.prev_token_end = self.current_token_range().end();
         }
 
-        self.tokens.bump(kind);
+        self.tokens.bump(kind)?;
         self.current_token_id.increment();
+        Ok(())
     }
 
     /// Returns the next token kind without consuming it.
-    fn peek(&mut self) -> TokenKind {
+    fn peek(&mut self) -> PResult<TokenKind> {
         self.tokens.peek()
     }
 
     /// Returns the next two token kinds without consuming it.
-    fn peek2(&mut self) -> (TokenKind, TokenKind) {
+    fn peek2(&mut self) -> PResult<(TokenKind, TokenKind)> {
         self.tokens.peek2()
     }
 
@@ -339,10 +393,10 @@ impl<'src> Parser<'src> {
     /// # Panics
     ///
     /// If the current token is not of the given kind.
-    fn bump(&mut self, kind: TokenKind) {
+    fn bump(&mut self, kind: TokenKind) -> PResult<()> {
         assert_eq!(self.current_token_kind(), kind);
 
-        self.do_bump(kind);
+        self.do_bump(kind)
     }
 
     /// Take the token value from the underlying token source and bump the current token.
@@ -350,10 +404,10 @@ impl<'src> Parser<'src> {
     /// # Panics
     ///
     /// If the current token is not of the given kind.
-    fn bump_value(&mut self, kind: TokenKind) -> TokenValue {
-        let value = self.tokens.take_value();
-        self.bump(kind);
-        value
+    fn bump_value(&mut self, kind: TokenKind) -> PResult<TokenValue> {
+        let value = self.tokens.take_value()?;
+        self.bump(kind)?;
+        Ok(value)
     }
 
     /// Bumps the current token assuming it is found in the given token set.
@@ -361,11 +415,11 @@ impl<'src> Parser<'src> {
     /// # Panics
     ///
     /// If the current token is not found in the given token set.
-    fn bump_ts(&mut self, ts: TokenSet) {
+    fn bump_ts(&mut self, ts: TokenSet) -> PResult<()> {
         let kind = self.current_token_kind();
         assert!(ts.contains(kind));
 
-        self.do_bump(kind);
+        self.do_bump(kind)
     }
 
     /// Bumps the current token regardless of its kind and advances to the next token.
@@ -373,11 +427,11 @@ impl<'src> Parser<'src> {
     /// # Panics
     ///
     /// If the parser is at end of file.
-    fn bump_any(&mut self) {
+    fn bump_any(&mut self) -> PResult<()> {
         let kind = self.current_token_kind();
         assert_ne!(kind, TokenKind::EndOfFile);
 
-        self.do_bump(kind);
+        self.do_bump(kind)
     }
 
     /// Bumps the soft keyword token as a `Name` token.
@@ -385,27 +439,27 @@ impl<'src> Parser<'src> {
     /// # Panics
     ///
     /// If the current token is not a soft keyword.
-    pub(crate) fn bump_soft_keyword_as_name(&mut self) {
+    pub(crate) fn bump_soft_keyword_as_name(&mut self) -> PResult<()> {
         assert!(self.at_soft_keyword());
 
-        self.do_bump(TokenKind::Name);
+        self.do_bump(TokenKind::Name)
     }
 
     /// Consume the current token if it is of the given kind. Returns `true` if it matches, `false`
     /// otherwise.
-    fn eat(&mut self, kind: TokenKind) -> bool {
+    fn eat(&mut self, kind: TokenKind) -> PResult<bool> {
         if self.at(kind) {
-            self.do_bump(kind);
-            true
+            self.do_bump(kind)?;
+            Ok(true)
         } else {
-            false
+            Ok(false)
         }
     }
 
     /// Eat the current token if its of the expected kind, otherwise adds an appropriate error.
-    fn expect(&mut self, expected: TokenKind) -> bool {
-        if self.eat(expected) {
-            return true;
+    fn expect(&mut self, expected: TokenKind) -> PResult<bool> {
+        if self.eat(expected)? {
+            return Ok(true);
         }
 
         self.add_error(
@@ -414,42 +468,38 @@ impl<'src> Parser<'src> {
                 expected,
             },
             self.current_token_range(),
-        );
+        )?;
 
-        false
+        Ok(false)
     }
 
-    fn add_error<T>(&mut self, error: ParseErrorType, ranged: T)
+    fn add_error<T>(&mut self, error: ParseErrorType, ranged: T) -> PResult<()>
     where
         T: Ranged,
     {
-        fn inner(errors: &mut Vec<ParseError>, error: ParseErrorType, range: TextRange) {
-            // Avoid flagging multiple errors at the same location
-            let is_same_location = errors
-                .last()
-                .is_some_and(|last| last.location.start() == range.start());
-
-            if !is_same_location {
-                errors.push(ParseError {
-                    error,
-                    location: range,
-                });
-            }
+        let range = ranged.range();
+        // Preserve upstream's same-start diagnostic suppression before charging.
+        if !self.errors.last().is_some_and(|last| last.location.start() == range.start()) {
+            self.tokens.diagnostic()?;
+            self.tokens.reserve(&mut self.errors, 1)?;
+            self.errors.push(ParseError { error, location: range });
         }
-
-        inner(&mut self.errors, error, ranged.range());
+        Ok(())
     }
 
     /// Add an [`UnsupportedSyntaxError`] with the given [`UnsupportedSyntaxErrorKind`] and
     /// [`TextRange`] if its minimum version is less than [`Parser::target_version`].
-    fn add_unsupported_syntax_error(&mut self, kind: UnsupportedSyntaxErrorKind, range: TextRange) {
+    fn add_unsupported_syntax_error(&mut self, kind: UnsupportedSyntaxErrorKind, range: TextRange) -> PResult<()> {
         if kind.is_unsupported(self.options.target_version) {
+            self.tokens.diagnostic()?;
+            self.tokens.reserve(&mut self.unsupported_syntax_errors, 1)?;
             self.unsupported_syntax_errors.push(UnsupportedSyntaxError {
                 kind,
                 range,
                 target_version: self.options.target_version,
             });
         }
+        Ok(())
     }
 
     /// Returns `true` if the current token is of the given kind.
@@ -462,11 +512,44 @@ impl<'src> Parser<'src> {
         ts.contains(self.current_token_kind())
     }
 
-    fn src_text<T>(&self, ranged: T) -> &'src str
+    fn src_text<T>(&mut self, ranged: T) -> PResult<&'src str>
     where
         T: Ranged,
     {
-        &self.source[ranged.range()]
+        self.tokens.source_text(ranged.range())
+    }
+
+    fn source_bytes(&self, range: TextRange) -> PResult<&'src [u8]> {
+        self.tokens.source_bytes(range)
+    }
+
+    fn debug_text(&mut self, leading: TextRange, expression: TextRange, trailing: TextRange) -> PResult<ruff_python_ast::DebugText> {
+        self.tokens.debug_text(leading, expression, trailing)
+    }
+
+    pub(crate) fn enter_parse(&mut self) -> PResult<ParseGuard> {
+        self.tokens.enter_parse()
+    }
+
+    /// Keep reduction depth alive for the whole chain, not just one iteration.
+    fn extend_parse(&mut self, guard: &mut ParseGuard) -> PResult<()> {
+        guard.absorb(self.enter_parse()?)
+    }
+
+    fn charge_work(&mut self, count: usize) -> PResult<()> {
+        self.tokens.work(count)
+    }
+
+    fn charge_source_work(&mut self, count: usize) -> PResult<()> {
+        self.tokens.source_work(count)
+    }
+
+    fn charge_allocation(&mut self, count: usize) -> PResult<()> {
+        self.tokens.allocate(count)
+    }
+
+    fn reserve<T>(&mut self, values: &mut Vec<T>, additional: usize) -> PResult<()> {
+        self.tokens.reserve(values, additional)
     }
 
     /// Parses a list of elements into a vector where each element is parsed using
@@ -474,11 +557,16 @@ impl<'src> Parser<'src> {
     fn parse_list_into_vec<T>(
         &mut self,
         recovery_context_kind: RecoveryContextKind,
-        parse_element: impl Fn(&mut Parser<'src>) -> T,
-    ) -> Vec<T> {
+        parse_element: impl Fn(&mut Parser<'src, 'check>) -> PResult<T>,
+    ) -> PResult<Vec<T>> {
+        let _guard = self.enter_parse()?;
         let mut elements = Vec::new();
-        self.parse_list(recovery_context_kind, |p| elements.push(parse_element(p)));
-        elements
+        self.parse_list(recovery_context_kind, |p| {
+            p.reserve(&mut elements, 1)?;
+            elements.push(parse_element(p)?);
+            Ok(())
+        })?;
+        Ok(elements)
     }
 
     /// Parses a list of elements where each element is parsed using the given
@@ -491,8 +579,9 @@ impl<'src> Parser<'src> {
     fn parse_list(
         &mut self,
         recovery_context_kind: RecoveryContextKind,
-        mut parse_element: impl FnMut(&mut Parser<'src>),
-    ) {
+        mut parse_element: impl FnMut(&mut Parser<'src, 'check>) -> PResult<()>,
+    ) -> PResult<()> {
+        let _guard = self.enter_parse()?;
         let mut progress = ParserProgress::default();
 
         let saved_context = self.recovery_context;
@@ -504,7 +593,7 @@ impl<'src> Parser<'src> {
             progress.assert_progressing(self);
 
             if recovery_context_kind.is_list_element(self) {
-                parse_element(self);
+                parse_element(self)?;
             } else if recovery_context_kind.is_regular_list_terminator(self) {
                 break;
             } else {
@@ -512,20 +601,21 @@ impl<'src> Parser<'src> {
                 // of an enclosing list, then we try to re-lex in the context of a logical line and
                 // break out of list parsing.
                 if self.is_enclosing_list_element_or_terminator() {
-                    self.tokens.re_lex_logical_token();
+                    self.tokens.re_lex_logical_token()?;
                     break;
                 }
 
                 self.add_error(
                     recovery_context_kind.create_error(self),
                     self.current_token_range(),
-                );
+                )?;
 
-                self.bump_any();
+                self.bump_any()?;
             }
         }
 
         self.recovery_context = saved_context;
+        Ok(())
     }
 
     /// Parses a comma separated list of elements into a vector where each element
@@ -533,11 +623,16 @@ impl<'src> Parser<'src> {
     fn parse_comma_separated_list_into_vec<T>(
         &mut self,
         recovery_context_kind: RecoveryContextKind,
-        parse_element: impl Fn(&mut Parser<'src>) -> T,
-    ) -> Vec<T> {
+        parse_element: impl Fn(&mut Parser<'src, 'check>) -> PResult<T>,
+    ) -> PResult<Vec<T>> {
+        let _guard = self.enter_parse()?;
         let mut elements = Vec::new();
-        self.parse_comma_separated_list(recovery_context_kind, |p| elements.push(parse_element(p)));
-        elements
+        self.parse_comma_separated_list(recovery_context_kind, |p| {
+            p.reserve(&mut elements, 1)?;
+            elements.push(parse_element(p)?);
+            Ok(())
+        })?;
+        Ok(elements)
     }
 
     /// Parses a comma separated list of elements where each element is parsed
@@ -552,8 +647,9 @@ impl<'src> Parser<'src> {
     fn parse_comma_separated_list(
         &mut self,
         recovery_context_kind: RecoveryContextKind,
-        mut parse_element: impl FnMut(&mut Parser<'src>),
-    ) -> bool {
+        mut parse_element: impl FnMut(&mut Parser<'src, 'check>) -> PResult<()>,
+    ) -> PResult<bool> {
+        let _guard = self.enter_parse()?;
         let mut progress = ParserProgress::default();
 
         let saved_context = self.recovery_context;
@@ -568,7 +664,7 @@ impl<'src> Parser<'src> {
             progress.assert_progressing(self);
 
             if recovery_context_kind.is_list_element(self) {
-                parse_element(self);
+                parse_element(self)?;
 
                 // Only unset this when we've completely parsed a single element. This is mainly to
                 // raise the correct error in case the first element isn't valid and the current
@@ -577,7 +673,7 @@ impl<'src> Parser<'src> {
                 first_element = false;
 
                 let maybe_comma_range = self.current_token_range();
-                if self.eat(TokenKind::Comma) {
+                if self.eat(TokenKind::Comma)? {
                     trailing_comma_range = Some(maybe_comma_range);
                     continue;
                 }
@@ -603,7 +699,7 @@ impl<'src> Parser<'src> {
                 // This is a special case to expect a comma between two elements and should be
                 // checked before running the error recovery. This is because the error recovery
                 // will always run as the parser is currently at a list element.
-                self.expect(TokenKind::Comma);
+                self.expect(TokenKind::Comma)?;
                 continue;
             }
 
@@ -611,7 +707,7 @@ impl<'src> Parser<'src> {
             // enclosing list, then we try to re-lex in the context of a logical line and break out
             // of list parsing.
             if self.is_enclosing_list_element_or_terminator() {
-                self.tokens.re_lex_logical_token();
+                self.tokens.re_lex_logical_token()?;
                 break;
             }
 
@@ -632,7 +728,7 @@ impl<'src> Parser<'src> {
                 self.add_error(
                     recovery_context_kind.create_error(self),
                     self.current_token_range(),
-                );
+                )?;
 
                 trailing_comma_range = if self.at(TokenKind::Comma) {
                     Some(self.current_token_range())
@@ -645,12 +741,12 @@ impl<'src> Parser<'src> {
 
                 // test_err comma_separated_missing_comma
                 // call(**x := 1)
-                self.expect(TokenKind::Comma);
+                self.expect(TokenKind::Comma)?;
 
                 trailing_comma_range = None;
             }
 
-            self.bump_any();
+            self.bump_any()?;
         }
 
         if let Some(trailing_comma_range) = trailing_comma_range {
@@ -658,13 +754,13 @@ impl<'src> Parser<'src> {
                 self.add_error(
                     ParseErrorType::OtherError("Trailing comma not allowed".to_string()),
                     trailing_comma_range,
-                );
+                )?;
             }
         }
 
         self.recovery_context = saved_context;
 
-        trailing_comma_range.is_some()
+        Ok(trailing_comma_range.is_some())
     }
 
     #[cold]
@@ -679,19 +775,19 @@ impl<'src> Parser<'src> {
     }
 
     /// Creates a checkpoint to which the parser can later return to using [`Self::rewind`].
-    fn checkpoint(&self) -> ParserCheckpoint {
-        ParserCheckpoint {
-            tokens: self.tokens.checkpoint(),
+    fn checkpoint(&mut self) -> PResult<ParserCheckpoint<'src>> {
+        Ok(ParserCheckpoint {
+            tokens: self.tokens.checkpoint()?,
             errors_position: self.errors.len(),
             unsupported_syntax_errors_position: self.unsupported_syntax_errors.len(),
             current_token_id: self.current_token_id,
             prev_token_end: self.prev_token_end,
             recovery_context: self.recovery_context,
-        }
+        })
     }
 
     /// Restore the parser to the given checkpoint.
-    fn rewind(&mut self, checkpoint: ParserCheckpoint) {
+    fn rewind(&mut self, checkpoint: ParserCheckpoint<'src>) -> PResult<()> {
         let ParserCheckpoint {
             tokens,
             errors_position,
@@ -701,18 +797,19 @@ impl<'src> Parser<'src> {
             recovery_context,
         } = checkpoint;
 
-        self.tokens.rewind(tokens);
+        self.tokens.rewind(tokens)?;
         self.errors.truncate(errors_position);
         self.unsupported_syntax_errors
             .truncate(unsupported_syntax_errors_position);
         self.current_token_id = current_token_id;
         self.prev_token_end = prev_token_end;
         self.recovery_context = recovery_context;
+        Ok(())
     }
 }
 
-struct ParserCheckpoint {
-    tokens: TokenSourceCheckpoint,
+struct ParserCheckpoint<'src> {
+    tokens: TokenSourceCheckpoint<'src>,
     errors_position: usize,
     unsupported_syntax_errors_position: usize,
     current_token_id: TokenId,
@@ -968,13 +1065,13 @@ impl RecoveryContextKind {
     /// [`is_regular_list_terminator`] to only check against the former.
     ///
     /// [`is_regular_list_terminator`]: RecoveryContextKind::is_regular_list_terminator
-    fn is_list_terminator(self, p: &Parser) -> bool {
+    fn is_list_terminator(self, p: &Parser<'_, '_>) -> bool {
         self.list_terminator_kind(p).is_some()
     }
 
     /// Returns `true` if the parser is at a token that terminates the list as per the context but
     /// the token isn't part of the error recovery set.
-    fn is_regular_list_terminator(self, p: &Parser) -> bool {
+    fn is_regular_list_terminator(self, p: &Parser<'_, '_>) -> bool {
         matches!(
             self.list_terminator_kind(p),
             Some(ListTerminatorKind::Regular)
@@ -983,7 +1080,7 @@ impl RecoveryContextKind {
 
     /// Checks the current token the parser is at and returns the list terminator kind if the token
     /// terminates the list as per the context.
-    fn list_terminator_kind(self, p: &Parser) -> Option<ListTerminatorKind> {
+    fn list_terminator_kind(self, p: &Parser<'_, '_>) -> Option<ListTerminatorKind> {
         // The end of file marker ends all lists.
         if p.at(TokenKind::EndOfFile) {
             return Some(ListTerminatorKind::Regular);
@@ -1140,7 +1237,7 @@ impl RecoveryContextKind {
         }
     }
 
-    fn is_list_element(self, p: &Parser) -> bool {
+    fn is_list_element(self, p: &Parser<'_, '_>) -> bool {
         match self {
             RecoveryContextKind::ModuleStatements => p.at_stmt(),
             RecoveryContextKind::BlockStatements => p.at_stmt(),
@@ -1187,7 +1284,7 @@ impl RecoveryContextKind {
         }
     }
 
-    fn create_error(self, p: &Parser) -> ParseErrorType {
+    fn create_error(self, p: &Parser<'_, '_>) -> ParseErrorType {
         match self {
             RecoveryContextKind::ModuleStatements | RecoveryContextKind::BlockStatements => {
                 if p.at(TokenKind::Indent) {

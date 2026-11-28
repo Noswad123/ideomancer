@@ -1,0 +1,5021 @@
+--- a/crates/ruff_python_ast/src/nodes.rs
++++ b/crates/ruff_python_ast/src/nodes.rs
+@@ -14,0 +15 @@
++use std::sync::atomic::{AtomicU64, Ordering};
+@@ -384,0 +386,2 @@
++/// Debug-field spelling, either as legacy text gaps or exact source-backed ranges.
++/// Neither representation is a projection of CPython's synthesized debug constant.
+@@ -386,5 +389,81 @@
+-pub struct DebugText {
+-    /// The text between the `{` and the expression node.
+-    pub leading: String,
+-    /// The text between the expression and the conversion, the `format_spec`, or the `}`, depending on what's present in the source
+-    pub trailing: String,
++pub enum DebugText {
++    Text {
++        /// The text between the `{` and the expression node.
++        leading: String,
++        /// The text between the expression and the conversion, format spec, or `}`.
++        trailing: String,
++    },
++    /// Raw byte ranges, including any comments or malformed comment bytes.
++    Source(DebugSourceRanges),
++}
++
++/// Opaque, process-unique identity for one parse's immutable source binding.
++/// Clones retain identity; this is not a persistent or semantic source identifier.
++#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
++pub struct DebugSourceId(u64);
++
++impl DebugSourceId {
++    /// Allocates a nonzero identity without wrapping or reusing exhausted IDs.
++    /// A parser must allocate a fresh identity for each independent parse.
++    pub fn fresh() -> Option<Self> {
++        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
++        NEXT_ID
++            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
++            .ok()
++            .map(Self)
++    }
++}
++
++/// Adjacent raw byte ranges in one parse's immutable source buffer.
++/// The expression range can itself contain comments and need not be valid UTF-8.
++/// Construction checks layout only: source views must also check the owner and
++/// bounds against the actual backing buffer, and text views must validate UTF-8.
++#[derive(Clone, Debug, PartialEq, Eq, Hash)]
++pub struct DebugSourceRanges {
++    owner: DebugSourceId,
++    leading: TextRange,
++    expression: TextRange,
++    trailing: TextRange,
++}
++
++impl DebugSourceRanges {
++    /// Checks adjacency and bounds in the buffer's byte-offset coordinate system.
++    pub fn new(
++        owner: DebugSourceId,
++        leading: TextRange,
++        expression: TextRange,
++        trailing: TextRange,
++        source_len: TextSize,
++    ) -> Option<Self> {
++        if leading.end() != expression.start()
++            || expression.end() != trailing.start()
++            || trailing.end() > source_len
++        {
++            return None;
++        }
++        Some(Self {
++            owner,
++            leading,
++            expression,
++            trailing,
++        })
++    }
++
++    pub fn owner(&self) -> DebugSourceId {
++        self.owner
++    }
++
++    /// The raw spelling between `{` and the expression node, including parentheses.
++    pub fn leading(&self) -> TextRange {
++        self.leading
++    }
++
++    /// The expression node's raw range, not a comment-elided text value.
++    pub fn expression(&self) -> TextRange {
++        self.expression
++    }
++
++    /// The raw spelling through `=` and up to the conversion, format spec, or `}`.
++    pub fn trailing(&self) -> TextRange {
++        self.trailing
++    }
+--- a/crates/ruff_python_ast/src/comparable.rs
++++ b/crates/ruff_python_ast/src/comparable.rs
+@@ -7,0 +8,9 @@
++//!
++//! Debug text is an exception to trivia- and location-independent comparison.
++//! [`ast::DebugText::Text`] retains legacy equality and hashing of its two text gaps.
++//! [`ast::DebugText::Source`] uses identity-based equality and hashing: the source
++//! owner and all three raw ranges participate. Independent parses must use fresh
++//! owners, so matching offsets alone cannot make their debug metadata equal;
++//! clones retain their owner. Text and source variants are never equal. This is
++//! not semantic comparison of source-backed debug text or a projection of CPython's
++//! synthesized debug constant.
+--- a/crates/ruff_python_parser/src/lib.rs
++++ b/crates/ruff_python_parser/src/lib.rs
+@@ -84,0 +85,2 @@
++#[doc(hidden)]
++pub mod byte;
+--- a/crates/ruff_python_parser/src/token_source.rs
++++ b/crates/ruff_python_parser/src/token_source.rs
+@@ -0,0 +1 @@
++use ruff_python_ast::{DebugSourceId, DebugSourceRanges, DebugText};
+@@ -2,0 +4,6 @@
++use crate::byte::{ParserFailure, ByteParseLimits, ParseGuard, ParserBudget};
++use crate::error::LexicalError;
++use crate::lexer::byte::{ByteLexFailure, ByteLexer, ByteLexerCheckpoint, ByteViewError, SourceControl};
++use crate::lexer::{Lexer, LexerCheckpoint};
++use crate::parser::PResult;
++use crate::token::{Token, TokenFlags, TokenKind, TokenValue};
+@@ -4,5 +11,2 @@
+-use crate::error::LexicalError;
+-use crate::lexer::{Lexer, LexerCheckpoint};
+-use crate::token::{Token, TokenFlags, TokenKind, TokenValue};
+-
+-/// Token source for the parser that skips over any trivia tokens.
++
++/// Closed source bank: the byte lane never manufactures a whole-source `str`.
+@@ -10,7 +14,236 @@
+-pub(crate) struct TokenSource<'src> {
+-    /// The underlying source for the tokens.
+-    lexer: Lexer<'src>,
+-
+-    /// A vector containing all the tokens emitted by the lexer. This is returned when the parser
+-    /// is finished consuming all the tokens. Note that unlike the emitted tokens, this vector
+-    /// holds both the trivia and non-trivia tokens.
++enum TokenSourceBank<'src, 'check> {
++    Legacy { lexer: Lexer<'src>, source: &'src str },
++    Bytes { lexer: ByteLexer<'src, 'check>, owner: DebugSourceId, budget: ParserBudget },
++}
++
++enum LexerBankCheckpoint<'src> {
++    Legacy(LexerCheckpoint),
++    Bytes(ByteLexerCheckpoint<'src>),
++}
++
++pub(crate) enum FinishedSource<'src, 'check> {
++    Legacy,
++    Bytes { control: SourceControl<'src, 'check>, owner: DebugSourceId, budget: ParserBudget },
++}
++
++/// The requested additional capacity and its conservative cumulative byte charge.
++/// Geometric growth avoids one allocator call per token on the bounded byte lane.
++fn reservation<T>(values: &Vec<T>, additional: usize) -> Option<(usize, usize)> {
++    let needed = values.len().checked_add(additional)?;
++    if needed <= values.capacity() { return Some((0, 0)); }
++    let capacity = needed.max(values.capacity().checked_mul(2)?).max(8);
++    let charge = capacity.checked_sub(values.capacity())?.checked_mul(std::mem::size_of::<T>())?.checked_mul(2)?;
++    Some((capacity.checked_sub(values.len())?, charge))
++}
++
++impl FinishedSource<'_, '_> {
++    pub(crate) fn stats(&self) -> crate::byte::ParserStats {
++        match self {
++            Self::Legacy => crate::byte::ParserStats::default(),
++            Self::Bytes { control, budget, .. } => crate::byte::ParserStats { lexer: control.stats(), ..budget.stats() },
++        }
++    }
++
++    pub(crate) fn source_work(&mut self, count: usize) -> PResult<()> {
++        if let Self::Bytes { control, .. } = self { control.work(count)?; }
++        Ok(())
++    }
++
++    pub(crate) fn work(&mut self, count: usize) -> PResult<()> {
++        if let Self::Bytes { control, budget, .. } = self {
++            control.work(count)?;
++            if budget.work(count).is_err() { return control.resource_limit().map_err(Into::into); }
++        }
++        Ok(())
++    }
++
++    pub(crate) fn reserve<T>(&mut self, values: &mut Vec<T>, additional: usize) -> PResult<()> {
++        if let Self::Bytes { control, budget, .. } = self {
++            control.work(0)?;
++            let Some((reserve, charge)) = reservation(values, additional) else {
++                return control.resource_limit().map_err(Into::into);
++            };
++            if budget.allocate(charge).is_err() { return control.resource_limit().map_err(Into::into); }
++            control.allocate(charge)?;
++            if reserve != 0 && values.try_reserve_exact(reserve).is_err() {
++                return control.resource_limit().map_err(Into::into);
++            }
++        }
++        Ok(())
++    }
++
++    pub(crate) fn diagnostics(&mut self, count: usize) -> PResult<()> {
++        if let Self::Bytes { control, budget, .. } = self {
++            control.work(0)?;
++            if budget.diagnostics(count).is_err() { return control.resource_limit().map_err(Into::into); }
++        }
++        Ok(())
++    }
++}
++
++impl<'src, 'check> TokenSourceBank<'src, 'check> {
++    fn is_legacy(&self) -> bool { matches!(self, Self::Legacy { .. }) }
++
++    fn work(&mut self, count: usize) -> PResult<()> {
++        if let Self::Bytes { lexer, budget, .. } = self {
++            lexer.parser_work(count)?;
++            if budget.work(count).is_err() { return lexer.parser_resource_limit().map_err(Into::into); }
++        }
++        Ok(())
++    }
++
++    fn allocate(&mut self, count: usize) -> PResult<()> {
++        if let Self::Bytes { lexer, budget, .. } = self {
++            lexer.parser_work(0)?;
++            if budget.allocate(count).is_err() { return lexer.parser_resource_limit().map_err(Into::into); }
++            lexer.parser_allocate(count)?;
++        }
++        Ok(())
++    }
++
++    fn source_work(&mut self, count: usize) -> PResult<()> {
++        self.work(1)?;
++        if let Self::Bytes { lexer, .. } = self { lexer.parser_work(count)?; }
++        Ok(())
++    }
++
++    fn resource_limit<T>(&mut self) -> PResult<T> {
++        match self {
++            Self::Bytes { lexer, .. } => lexer.parser_resource_limit().map_err(Into::into),
++            Self::Legacy { .. } => Err(ByteLexFailure::InvalidState.into()),
++        }
++    }
++
++    fn reserve<T>(&mut self, values: &mut Vec<T>, additional: usize) -> PResult<()> {
++        if !self.is_legacy() {
++            let Some((reserve, charge)) = reservation(values, additional) else { return self.resource_limit(); };
++            self.allocate(charge)?;
++            if reserve != 0 && values.try_reserve_exact(reserve).is_err() { return self.resource_limit(); }
++        }
++        Ok(())
++    }
++
++    fn next_token(&mut self) -> PResult<Token> {
++        self.work(1)?;
++        match self {
++            Self::Legacy { lexer, .. } => {
++                let kind = lexer.next_token();
++                Ok(Token::new(kind, lexer.current_range(), lexer.current_flags()))
++            }
++            Self::Bytes { lexer, .. } => {
++                lexer.next_token()?;
++                Ok(lexer.current_token()?)
++            }
++        }
++    }
++
++    fn take_value(&mut self) -> PResult<TokenValue> {
++        self.work(1)?;
++        match self {
++            Self::Legacy { lexer, .. } => Ok(lexer.take_value()),
++            Self::Bytes { lexer, .. } => Ok(lexer.take_value_for_parser()?),
++        }
++    }
++
++    fn current_flags(&self) -> PResult<TokenFlags> {
++        match self {
++            Self::Legacy { lexer, .. } => Ok(lexer.current_flags()),
++            Self::Bytes { lexer, .. } => Ok(lexer.flags_for_parser()?),
++        }
++    }
++
++    fn checkpoint(&mut self) -> PResult<LexerBankCheckpoint<'src>> {
++        self.work(1)?;
++        match self {
++            Self::Legacy { lexer, .. } => Ok(LexerBankCheckpoint::Legacy(lexer.checkpoint())),
++            Self::Bytes { lexer, .. } => Ok(LexerBankCheckpoint::Bytes(lexer.checkpoint()?)),
++        }
++    }
++
++    fn rewind(&mut self, checkpoint: LexerBankCheckpoint<'src>) -> PResult<()> {
++        // Do not call parser_work/ready here: an owned snapshot must be able to
++        // restore a source fault. ByteLexer::rewind still polls terminal control.
++        match (self, checkpoint) {
++            (Self::Legacy { lexer, .. }, LexerBankCheckpoint::Legacy(checkpoint)) => {
++                lexer.rewind(checkpoint);
++                Ok(())
++            }
++            (Self::Bytes { lexer, budget, .. }, LexerBankCheckpoint::Bytes(checkpoint)) => {
++                lexer.rewind_for_parser(checkpoint)?;
++                if budget.work(1).is_err() { return lexer.parser_resource_limit().map_err(Into::into); }
++                Ok(())
++            }
++            _ => Err(ByteLexFailure::ForeignCheckpoint.into()),
++        }
++    }
++
++    fn relex(&mut self, start: Option<TextSize>) -> PResult<(bool, Token)> {
++        self.work(1)?;
++        match self {
++            Self::Legacy { lexer, .. } => {
++                let changed = lexer.re_lex_logical_token(start);
++                Ok((changed, Token::new(lexer.current_kind(), lexer.current_range(), lexer.current_flags())))
++            }
++            Self::Bytes { lexer, budget, .. } => {
++                if budget.relex(false).is_err() { return lexer.parser_resource_limit().map_err(Into::into); }
++                let changed = lexer.re_lex_logical_token(start)?;
++                if changed && budget.relex(true).is_err() { return lexer.parser_resource_limit().map_err(Into::into); }
++                Ok((changed, lexer.current_token()?))
++            }
++        }
++    }
++
++    fn source_bytes(&self, range: TextRange) -> PResult<&'src [u8]> {
++        let bytes = match self {
++            Self::Legacy { source, .. } => source.as_bytes(),
++            Self::Bytes { lexer, .. } => lexer.original_bytes(),
++        };
++        bytes.get(range.start().to_usize()..range.end().to_usize())
++            .ok_or(ParserFailure::View { range, error: ByteViewError::InvalidRange })
++    }
++
++    fn source_text(&mut self, range: TextRange) -> PResult<&'src str> {
++        self.work(1)?;
++        match self {
++            Self::Legacy { source, .. } => Ok(&source[range]),
++            Self::Bytes { lexer, .. } => lexer.source_text(range).map_err(|error| match error {
++                ByteViewError::Cancelled => ParserFailure::Input(ByteLexFailure::Cancelled),
++                ByteViewError::ResourceLimit => ParserFailure::Input(ByteLexFailure::ResourceLimit),
++                ByteViewError::InvalidRange | ByteViewError::InvalidUtf8 => ParserFailure::View { range, error },
++            }),
++        }
++    }
++
++    fn debug_text(&mut self, leading: TextRange, expression: TextRange, trailing: TextRange) -> PResult<DebugText> {
++        self.work(1)?;
++        match self {
++            Self::Legacy { source, .. } => Ok(DebugText::Text {
++                leading: source[leading].to_string(),
++                trailing: source[trailing].to_string(),
++            }),
++            Self::Bytes { lexer, owner, .. } => {
++                DebugSourceRanges::new(*owner, leading, expression, trailing,
++                    TextSize::new(lexer.original_bytes().len() as u32))
++                    .map(DebugText::Source)
++                    .ok_or(ParserFailure::View { range: trailing, error: ByteViewError::InvalidRange })
++            }
++        }
++    }
++
++    fn finish(self) -> PResult<(Vec<LexicalError>, FinishedSource<'src, 'check>)> {
++        match self {
++            Self::Legacy { lexer, .. } => Ok((lexer.finish(), FinishedSource::Legacy)),
++            Self::Bytes { lexer, owner, budget } => {
++                let (errors, control) = lexer.finish_for_parser()?;
++                Ok((errors, FinishedSource::Bytes { control, owner, budget }))
++            }
++        }
++    }
++}
++
++/// Trivia-retaining stream with a cache established only by successful advance.
++#[derive(Debug)]
++pub(crate) struct TokenSource<'src, 'check> {
++    bank: TokenSourceBank<'src, 'check>,
++    current: Token,
++    flags: TokenFlags,
+@@ -20,50 +253,96 @@
+-impl<'src> TokenSource<'src> {
+-    /// Create a new token source for the given lexer.
+-    pub(crate) fn new(lexer: Lexer<'src>) -> Self {
+-        // TODO(dhruvmanila): Use `allocate_tokens_vec`
+-        TokenSource {
+-            lexer,
+-            tokens: vec![],
+-        }
+-    }
+-
+-    /// Create a new token source from the given source code which starts at the given offset.
+-    pub(crate) fn from_source(source: &'src str, mode: Mode, start_offset: TextSize) -> Self {
+-        let lexer = Lexer::new(source, mode, start_offset);
+-        let mut source = TokenSource::new(lexer);
+-
+-        // Initialize the token source so that the current token is set correctly.
+-        source.do_bump();
+-        source
+-    }
+-
+-    /// Returns the kind of the current token.
+-    pub(crate) fn current_kind(&self) -> TokenKind {
+-        self.lexer.current_kind()
+-    }
+-
+-    /// Returns the range of the current token.
+-    pub(crate) fn current_range(&self) -> TextRange {
+-        self.lexer.current_range()
+-    }
+-
+-    /// Returns the flags for the current token.
+-    pub(crate) fn current_flags(&self) -> TokenFlags {
+-        self.lexer.current_flags()
+-    }
+-
+-    /// Calls the underlying [`take_value`] method on the lexer. Refer to its documentation
+-    /// for more info.
+-    ///
+-    /// [`take_value`]: Lexer::take_value
+-    pub(crate) fn take_value(&mut self) -> TokenValue {
+-        self.lexer.take_value()
+-    }
+-
+-    /// Calls the underlying [`re_lex_logical_token`] method on the lexer with the new lexer
+-    /// position and updates the token vector accordingly.
+-    ///
+-    /// [`re_lex_logical_token`]: Lexer::re_lex_logical_token
+-    pub(crate) fn re_lex_logical_token(&mut self) {
+-        let mut non_logical_newline_start = None;
+-        for token in self.tokens.iter().rev() {
++impl<'src, 'check> TokenSource<'src, 'check> {
++    fn from_bank(mut bank: TokenSourceBank<'src, 'check>) -> PResult<Self> {
++        let mut tokens = Vec::new();
++        let current = loop {
++            let token = bank.next_token()?;
++            if !token.kind().is_trivia() { break token; }
++            bank.reserve(&mut tokens, 1)?;
++            tokens.push(token);
++        };
++        let flags = bank.current_flags()?;
++        Ok(Self { bank, current, flags, tokens })
++    }
++
++    pub(crate) fn from_source(source: &'src str, mode: Mode, start_offset: TextSize) -> PResult<Self> {
++        Self::from_bank(TokenSourceBank::Legacy { lexer: Lexer::new(source, mode, start_offset), source })
++    }
++
++    pub(crate) fn from_bytes(source: &'src [u8], mode: Mode, limits: ByteParseLimits,
++        check: &'check mut dyn FnMut() -> bool) -> PResult<Self> {
++        let owner = DebugSourceId::fresh().ok_or(ParserFailure::SourceIdExhausted)?;
++        let mut lexer = ByteLexer::new(source, mode, limits.lexer, check)?;
++        // Precharge the small shared quota owner before allocating its Rc.
++        if limits.parser_working < 512 { return lexer.parser_resource_limit().map_err(Into::into); }
++        lexer.parser_allocate(512)?;
++        let budget = ParserBudget::new(limits);
++        if budget.allocate(512).is_err() { return lexer.parser_resource_limit().map_err(Into::into); }
++        Self::from_bank(TokenSourceBank::Bytes { lexer, owner, budget })
++    }
++
++    pub(crate) fn is_legacy(&self) -> bool { self.bank.is_legacy() }
++    pub(crate) fn copy_retained_tokens(&mut self) -> PResult<Vec<Token>> {
++        let mut copy = Vec::new();
++        self.bank.reserve(&mut copy, self.tokens.len())?;
++        for chunk in self.tokens.chunks(256) {
++            self.bank.work(chunk.len())?;
++            copy.extend_from_slice(chunk);
++        }
++        Ok(copy)
++    }
++    pub(crate) fn current_kind(&self) -> TokenKind { self.current.kind() }
++    pub(crate) fn current_range(&self) -> TextRange { self.current.range() }
++    pub(crate) fn current_flags(&self) -> TokenFlags { self.flags }
++    pub(crate) fn take_value(&mut self) -> PResult<TokenValue> { self.bank.take_value() }
++    pub(crate) fn work(&mut self, count: usize) -> PResult<()> { self.bank.work(count) }
++    pub(crate) fn source_work(&mut self, count: usize) -> PResult<()> { self.bank.source_work(count) }
++    pub(crate) fn allocate(&mut self, count: usize) -> PResult<()> { self.bank.allocate(count) }
++    pub(crate) fn reserve<T>(&mut self, values: &mut Vec<T>, additional: usize) -> PResult<()> {
++        self.bank.reserve(values, additional)
++    }
++    pub(crate) fn source_bytes(&self, range: TextRange) -> PResult<&'src [u8]> { self.bank.source_bytes(range) }
++    pub(crate) fn source_text(&mut self, range: TextRange) -> PResult<&'src str> { self.bank.source_text(range) }
++    pub(crate) fn debug_text(&mut self, leading: TextRange, expression: TextRange, trailing: TextRange) -> PResult<DebugText> {
++        self.bank.debug_text(leading, expression, trailing)
++    }
++
++    pub(crate) fn begin_parse(&mut self) -> PResult<()> {
++        self.work(0)?;
++        if let TokenSourceBank::Bytes { budget, .. } = &self.bank {
++            if budget.begin_parse().is_err() { return self.bank.resource_limit(); }
++        }
++        Ok(())
++    }
++
++    pub(crate) fn finish_top_level_statement(&mut self) -> PResult<()> {
++        self.work(0)?;
++        if let TokenSourceBank::Bytes { budget, .. } = &self.bank {
++            if budget.finish_top_level_statement().is_err() { return self.bank.resource_limit(); }
++        }
++        Ok(())
++    }
++
++    pub(crate) fn enter_parse(&mut self) -> PResult<ParseGuard> {
++        self.work(1)?;
++        self.bank.allocate(512)?;
++        match &self.bank {
++            TokenSourceBank::Legacy { .. } => Ok(ParseGuard::default()),
++            TokenSourceBank::Bytes { budget, .. } => match budget.enter() {
++                Ok(guard) => Ok(guard),
++                Err(_) => self.bank.resource_limit(),
++            },
++        }
++    }
++
++    pub(crate) fn diagnostic(&mut self) -> PResult<()> {
++        self.work(1)?;
++        if let TokenSourceBank::Bytes { budget, .. } = &self.bank {
++            if budget.diagnostics(1).is_err() { return self.bank.resource_limit(); }
++        }
++        Ok(())
++    }
++
++    pub(crate) fn re_lex_logical_token(&mut self) -> PResult<()> {
++        let mut start = None;
++        for index in (0..self.tokens.len()).rev() {
++            self.work(1)?;
++            let token = self.tokens[index];
+@@ -71,3 +350 @@
+-                TokenKind::NonLogicalNewline => {
+-                    non_logical_newline_start = Some(token.start());
+-                }
++                TokenKind::NonLogicalNewline => start = Some(token.start()),
+@@ -78,8 +355,6 @@
+-
+-        if self.lexer.re_lex_logical_token(non_logical_newline_start) {
+-            let current_start = self.current_range().start();
+-            while self
+-                .tokens
+-                .last()
+-                .is_some_and(|last| last.start() >= current_start)
+-            {
++        let (changed, current) = self.bank.relex(start)?;
++        self.flags = self.bank.current_flags()?;
++        self.current = current;
++        if changed {
++            while self.tokens.last().is_some_and(|last| last.start() >= current.start()) {
++                self.work(1)?;
+@@ -89,39 +364,28 @@
+-    }
+-
+-    /// Returns the next non-trivia token without consuming it.
+-    ///
+-    /// Use [`peek2`] to get the next two tokens.
+-    ///
+-    /// [`peek2`]: TokenSource::peek2
+-    pub(crate) fn peek(&mut self) -> TokenKind {
+-        let checkpoint = self.lexer.checkpoint();
+-        let next = self.next_non_trivia_token();
+-        self.lexer.rewind(checkpoint);
+-        next
+-    }
+-
+-    /// Returns the next two non-trivia tokens without consuming it.
+-    ///
+-    /// Use [`peek`] to only get the next token.
+-    ///
+-    /// [`peek`]: TokenSource::peek
+-    pub(crate) fn peek2(&mut self) -> (TokenKind, TokenKind) {
+-        let checkpoint = self.lexer.checkpoint();
+-        let first = self.next_non_trivia_token();
+-        let second = self.next_non_trivia_token();
+-        self.lexer.rewind(checkpoint);
+-        (first, second)
+-    }
+-
+-    /// Bumps the token source to the next non-trivia token.
+-    ///
+-    /// It pushes the given kind to the token vector with the current token range.
+-    pub(crate) fn bump(&mut self, kind: TokenKind) {
+-        self.tokens
+-            .push(Token::new(kind, self.current_range(), self.current_flags()));
+-        self.do_bump();
+-    }
+-
+-    /// Bumps the token source to the next non-trivia token without adding the current token to the
+-    /// token vector. It does add the trivia tokens to the token vector.
+-    fn do_bump(&mut self) {
++        Ok(())
++    }
++
++    pub(crate) fn peek(&mut self) -> PResult<TokenKind> {
++        let checkpoint = self.bank.checkpoint()?;
++        let result = self.next_non_trivia_token();
++        let restored = self.bank.rewind(checkpoint);
++        // Restoration can clear a source fault, but it must not erase the error
++        // observed by this peek. Terminal control errors always survive rewind.
++        restored?;
++        result.map(|token| token.kind())
++    }
++
++    pub(crate) fn peek2(&mut self) -> PResult<(TokenKind, TokenKind)> {
++        let checkpoint = self.bank.checkpoint()?;
++        let result = (|| {
++            let first = self.next_non_trivia_token()?;
++            let second = self.next_non_trivia_token()?;
++            Ok((first.kind(), second.kind()))
++        })();
++        let restored = self.bank.rewind(checkpoint);
++        restored?;
++        result
++    }
++
++    pub(crate) fn bump(&mut self, kind: TokenKind) -> PResult<()> {
++        self.bank.reserve(&mut self.tokens, 1)?;
++        self.tokens.push(Token::new(kind, self.current_range(), self.current_flags()));
+@@ -129,12 +393,13 @@
+-            let kind = self.lexer.next_token();
+-            if kind.is_trivia() {
+-                self.tokens
+-                    .push(Token::new(kind, self.current_range(), self.current_flags()));
+-                continue;
+-            }
+-            break;
+-        }
+-    }
+-
+-    /// Returns the next non-trivia token without adding it to the token vector.
+-    fn next_non_trivia_token(&mut self) -> TokenKind {
++            let token = self.bank.next_token()?;
++            if token.kind().is_trivia() {
++                self.bank.reserve(&mut self.tokens, 1)?;
++                self.tokens.push(token);
++            } else {
++                self.flags = self.bank.current_flags()?;
++                self.current = token;
++                return Ok(());
++            }
++        }
++    }
++
++    fn next_non_trivia_token(&mut self) -> PResult<Token> {
+@@ -142,33 +407,33 @@
+-            let kind = self.lexer.next_token();
+-            if kind.is_trivia() {
+-                continue;
+-            }
+-            break kind;
+-        }
+-    }
+-
+-    /// Creates a checkpoint to which the token source can later return to using [`Self::rewind`].
+-    pub(crate) fn checkpoint(&self) -> TokenSourceCheckpoint {
+-        TokenSourceCheckpoint {
+-            lexer_checkpoint: self.lexer.checkpoint(),
+-            tokens_position: self.tokens.len(),
+-        }
+-    }
+-
+-    /// Restore the token source to the given checkpoint.
+-    pub(crate) fn rewind(&mut self, checkpoint: TokenSourceCheckpoint) {
+-        let TokenSourceCheckpoint {
+-            lexer_checkpoint,
+-            tokens_position,
+-        } = checkpoint;
+-
+-        self.lexer.rewind(lexer_checkpoint);
+-        self.tokens.truncate(tokens_position);
+-    }
+-
+-    /// Returns a slice of [`Token`] that are within the given `range`.
+-    pub(crate) fn in_range(&self, range: TextRange) -> &[Token] {
+-        let start = self
+-            .tokens
+-            .iter()
+-            .rposition(|tok| tok.start() == range.start());
++            let token = self.bank.next_token()?;
++            if !token.kind().is_trivia() { return Ok(token); }
++        }
++    }
++
++    pub(crate) fn checkpoint(&mut self) -> PResult<TokenSourceCheckpoint<'src>> {
++        let lexer = self.bank.checkpoint()?;
++        let tokens = if self.bank.is_legacy() {
++            None
++        } else {
++            // Recovery re-lex can remove a prefix that predates this checkpoint.
++            // Length-only truncation cannot restore it. Snapshot byte-lane history
++            // with cumulative precharges; normal text retains upstream behavior.
++            Some(self.copy_retained_tokens()?)
++        };
++        Ok(TokenSourceCheckpoint { lexer, current: self.current, flags: self.flags, tokens_position: self.tokens.len(), tokens })
++    }
++
++    pub(crate) fn rewind(&mut self, checkpoint: TokenSourceCheckpoint<'src>) -> PResult<()> {
++        self.bank.rewind(checkpoint.lexer)?;
++        self.current = checkpoint.current;
++        self.flags = checkpoint.flags;
++        if let Some(tokens) = checkpoint.tokens {
++            self.tokens = tokens;
++        } else {
++            self.tokens.truncate(checkpoint.tokens_position);
++        }
++        Ok(())
++    }
++
++    pub(crate) fn in_range(&mut self, range: TextRange) -> PResult<&[Token]> {
++        self.work(self.tokens.len().saturating_mul(2))?;
++        let start = self.tokens.iter().rposition(|tok| tok.start() == range.start());
+@@ -176,20 +441,6 @@
+-
+-        let (Some(start), Some(end)) = (start, end) else {
+-            return &self.tokens;
+-        };
+-
+-        &self.tokens[start..=end]
+-    }
+-
+-    /// Consumes the token source, returning the collected tokens, comment ranges, and any errors
+-    /// encountered during lexing. The token collection includes both the trivia and non-trivia
+-    /// tokens.
+-    pub(crate) fn finish(mut self) -> (Vec<Token>, Vec<LexicalError>) {
+-        assert_eq!(
+-            self.current_kind(),
+-            TokenKind::EndOfFile,
+-            "TokenSource was not fully consumed"
+-        );
+-
+-        // The `EndOfFile` token shouldn't be included in the token stream, it's mainly to signal
+-        // the parser to stop. This isn't in `do_bump` because it only needs to be done once.
++        let (Some(start), Some(end)) = (start, end) else { return Ok(&self.tokens); };
++        Ok(&self.tokens[start..=end])
++    }
++
++    pub(crate) fn finish(mut self) -> PResult<(Vec<Token>, Vec<LexicalError>, FinishedSource<'src, 'check>)> {
++        if self.current_kind() != TokenKind::EndOfFile { return Err(ByteLexFailure::Incomplete.into()); }
+@@ -197,9 +448,11 @@
+-            assert_eq!(last.kind(), TokenKind::EndOfFile);
+-        }
+-
+-        (self.tokens, self.lexer.finish())
+-    }
+-}
+-
+-pub(crate) struct TokenSourceCheckpoint {
+-    lexer_checkpoint: LexerCheckpoint,
++            if last.kind() != TokenKind::EndOfFile { return Err(ByteLexFailure::InvalidState.into()); }
++        }
++        let (errors, finished) = self.bank.finish()?;
++        Ok((self.tokens, errors, finished))
++    }
++}
++
++pub(crate) struct TokenSourceCheckpoint<'src> {
++    lexer: LexerBankCheckpoint<'src>,
++    current: Token,
++    flags: TokenFlags,
+@@ -207,11 +460,2 @@
+-}
+-
+-/// Allocates a [`Vec`] with an approximated capacity to fit all tokens
+-/// of `contents`.
+-///
+-/// See [#9546](https://github.com/astral-sh/ruff/pull/9546) for a more detailed explanation.
+-#[expect(dead_code)]
+-fn allocate_tokens_vec(contents: &str) -> Vec<Token> {
+-    let lower_bound = contents.len().saturating_mul(15) / 100;
+-    Vec::with_capacity(lower_bound)
+-}
++    tokens: Option<Vec<Token>>,
++}
+--- a/crates/ruff_python_parser/src/parser/mod.rs
++++ b/crates/ruff_python_parser/src/parser/mod.rs
+@@ -8,0 +9 @@
++use crate::byte::{ParserFailure, ByteParseLimits, ParseGuard};
+@@ -13 +14 @@
+-use crate::token_source::{TokenSource, TokenSourceCheckpoint};
++use crate::token_source::{FinishedSource, TokenSource, TokenSourceCheckpoint};
+@@ -17,0 +19,9 @@
++
++pub(crate) type PResult<T> = Result<T, ParserFailure>;
++
++fn legacy_result<T>(result: PResult<T>) -> T {
++    match result {
++        Ok(value) => value,
++        Err(error) => panic!("legacy parser invariant: {error:?}"),
++    }
++}
+@@ -30,3 +40 @@
+-pub(crate) struct Parser<'src> {
+-    source: &'src str,
+-
++pub(crate) struct Parser<'src, 'check> {
+@@ -34 +42 @@
+-    tokens: TokenSource<'src>,
++    tokens: TokenSource<'src, 'check>,
+@@ -59 +67 @@
+-impl<'src> Parser<'src> {
++impl<'src, 'check> Parser<'src, 'check> {
+@@ -71,3 +79,16 @@
+-        let tokens = TokenSource::from_source(source, options.mode, start_offset);
+-
+-        Parser {
++        let tokens = legacy_result(TokenSource::from_source(source, options.mode, start_offset));
++        Self::from_tokens(tokens, start_offset, options)
++    }
++
++    pub(crate) fn new_bytes(
++        source: &'src [u8],
++        options: ParseOptions,
++        limits: ByteParseLimits,
++        check: &'check mut dyn FnMut() -> bool,
++    ) -> PResult<Self> {
++        let tokens = TokenSource::from_bytes(source, options.mode, limits, check)?;
++        Ok(Self::from_tokens(tokens, TextSize::new(0), options))
++    }
++
++    fn from_tokens(tokens: TokenSource<'src, 'check>, start_offset: TextSize, options: ParseOptions) -> Self {
++        Self {
+@@ -75 +95,0 @@
+-            source,
+@@ -87 +107,14 @@
+-    pub(crate) fn parse(mut self) -> Parsed<Mod> {
++    pub(crate) fn parse(self) -> Parsed<Mod> {
++        // This wrapper is only for the shipped, unlimited text API. The byte
++        // entry calls parse_inner directly and never converts an error to panic.
++        assert!(self.tokens.is_legacy(), "parse() requires the legacy text lane");
++        let (parsed, finished) = legacy_result(self.parse_inner());
++        match finished {
++            FinishedSource::Legacy => parsed,
++            FinishedSource::Bytes { .. } => unreachable!("text parser changed source banks"),
++        }
++    }
++
++    pub(crate) fn parse_inner(mut self) -> PResult<(Parsed<Mod>, FinishedSource<'src, 'check>)> {
++        self.tokens.begin_parse()?;
++        let _guard = self.enter_parse()?;
+@@ -90,3 +123,3 @@
+-                Mod::Expression(self.parse_single_expression())
+-            }
+-            Mode::Module | Mode::Ipython => Mod::Module(self.parse_module()),
++                Mod::Expression(self.parse_single_expression()?)
++            }
++            Mode::Module | Mode::Ipython => Mod::Module(self.parse_module()?),
+@@ -106 +139,2 @@
+-    fn parse_single_expression(&mut self) -> ModExpression {
++    fn parse_single_expression(&mut self) -> PResult<ModExpression> {
++        let _guard = self.enter_parse()?;
+@@ -108 +142 @@
+-        let parsed_expr = self.parse_expression_list(ExpressionContext::default());
++        let parsed_expr = self.parse_expression_list(ExpressionContext::default())?;
+@@ -111 +145 @@
+-        self.eat(TokenKind::Newline);
++        self.eat(TokenKind::Newline)?;
+@@ -117 +151 @@
+-            );
++            )?;
+@@ -126,7 +160,7 @@
+-                self.bump_any();
+-            }
+-        }
+-
+-        self.bump(TokenKind::EndOfFile);
+-
+-        ModExpression {
++                self.bump_any()?;
++            }
++        }
++
++        self.bump(TokenKind::EndOfFile)?;
++
++        Ok(ModExpression {
+@@ -136 +170 @@
+-        }
++        })
+@@ -142 +176,2 @@
+-    fn parse_module(&mut self) -> ModModule {
++    fn parse_module(&mut self) -> PResult<ModModule> {
++        let _guard = self.enter_parse()?;
+@@ -145,6 +180,10 @@
+-            Parser::parse_statement,
+-        );
+-
+-        self.bump(TokenKind::EndOfFile);
+-
+-        ModModule {
++            |parser| {
++                let statement = parser.parse_statement()?;
++                parser.tokens.finish_top_level_statement()?;
++                Ok(statement)
++            },
++        )?;
++
++        self.bump(TokenKind::EndOfFile)?;
++
++        Ok(ModModule {
+@@ -154,4 +193,4 @@
+-        }
+-    }
+-
+-    fn finish(self, syntax: Mod) -> Parsed<Mod> {
++        })
++    }
++
++    fn finish(self, syntax: Mod) -> PResult<(Parsed<Mod>, FinishedSource<'src, 'check>)> {
+@@ -166 +205 @@
+-        let (tokens, lex_errors) = self.tokens.finish();
++        let (tokens, lex_errors, mut finished) = self.tokens.finish()?;
+@@ -172 +211 @@
+-            return Parsed {
++            return Ok((Parsed {
+@@ -177,4 +216,11 @@
+-            };
+-        }
+-
+-        let mut merged = Vec::with_capacity(parse_errors.len().saturating_add(lex_errors.len()));
++            }, finished));
++        }
++
++        finished.diagnostics(lex_errors.len())?;
++        let capacity = parse_errors.len().saturating_add(lex_errors.len());
++        let mut merged = if matches!(&finished, FinishedSource::Legacy) {
++            Vec::with_capacity(capacity)
++        } else {
++            Vec::new()
++        };
++        finished.reserve(&mut merged, capacity)?;
+@@ -185,0 +232 @@
++            finished.work(1)?;
+@@ -201,4 +248,10 @@
+-        merged.extend(parse_errors);
+-        merged.extend(lex_errors.map(ParseError::from));
+-
+-        Parsed {
++        for error in parse_errors {
++            finished.work(1)?;
++            merged.push(error);
++        }
++        for error in lex_errors {
++            finished.work(1)?;
++            merged.push(ParseError::from(error));
++        }
++
++        Ok((Parsed {
+@@ -209 +262 @@
+-        }
++        }, finished))
+@@ -291 +344 @@
+-    fn do_bump(&mut self, kind: TokenKind) {
++    fn do_bump(&mut self, kind: TokenKind) -> PResult<()> {
+@@ -305 +358 @@
+-        self.tokens.bump(kind);
++        self.tokens.bump(kind)?;
+@@ -306,0 +360 @@
++        Ok(())
+@@ -310 +364 @@
+-    fn peek(&mut self) -> TokenKind {
++    fn peek(&mut self) -> PResult<TokenKind> {
+@@ -315 +369 @@
+-    fn peek2(&mut self) -> (TokenKind, TokenKind) {
++    fn peek2(&mut self) -> PResult<(TokenKind, TokenKind)> {
+@@ -342 +396 @@
+-    fn bump(&mut self, kind: TokenKind) {
++    fn bump(&mut self, kind: TokenKind) -> PResult<()> {
+@@ -345 +399 @@
+-        self.do_bump(kind);
++        self.do_bump(kind)
+@@ -353,4 +407,4 @@
+-    fn bump_value(&mut self, kind: TokenKind) -> TokenValue {
+-        let value = self.tokens.take_value();
+-        self.bump(kind);
+-        value
++    fn bump_value(&mut self, kind: TokenKind) -> PResult<TokenValue> {
++        let value = self.tokens.take_value()?;
++        self.bump(kind)?;
++        Ok(value)
+@@ -364 +418 @@
+-    fn bump_ts(&mut self, ts: TokenSet) {
++    fn bump_ts(&mut self, ts: TokenSet) -> PResult<()> {
+@@ -368 +422 @@
+-        self.do_bump(kind);
++        self.do_bump(kind)
+@@ -376 +430 @@
+-    fn bump_any(&mut self) {
++    fn bump_any(&mut self) -> PResult<()> {
+@@ -380 +434 @@
+-        self.do_bump(kind);
++        self.do_bump(kind)
+@@ -388 +442 @@
+-    pub(crate) fn bump_soft_keyword_as_name(&mut self) {
++    pub(crate) fn bump_soft_keyword_as_name(&mut self) -> PResult<()> {
+@@ -391 +445 @@
+-        self.do_bump(TokenKind::Name);
++        self.do_bump(TokenKind::Name)
+@@ -396 +450 @@
+-    fn eat(&mut self, kind: TokenKind) -> bool {
++    fn eat(&mut self, kind: TokenKind) -> PResult<bool> {
+@@ -398,2 +452,2 @@
+-            self.do_bump(kind);
+-            true
++            self.do_bump(kind)?;
++            Ok(true)
+@@ -401 +455 @@
+-            false
++            Ok(false)
+@@ -406,3 +460,3 @@
+-    fn expect(&mut self, expected: TokenKind) -> bool {
+-        if self.eat(expected) {
+-            return true;
++    fn expect(&mut self, expected: TokenKind) -> PResult<bool> {
++        if self.eat(expected)? {
++            return Ok(true);
+@@ -417,6 +471,6 @@
+-        );
+-
+-        false
+-    }
+-
+-    fn add_error<T>(&mut self, error: ParseErrorType, ranged: T)
++        )?;
++
++        Ok(false)
++    }
++
++    fn add_error<T>(&mut self, error: ParseErrorType, ranged: T) -> PResult<()>
+@@ -426,15 +480,8 @@
+-        fn inner(errors: &mut Vec<ParseError>, error: ParseErrorType, range: TextRange) {
+-            // Avoid flagging multiple errors at the same location
+-            let is_same_location = errors
+-                .last()
+-                .is_some_and(|last| last.location.start() == range.start());
+-
+-            if !is_same_location {
+-                errors.push(ParseError {
+-                    error,
+-                    location: range,
+-                });
+-            }
+-        }
+-
+-        inner(&mut self.errors, error, ranged.range());
++        let range = ranged.range();
++        // Preserve upstream's same-start diagnostic suppression before charging.
++        if !self.errors.last().is_some_and(|last| last.location.start() == range.start()) {
++            self.tokens.diagnostic()?;
++            self.tokens.reserve(&mut self.errors, 1)?;
++            self.errors.push(ParseError { error, location: range });
++        }
++        Ok(())
+@@ -445 +492 @@
+-    fn add_unsupported_syntax_error(&mut self, kind: UnsupportedSyntaxErrorKind, range: TextRange) {
++    fn add_unsupported_syntax_error(&mut self, kind: UnsupportedSyntaxErrorKind, range: TextRange) -> PResult<()> {
+@@ -446,0 +494,2 @@
++            self.tokens.diagnostic()?;
++            self.tokens.reserve(&mut self.unsupported_syntax_errors, 1)?;
+@@ -452,0 +502 @@
++        Ok(())
+@@ -465 +515 @@
+-    fn src_text<T>(&self, ranged: T) -> &'src str
++    fn src_text<T>(&mut self, ranged: T) -> PResult<&'src str>
+@@ -469 +519,34 @@
+-        &self.source[ranged.range()]
++        self.tokens.source_text(ranged.range())
++    }
++
++    fn source_bytes(&self, range: TextRange) -> PResult<&'src [u8]> {
++        self.tokens.source_bytes(range)
++    }
++
++    fn debug_text(&mut self, leading: TextRange, expression: TextRange, trailing: TextRange) -> PResult<ruff_python_ast::DebugText> {
++        self.tokens.debug_text(leading, expression, trailing)
++    }
++
++    pub(crate) fn enter_parse(&mut self) -> PResult<ParseGuard> {
++        self.tokens.enter_parse()
++    }
++
++    /// Keep reduction depth alive for the whole chain, not just one iteration.
++    fn extend_parse(&mut self, guard: &mut ParseGuard) -> PResult<()> {
++        guard.absorb(self.enter_parse()?)
++    }
++
++    fn charge_work(&mut self, count: usize) -> PResult<()> {
++        self.tokens.work(count)
++    }
++
++    fn charge_source_work(&mut self, count: usize) -> PResult<()> {
++        self.tokens.source_work(count)
++    }
++
++    fn charge_allocation(&mut self, count: usize) -> PResult<()> {
++        self.tokens.allocate(count)
++    }
++
++    fn reserve<T>(&mut self, values: &mut Vec<T>, additional: usize) -> PResult<()> {
++        self.tokens.reserve(values, additional)
+@@ -477,2 +560,3 @@
+-        parse_element: impl Fn(&mut Parser<'src>) -> T,
+-    ) -> Vec<T> {
++        parse_element: impl Fn(&mut Parser<'src, 'check>) -> PResult<T>,
++    ) -> PResult<Vec<T>> {
++        let _guard = self.enter_parse()?;
+@@ -480,2 +564,6 @@
+-        self.parse_list(recovery_context_kind, |p| elements.push(parse_element(p)));
+-        elements
++        self.parse_list(recovery_context_kind, |p| {
++            p.reserve(&mut elements, 1)?;
++            elements.push(parse_element(p)?);
++            Ok(())
++        })?;
++        Ok(elements)
+@@ -494,2 +582,3 @@
+-        mut parse_element: impl FnMut(&mut Parser<'src>),
+-    ) {
++        mut parse_element: impl FnMut(&mut Parser<'src, 'check>) -> PResult<()>,
++    ) -> PResult<()> {
++        let _guard = self.enter_parse()?;
+@@ -507 +596 @@
+-                parse_element(self);
++                parse_element(self)?;
+@@ -515 +604 @@
+-                    self.tokens.re_lex_logical_token();
++                    self.tokens.re_lex_logical_token()?;
+@@ -522,3 +611,3 @@
+-                );
+-
+-                self.bump_any();
++                )?;
++
++                self.bump_any()?;
+@@ -528,0 +618 @@
++        Ok(())
+@@ -536,2 +626,3 @@
+-        parse_element: impl Fn(&mut Parser<'src>) -> T,
+-    ) -> Vec<T> {
++        parse_element: impl Fn(&mut Parser<'src, 'check>) -> PResult<T>,
++    ) -> PResult<Vec<T>> {
++        let _guard = self.enter_parse()?;
+@@ -539,2 +630,6 @@
+-        self.parse_comma_separated_list(recovery_context_kind, |p| elements.push(parse_element(p)));
+-        elements
++        self.parse_comma_separated_list(recovery_context_kind, |p| {
++            p.reserve(&mut elements, 1)?;
++            elements.push(parse_element(p)?);
++            Ok(())
++        })?;
++        Ok(elements)
+@@ -555,2 +650,3 @@
+-        mut parse_element: impl FnMut(&mut Parser<'src>),
+-    ) -> bool {
++        mut parse_element: impl FnMut(&mut Parser<'src, 'check>) -> PResult<()>,
++    ) -> PResult<bool> {
++        let _guard = self.enter_parse()?;
+@@ -571 +667 @@
+-                parse_element(self);
++                parse_element(self)?;
+@@ -580 +676 @@
+-                if self.eat(TokenKind::Comma) {
++                if self.eat(TokenKind::Comma)? {
+@@ -606 +702 @@
+-                self.expect(TokenKind::Comma);
++                self.expect(TokenKind::Comma)?;
+@@ -614 +710 @@
+-                self.tokens.re_lex_logical_token();
++                self.tokens.re_lex_logical_token()?;
+@@ -635 +731 @@
+-                );
++                )?;
+@@ -648 +744 @@
+-                self.expect(TokenKind::Comma);
++                self.expect(TokenKind::Comma)?;
+@@ -653 +749 @@
+-            self.bump_any();
++            self.bump_any()?;
+@@ -661 +757 @@
+-                );
++                )?;
+@@ -667 +763 @@
+-        trailing_comma_range.is_some()
++        Ok(trailing_comma_range.is_some())
+@@ -682,3 +778,3 @@
+-    fn checkpoint(&self) -> ParserCheckpoint {
+-        ParserCheckpoint {
+-            tokens: self.tokens.checkpoint(),
++    fn checkpoint(&mut self) -> PResult<ParserCheckpoint<'src>> {
++        Ok(ParserCheckpoint {
++            tokens: self.tokens.checkpoint()?,
+@@ -690 +786 @@
+-        }
++        })
+@@ -694 +790 @@
+-    fn rewind(&mut self, checkpoint: ParserCheckpoint) {
++    fn rewind(&mut self, checkpoint: ParserCheckpoint<'src>) -> PResult<()> {
+@@ -704 +800 @@
+-        self.tokens.rewind(tokens);
++        self.tokens.rewind(tokens)?;
+@@ -711,5 +807,6 @@
+-    }
+-}
+-
+-struct ParserCheckpoint {
+-    tokens: TokenSourceCheckpoint,
++        Ok(())
++    }
++}
++
++struct ParserCheckpoint<'src> {
++    tokens: TokenSourceCheckpoint<'src>,
+@@ -971 +1068 @@
+-    fn is_list_terminator(self, p: &Parser) -> bool {
++    fn is_list_terminator(self, p: &Parser<'_, '_>) -> bool {
+@@ -977 +1074 @@
+-    fn is_regular_list_terminator(self, p: &Parser) -> bool {
++    fn is_regular_list_terminator(self, p: &Parser<'_, '_>) -> bool {
+@@ -986 +1083 @@
+-    fn list_terminator_kind(self, p: &Parser) -> Option<ListTerminatorKind> {
++    fn list_terminator_kind(self, p: &Parser<'_, '_>) -> Option<ListTerminatorKind> {
+@@ -1143 +1240 @@
+-    fn is_list_element(self, p: &Parser) -> bool {
++    fn is_list_element(self, p: &Parser<'_, '_>) -> bool {
+@@ -1190 +1287 @@
+-    fn create_error(self, p: &Parser) -> ParseErrorType {
++    fn create_error(self, p: &Parser<'_, '_>) -> ParseErrorType {
+--- a/crates/ruff_python_parser/src/parser/expression.rs
++++ b/crates/ruff_python_parser/src/parser/expression.rs
+@@ -17 +17 @@
+-use crate::parser::{FunctionKind, Parser, helpers};
++use crate::parser::{FunctionKind, PResult, Parser, helpers};
+@@ -25 +25 @@
+-    InterpolatedStringErrorType, Mode, ParseErrorType, UnsupportedSyntaxError,
++    InterpolatedStringErrorType, Mode, ParseErrorType,
+@@ -118 +118 @@
+-impl<'src> Parser<'src> {
++impl<'src, 'check> Parser<'src, 'check> {
+@@ -150 +150,2 @@
+-    pub(super) fn parse_expression_list(&mut self, context: ExpressionContext) -> ParsedExpr {
++    pub(super) fn parse_expression_list(&mut self, context: ExpressionContext) -> PResult<ParsedExpr> {
++        let _guard = self.enter_parse()?;
+@@ -152,3 +153,3 @@
+-        let parsed_expr = self.parse_conditional_expression_or_higher_impl(context);
+-
+-        if self.at(TokenKind::Comma) {
++        let parsed_expr = self.parse_conditional_expression_or_higher_impl(context)?;
++
++        Ok(if self.at(TokenKind::Comma) {
+@@ -160 +161 @@
+-            ))
++            )?)
+@@ -164 +165 @@
+-        }
++        })
+@@ -179 +180,2 @@
+-    ) -> ParsedExpr {
++    ) -> PResult<ParsedExpr> {
++        let _guard = self.enter_parse()?;
+@@ -181,4 +183,4 @@
+-        let parsed_expr = self.parse_conditional_expression_or_higher_impl(context);
+-
+-        if self.at(TokenKind::ColonEqual) {
+-            Expr::Named(self.parse_named_expression(parsed_expr.expr, start)).into()
++        let parsed_expr = self.parse_conditional_expression_or_higher_impl(context)?;
++
++        Ok(if self.at(TokenKind::ColonEqual) {
++            Expr::Named(self.parse_named_expression(parsed_expr.expr, start)?).into()
+@@ -187 +189 @@
+-        }
++        })
+@@ -202 +204,2 @@
+-    pub(super) fn parse_conditional_expression_or_higher(&mut self) -> ParsedExpr {
++    pub(super) fn parse_conditional_expression_or_higher(&mut self) -> PResult<ParsedExpr> {
++        let _guard = self.enter_parse()?;
+@@ -209,3 +212,4 @@
+-    ) -> ParsedExpr {
+-        if self.at(TokenKind::Lambda) {
+-            Expr::Lambda(self.parse_lambda_expr()).into()
++    ) -> PResult<ParsedExpr> {
++        let _guard = self.enter_parse()?;
++        Ok(if self.at(TokenKind::Lambda) {
++            Expr::Lambda(self.parse_lambda_expr()?).into()
+@@ -214 +218 @@
+-            let parsed_expr = self.parse_simple_expression(context);
++            let parsed_expr = self.parse_simple_expression(context)?;
+@@ -217 +221 @@
+-                Expr::If(self.parse_if_expression(parsed_expr.expr, start)).into()
++                Expr::If(self.parse_if_expression(parsed_expr.expr, start)?).into()
+@@ -221 +225 @@
+-        }
++        })
+@@ -236 +240,2 @@
+-    fn parse_simple_expression(&mut self, context: ExpressionContext) -> ParsedExpr {
++    fn parse_simple_expression(&mut self, context: ExpressionContext) -> PResult<ParsedExpr> {
++        let _guard = self.enter_parse()?;
+@@ -247 +252,2 @@
+-    ) -> ParsedExpr {
++    ) -> PResult<ParsedExpr> {
++        let _guard = self.enter_parse()?;
+@@ -249 +255 @@
+-        let lhs = self.parse_lhs_expression(left_precedence, context);
++        let lhs = self.parse_lhs_expression(left_precedence, context)?;
+@@ -259 +265,2 @@
+-    ) -> ParsedExpr {
++    ) -> PResult<ParsedExpr> {
++        let mut guard = self.enter_parse()?;
+@@ -273 +280 @@
+-            let Some(operator) = BinaryLikeOperator::try_from_tokens(current_token, self.peek())
++            let Some(operator) = BinaryLikeOperator::try_from_tokens(current_token, self.peek()?)
+@@ -290,0 +298 @@
++            self.extend_parse(&mut guard)?;
+@@ -293 +301 @@
+-                    Expr::BoolOp(self.parse_boolean_expression(left.expr, start, bool_op, context))
++                    Expr::BoolOp(self.parse_boolean_expression(left.expr, start, bool_op, context)?)
+@@ -296 +304 @@
+-                    self.parse_comparison_expression(left.expr, start, cmp_op, context),
++                    self.parse_comparison_expression(left.expr, start, cmp_op, context)?,
+@@ -299,3 +307,3 @@
+-                    self.bump(TokenKind::from(bin_op));
+-
+-                    let right = self.parse_binary_expression_or_higher(new_precedence, context);
++                    self.bump(TokenKind::from(bin_op))?;
++
++                    let right = self.parse_binary_expression_or_higher(new_precedence, context)?;
+@@ -314 +322 @@
+-        left
++        Ok(left)
+@@ -330 +338,2 @@
+-    ) -> ParsedExpr {
++    ) -> PResult<ParsedExpr> {
++        let _guard = self.enter_parse()?;
+@@ -333,0 +343,25 @@
++        if token.as_unary_operator().is_some()
++            || matches!(
++                token,
++                TokenKind::Star | TokenKind::Await | TokenKind::Lambda | TokenKind::Yield
++            )
++        {
++            return self.parse_prefix_expression(left_precedence, context);
++        }
++
++        let lhs = self.parse_atom()?;
++
++        Ok(ParsedExpr {
++            expr: self.parse_postfix_expression(lhs.expr, start)?,
++            is_parenthesized: lhs.is_parenthesized,
++        })
++    }
++
++    // Keep prefix-only temporaries out of the recursive atom/postfix path's stack frame.
++    #[inline(never)]
++    fn parse_prefix_expression(
++        &mut self,
++        left_precedence: OperatorPrecedence,
++        context: ExpressionContext,
++    ) -> PResult<ParsedExpr> {
++        let token = self.current_token_kind();
+@@ -335 +369 @@
+-            let expr = self.parse_unary_expression(unary_op, context);
++            let expr = self.parse_unary_expression(unary_op, context)?;
+@@ -344 +378 @@
+-                    );
++                    )?;
+@@ -359 +393 @@
+-                    );
++                    )?;
+@@ -363 +397 @@
+-            return Expr::UnaryOp(expr).into();
++            return Ok(Expr::UnaryOp(expr).into());
+@@ -368 +402 @@
+-                let starred_expr = self.parse_starred_expression(context);
++                let starred_expr = self.parse_starred_expression(context)?;
+@@ -373 +407 @@
+-                    self.add_error(ParseErrorType::InvalidStarredExpressionUsage, &starred_expr);
++                    self.add_error(ParseErrorType::InvalidStarredExpressionUsage, &starred_expr)?;
+@@ -376 +410 @@
+-                return Expr::Starred(starred_expr).into();
++                return Ok(Expr::Starred(starred_expr).into());
+@@ -379 +413 @@
+-                let await_expr = self.parse_await_expression();
++                let await_expr = self.parse_await_expression()?;
+@@ -388 +422 @@
+-                    );
++                    )?;
+@@ -391 +425 @@
+-                return Expr::Await(await_expr).into();
++                return Ok(Expr::Await(await_expr).into());
+@@ -396,3 +430,3 @@
+-                let lambda_expr = self.parse_lambda_expr();
+-                self.add_error(ParseErrorType::InvalidLambdaExpressionUsage, &lambda_expr);
+-                return Expr::Lambda(lambda_expr).into();
++                let lambda_expr = self.parse_lambda_expr()?;
++                self.add_error(ParseErrorType::InvalidLambdaExpressionUsage, &lambda_expr)?;
++                return Ok(Expr::Lambda(lambda_expr).into());
+@@ -401 +435 @@
+-                let expr = self.parse_yield_expression();
++                let expr = self.parse_yield_expression()?;
+@@ -406 +440 @@
+-                    self.add_error(ParseErrorType::InvalidYieldExpressionUsage, &expr);
++                    self.add_error(ParseErrorType::InvalidYieldExpressionUsage, &expr)?;
+@@ -409,10 +443,3 @@
+-                return expr.into();
+-            }
+-            _ => {}
+-        }
+-
+-        let lhs = self.parse_atom();
+-
+-        ParsedExpr {
+-            expr: self.parse_postfix_expression(lhs.expr, start),
+-            is_parenthesized: lhs.is_parenthesized,
++                return Ok(expr.into());
++            }
++            _ => unreachable!("Expected a prefix expression"),
+@@ -429,2 +456,3 @@
+-    fn parse_expression_with_bitwise_or_precedence(&mut self) -> ParsedExpr {
+-        let parsed_expr = self.parse_conditional_expression_or_higher();
++    fn parse_expression_with_bitwise_or_precedence(&mut self) -> PResult<ParsedExpr> {
++        let _guard = self.enter_parse()?;
++        let parsed_expr = self.parse_conditional_expression_or_higher()?;
+@@ -434 +462 @@
+-            return parsed_expr;
++            return Ok(parsed_expr);
+@@ -446 +474 @@
+-            _ => return parsed_expr,
++            _ => return Ok(parsed_expr),
+@@ -452,3 +480,3 @@
+-        );
+-
+-        parsed_expr
++        )?;
++
++        Ok(parsed_expr)
+@@ -463,2 +491,3 @@
+-    pub(super) fn parse_name(&mut self) -> ast::ExprName {
+-        let identifier = self.parse_identifier();
++    pub(super) fn parse_name(&mut self) -> PResult<ast::ExprName> {
++        let _guard = self.enter_parse()?;
++        let identifier = self.parse_identifier()?;
+@@ -472 +501 @@
+-        ast::ExprName {
++        Ok(ast::ExprName {
+@@ -477 +506 @@
+-        }
++        })
+@@ -485 +514,2 @@
+-    pub(super) fn parse_identifier(&mut self) -> ast::Identifier {
++    pub(super) fn parse_identifier(&mut self) -> PResult<ast::Identifier> {
++        let _guard = self.enter_parse()?;
+@@ -489 +519 @@
+-            let TokenValue::Name(name) = self.bump_value(TokenKind::Name) else {
++            let TokenValue::Name(name) = self.bump_value(TokenKind::Name)? else {
+@@ -492 +522 @@
+-            return ast::Identifier {
++            return Ok(ast::Identifier {
+@@ -496 +526 @@
+-            };
++            });
+@@ -500,3 +530,3 @@
+-            let id = Name::new(self.src_text(range));
+-            self.bump_soft_keyword_as_name();
+-            return ast::Identifier {
++            let id = Name::new(self.src_text(range)?);
++            self.bump_soft_keyword_as_name()?;
++            return Ok(ast::Identifier {
+@@ -506,4 +536,4 @@
+-            };
+-        }
+-
+-        if self.current_token_kind().is_keyword() {
++            });
++        }
++
++        Ok(if self.current_token_kind().is_keyword() {
+@@ -517,4 +547,4 @@
+-            );
+-
+-            let id = Name::new(self.src_text(range));
+-            self.bump_any();
++            )?;
++
++            let id = Name::new(self.src_text(range)?);
++            self.bump_any()?;
+@@ -530 +560 @@
+-            );
++            )?;
+@@ -537 +567 @@
+-        }
++        })
+@@ -543 +573,11 @@
+-    fn parse_atom(&mut self) -> ParsedExpr {
++    fn parse_atom(&mut self) -> PResult<ParsedExpr> {
++        let _guard = self.enter_parse()?;
++        if self.at(TokenKind::Lpar) {
++            return self.parse_parenthesized_expression();
++        }
++        self.parse_unparenthesized_atom()
++    }
++
++    // Literal and collection temporaries must not grow every nested-parenthesis frame.
++    #[inline(never)]
++    fn parse_unparenthesized_atom(&mut self) -> PResult<ParsedExpr> {
+@@ -548 +588 @@
+-                let TokenValue::Float(value) = self.bump_value(TokenKind::Float) else {
++                let TokenValue::Float(value) = self.bump_value(TokenKind::Float)? else {
+@@ -559 +599 @@
+-                let TokenValue::Complex { real, imag } = self.bump_value(TokenKind::Complex) else {
++                let TokenValue::Complex { real, imag } = self.bump_value(TokenKind::Complex)? else {
+@@ -569 +609 @@
+-                let TokenValue::Int(value) = self.bump_value(TokenKind::Int) else {
++                let TokenValue::Int(value) = self.bump_value(TokenKind::Int)? else {
+@@ -579 +619 @@
+-                self.bump(TokenKind::True);
++                self.bump(TokenKind::True)?;
+@@ -587 +627 @@
+-                self.bump(TokenKind::False);
++                self.bump(TokenKind::False)?;
+@@ -595 +635 @@
+-                self.bump(TokenKind::None);
++                self.bump(TokenKind::None)?;
+@@ -602 +642 @@
+-                self.bump(TokenKind::Ellipsis);
++                self.bump(TokenKind::Ellipsis)?;
+@@ -608 +648 @@
+-            TokenKind::Name => Expr::Name(self.parse_name()),
++            TokenKind::Name => Expr::Name(self.parse_name()?),
+@@ -610 +650 @@
+-                Expr::IpyEscapeCommand(self.parse_ipython_escape_command_expression())
++                Expr::IpyEscapeCommand(self.parse_ipython_escape_command_expression()?)
+@@ -613,7 +653,4 @@
+-                self.parse_strings()
+-            }
+-            TokenKind::Lpar => {
+-                return self.parse_parenthesized_expression();
+-            }
+-            TokenKind::Lsqb => self.parse_list_like_expression(),
+-            TokenKind::Lbrace => self.parse_set_or_dict_like_expression(),
++                self.parse_strings()?
++            }
++            TokenKind::Lsqb => self.parse_list_like_expression()?,
++            TokenKind::Lbrace => self.parse_set_or_dict_like_expression()?,
+@@ -623 +660 @@
+-                    Expr::Name(self.parse_name())
++                    Expr::Name(self.parse_name()?)
+@@ -628 +665 @@
+-                    );
++                    )?;
+@@ -639 +676 @@
+-        lhs.into()
++        Ok(lhs.into())
+@@ -648,2 +685,3 @@
+-    pub(super) fn parse_postfix_expression(&mut self, mut lhs: Expr, start: TextSize) -> Expr {
+-        loop {
++    pub(super) fn parse_postfix_expression(&mut self, mut lhs: Expr, start: TextSize) -> PResult<Expr> {
++        let mut guard = self.enter_parse()?;
++        Ok(loop {
+@@ -651,3 +689,12 @@
+-                TokenKind::Lpar => Expr::Call(self.parse_call_expression(lhs, start)),
+-                TokenKind::Lsqb => Expr::Subscript(self.parse_subscript_expression(lhs, start)),
+-                TokenKind::Dot => Expr::Attribute(self.parse_attribute_expression(lhs, start)),
++                TokenKind::Lpar => {
++                    self.extend_parse(&mut guard)?;
++                    Expr::Call(self.parse_call_expression(lhs, start)?)
++                }
++                TokenKind::Lsqb => {
++                    self.extend_parse(&mut guard)?;
++                    Expr::Subscript(self.parse_subscript_expression(lhs, start)?)
++                }
++                TokenKind::Dot => {
++                    self.extend_parse(&mut guard)?;
++                    Expr::Attribute(self.parse_attribute_expression(lhs, start)?)
++                }
+@@ -656 +703 @@
+-        }
++        })
+@@ -669,4 +716,5 @@
+-    pub(super) fn parse_call_expression(&mut self, func: Expr, start: TextSize) -> ast::ExprCall {
+-        let arguments = self.parse_arguments();
+-
+-        ast::ExprCall {
++    pub(super) fn parse_call_expression(&mut self, func: Expr, start: TextSize) -> PResult<ast::ExprCall> {
++        let _guard = self.enter_parse()?;
++        let arguments = self.parse_arguments()?;
++
++        Ok(ast::ExprCall {
+@@ -677 +725 @@
+-        }
++        })
+@@ -687 +735,2 @@
+-    pub(super) fn parse_arguments(&mut self) -> ast::Arguments {
++    pub(super) fn parse_arguments(&mut self) -> PResult<ast::Arguments> {
++        let _guard = self.enter_parse()?;
+@@ -689 +738 @@
+-        self.bump(TokenKind::Lpar);
++        self.bump(TokenKind::Lpar)?;
+@@ -699,3 +748,4 @@
+-                if parser.eat(TokenKind::DoubleStar) {
+-                    let value = parser.parse_conditional_expression_or_higher();
+-
++                if parser.eat(TokenKind::DoubleStar)? {
++                    let value = parser.parse_conditional_expression_or_higher()?;
++
++                    parser.reserve(&mut keywords, 1)?;
+@@ -713 +763 @@
+-                        .parse_named_expression_or_higher(ExpressionContext::starred_conditional());
++                        .parse_named_expression_or_higher(ExpressionContext::starred_conditional())?;
+@@ -721 +771 @@
+-                                );
++                                )?;
+@@ -728 +778 @@
+-                            ))
++                            )?)
+@@ -738 +788 @@
+-                                );
++                                )?;
+@@ -744 +794 @@
+-                    if parser.eat(TokenKind::Equal) {
++                    if parser.eat(TokenKind::Equal)? {
+@@ -765 +815 @@
+-                                );
++                                )?;
+@@ -780 +830 @@
+-                            );
++                            )?;
+@@ -788,2 +838,3 @@
+-                        let value = parser.parse_conditional_expression_or_higher();
+-
++                        let value = parser.parse_conditional_expression_or_higher()?;
++
++                        parser.reserve(&mut keywords, 1)?;
+@@ -802 +853 @@
+-                                );
++                                )?;
+@@ -807 +858 @@
+-                                );
++                                )?;
+@@ -809,0 +861 @@
++                        parser.reserve(&mut args, 1)?;
+@@ -813,4 +865,7 @@
+-            });
+-
+-        self.expect(TokenKind::Rpar);
+-
++                Ok(())
++            })?;
++
++        self.expect(TokenKind::Rpar)?;
++
++        self.charge_allocation(args.len().saturating_mul(std::mem::size_of::<Expr>()))?;
++        self.charge_allocation(keywords.len().saturating_mul(std::mem::size_of::<ast::Keyword>()))?;
+@@ -824,3 +879,3 @@
+-        self.validate_arguments(&arguments, has_trailing_comma);
+-
+-        arguments
++        self.validate_arguments(&arguments, has_trailing_comma)?;
++
++        Ok(arguments)
+@@ -840,2 +895,3 @@
+-    ) -> ast::ExprSubscript {
+-        self.bump(TokenKind::Lsqb);
++    ) -> PResult<ast::ExprSubscript> {
++        let _guard = self.enter_parse()?;
++        self.bump(TokenKind::Lsqb)?;
+@@ -851 +907 @@
+-        if self.eat(TokenKind::Rsqb) {
++        if self.eat(TokenKind::Rsqb)? {
+@@ -853,3 +909,3 @@
+-            self.add_error(ParseErrorType::EmptySlice, slice_range);
+-
+-            return ast::ExprSubscript {
++            self.add_error(ParseErrorType::EmptySlice, slice_range)?;
++
++            return Ok(ast::ExprSubscript {
+@@ -866,4 +922,4 @@
+-            };
+-        }
+-
+-        let mut slice = self.parse_slice();
++            });
++        }
++
++        let mut slice = self.parse_slice()?;
+@@ -873,2 +929,4 @@
+-        if self.eat(TokenKind::Comma) {
+-            let mut slices = vec![slice];
++        if self.eat(TokenKind::Comma)? {
++            let mut slices = Vec::new();
++            self.reserve(&mut slices, 1)?;
++            slices.push(slice);
+@@ -877,2 +935,4 @@
+-                slices.push(parser.parse_slice());
+-            });
++                parser.reserve(&mut slices, 1)?;
++                slices.push(parser.parse_slice()?);
++                Ok(())
++            })?;
+@@ -890,0 +951,3 @@
++            let mut slices = Vec::new();
++            self.reserve(&mut slices, 1)?;
++            slices.push(slice);
+@@ -892 +955 @@
+-                elts: vec![slice],
++                elts: slices,
+@@ -900 +963 @@
+-        self.expect(TokenKind::Rsqb);
++        self.expect(TokenKind::Rsqb)?;
+@@ -936,5 +999,5 @@
+-                );
+-            }
+-        }
+-
+-        ast::ExprSubscript {
++                )?;
++            }
++        }
++
++        Ok(ast::ExprSubscript {
+@@ -946 +1009 @@
+-        }
++        })
+@@ -952 +1015,2 @@
+-    fn parse_slice(&mut self) -> Expr {
++    fn parse_slice(&mut self) -> PResult<Expr> {
++        let _guard = self.enter_parse()?;
+@@ -974 +1038 @@
+-                self.parse_named_expression_or_higher(ExpressionContext::starred_conditional());
++                self.parse_named_expression_or_higher(ExpressionContext::starred_conditional())?;
+@@ -995 +1059 @@
+-                    );
++                    )?;
+@@ -997 +1061 @@
+-                return lower.expr;
++                return Ok(lower.expr);
+@@ -1004 +1068 @@
+-                        self.add_error(ParseErrorType::InvalidStarredExpressionUsage, &lower);
++                        self.add_error(ParseErrorType::InvalidStarredExpressionUsage, &lower)?;
+@@ -1007 +1071 @@
+-                        self.add_error(ParseErrorType::UnparenthesizedNamedExpression, &lower);
++                        self.add_error(ParseErrorType::UnparenthesizedNamedExpression, &lower)?;
+@@ -1018 +1082 @@
+-        self.expect(TokenKind::Colon);
++        self.expect(TokenKind::Colon)?;
+@@ -1024 +1088 @@
+-            Some(Box::new(self.parse_conditional_expression_or_higher().expr))
++            Some(Box::new(self.parse_conditional_expression_or_higher()?.expr))
+@@ -1027 +1091 @@
+-        let step = if self.eat(TokenKind::Colon) {
++        let step = if self.eat(TokenKind::Colon)? {
+@@ -1031 +1095 @@
+-                Some(Box::new(self.parse_conditional_expression_or_higher().expr))
++                Some(Box::new(self.parse_conditional_expression_or_higher()?.expr))
+@@ -1037 +1101 @@
+-        Expr::Slice(ast::ExprSlice {
++        Ok(Expr::Slice(ast::ExprSlice {
+@@ -1043 +1107 @@
+-        })
++        }))
+@@ -1060 +1124,2 @@
+-    ) -> ast::ExprUnaryOp {
++    ) -> PResult<ast::ExprUnaryOp> {
++        let _guard = self.enter_parse()?;
+@@ -1062,5 +1127,5 @@
+-        self.bump(TokenKind::from(op));
+-
+-        let operand = self.parse_binary_expression_or_higher(OperatorPrecedence::from(op), context);
+-
+-        ast::ExprUnaryOp {
++        self.bump(TokenKind::from(op))?;
++
++        let operand = self.parse_binary_expression_or_higher(OperatorPrecedence::from(op), context)?;
++
++        Ok(ast::ExprUnaryOp {
+@@ -1071 +1136 @@
+-        }
++        })
+@@ -1085,6 +1150,7 @@
+-    ) -> ast::ExprAttribute {
+-        self.bump(TokenKind::Dot);
+-
+-        let attr = self.parse_identifier();
+-
+-        ast::ExprAttribute {
++    ) -> PResult<ast::ExprAttribute> {
++        let _guard = self.enter_parse()?;
++        self.bump(TokenKind::Dot)?;
++
++        let attr = self.parse_identifier()?;
++
++        Ok(ast::ExprAttribute {
+@@ -1096 +1162 @@
+-        }
++        })
+@@ -1115,4 +1181,7 @@
+-    ) -> ast::ExprBoolOp {
+-        self.bump(TokenKind::from(op));
+-
+-        let mut values = vec![lhs];
++    ) -> PResult<ast::ExprBoolOp> {
++        let _guard = self.enter_parse()?;
++        self.bump(TokenKind::from(op))?;
++
++        let mut values = Vec::new();
++        self.reserve(&mut values, 1)?;
++        values.push(lhs);
+@@ -1127 +1196,2 @@
+-                self.parse_binary_expression_or_higher(OperatorPrecedence::from(op), context);
++                self.parse_binary_expression_or_higher(OperatorPrecedence::from(op), context)?;
++            self.reserve(&mut values, 1)?;
+@@ -1130 +1200 @@
+-            if !self.eat(TokenKind::from(op)) {
++            if !self.eat(TokenKind::from(op))? {
+@@ -1135 +1205 @@
+-        ast::ExprBoolOp {
++        Ok(ast::ExprBoolOp {
+@@ -1140 +1210 @@
+-        }
++        })
+@@ -1144 +1214 @@
+-    fn bump_cmp_op(&mut self, op: CmpOp) {
++    fn bump_cmp_op(&mut self, op: CmpOp) -> PResult<()> {
+@@ -1158 +1228 @@
+-        self.bump(first);
++        self.bump(first)?;
+@@ -1160,2 +1230,3 @@
+-            self.bump(second);
+-        }
++            self.bump(second)?;
++        }
++        Ok(())
+@@ -1182,2 +1253,3 @@
+-    ) -> ast::ExprCompare {
+-        self.bump_cmp_op(op);
++    ) -> PResult<ast::ExprCompare> {
++        let _guard = self.enter_parse()?;
++        self.bump_cmp_op(op)?;
+@@ -1186 +1258,3 @@
+-        let mut operators = vec![op];
++        let mut operators = Vec::new();
++        self.reserve(&mut operators, 1)?;
++        operators.push(op);
+@@ -1192,0 +1267 @@
++            self.reserve(&mut comparators, 1)?;
+@@ -1197 +1272 @@
+-                )
++                )?
+@@ -1206 +1281 @@
+-            let Some(next_op) = helpers::token_kind_to_cmp_op([next_token, self.peek()]) else {
++            let Some(next_op) = helpers::token_kind_to_cmp_op([next_token, self.peek()?]) else {
+@@ -1210 +1285,2 @@
+-            self.bump_cmp_op(next_op);
++            self.bump_cmp_op(next_op)?;
++            self.reserve(&mut operators, 1)?;
+@@ -1214 +1290,3 @@
+-        ast::ExprCompare {
++        self.charge_allocation(operators.len().saturating_mul(std::mem::size_of::<CmpOp>()))?;
++        self.charge_allocation(comparators.len().saturating_mul(std::mem::size_of::<Expr>()))?;
++        Ok(ast::ExprCompare {
+@@ -1220 +1298 @@
+-        }
++        })
+@@ -1230 +1308,2 @@
+-    pub(super) fn parse_strings(&mut self) -> Expr {
++    pub(super) fn parse_strings(&mut self) -> PResult<Expr> {
++        let _guard = self.enter_parse()?;
+@@ -1244,0 +1324 @@
++            self.reserve(&mut strings, 1)?;
+@@ -1246 +1326 @@
+-                strings.push(self.parse_string_or_byte_literal());
++                strings.push(self.parse_string_or_byte_literal()?);
+@@ -1249 +1329 @@
+-                    self.parse_interpolated_string(InterpolatedStringKind::FString)
++                    self.parse_interpolated_string(InterpolatedStringKind::FString)?
+@@ -1269 +1349 @@
+-                    self.parse_interpolated_string(InterpolatedStringKind::TString)
++                    self.parse_interpolated_string(InterpolatedStringKind::TString)?
+@@ -1275 +1355 @@
+-                );
++                )?;
+@@ -1282 +1362 @@
+-        match strings.len() {
++        Ok(match strings.len() {
+@@ -1309,2 +1389,2 @@
+-            _ => self.handle_implicitly_concatenated_strings(strings, range),
+-        }
++            _ => self.handle_implicitly_concatenated_strings(strings, range)?,
++        })
+@@ -1322 +1402 @@
+-    ) -> Expr {
++    ) -> PResult<Expr> {
+@@ -1323,0 +1404 @@
++        self.charge_work(strings.len().saturating_mul(2))?;
+@@ -1357 +1438 @@
+-                    );
++                    )?;
+@@ -1363 +1444,2 @@
+-                    let mut values = Vec::with_capacity(strings.len());
++                    let mut values = Vec::new();
++                    self.reserve(&mut values, strings.len())?;
+@@ -1370 +1452,2 @@
+-                    return Expr::from(ast::ExprBytesLiteral {
++                    self.charge_allocation(values.len().saturating_mul(std::mem::size_of::<ast::BytesLiteral>()))?;
++                    return Ok(Expr::from(ast::ExprBytesLiteral {
+@@ -1374 +1457 @@
+-                    });
++                    }));
+@@ -1403 +1486,2 @@
+-            let mut values = Vec::with_capacity(strings.len());
++            let mut values = Vec::new();
++            self.reserve(&mut values, strings.len())?;
+@@ -1410 +1494,2 @@
+-            return Expr::from(ast::ExprStringLiteral {
++            self.charge_allocation(values.len().saturating_mul(std::mem::size_of::<ast::StringLiteral>()))?;
++            return Ok(Expr::from(ast::ExprStringLiteral {
+@@ -1414 +1499 @@
+-            });
++            }));
+@@ -1418 +1503,2 @@
+-            let mut parts = Vec::with_capacity(strings.len());
++            let mut parts = Vec::new();
++            self.reserve(&mut parts, strings.len())?;
+@@ -1432 +1518,2 @@
+-            return Expr::from(ast::ExprTString {
++            self.charge_allocation(parts.len().saturating_mul(std::mem::size_of::<ast::TStringPart>()))?;
++            return Ok(Expr::from(ast::ExprTString {
+@@ -1436,4 +1523,5 @@
+-            });
+-        }
+-
+-        let mut parts = Vec::with_capacity(strings.len());
++            }));
++        }
++
++        let mut parts = Vec::new();
++        self.reserve(&mut parts, strings.len())?;
+@@ -1453 +1541,2 @@
+-        Expr::from(ast::ExprFString {
++        self.charge_allocation(parts.len().saturating_mul(std::mem::size_of::<ast::FStringPart>()))?;
++        Ok(Expr::from(ast::ExprFString {
+@@ -1457 +1546 @@
+-        })
++        }))
+@@ -1469 +1558,2 @@
+-    fn parse_string_or_byte_literal(&mut self) -> StringType {
++    fn parse_string_or_byte_literal(&mut self) -> PResult<StringType> {
++        let _guard = self.enter_parse()?;
+@@ -1473 +1563 @@
+-        let TokenValue::String(value) = self.bump_value(TokenKind::String) else {
++        let TokenValue::String(value) = self.bump_value(TokenKind::String)? else {
+@@ -1477 +1567,4 @@
+-        match parse_string_literal(value, flags, range) {
++        // Decoding is source-bounded; charge its scan and conservative output envelope first.
++        self.charge_source_work(value.len())?;
++        self.charge_allocation(value.len().saturating_mul(16))?;
++        Ok(match parse_string_literal(value, flags, range) {
+@@ -1481 +1574 @@
+-                self.add_error(ParseErrorType::Lexical(error.into_error()), location);
++                self.add_error(ParseErrorType::Lexical(error.into_error()), location)?;
+@@ -1506 +1599 @@
+-        }
++        })
+@@ -1523 +1616,2 @@
+-    ) -> InterpolatedStringData {
++    ) -> PResult<InterpolatedStringData> {
++        let _guard = self.enter_parse()?;
+@@ -1527 +1621 @@
+-        self.bump(kind.start_token());
++        self.bump(kind.start_token())?;
+@@ -1532,3 +1626,3 @@
+-        );
+-
+-        self.expect(kind.end_token());
++        )?;
++
++        self.expect(kind.end_token())?;
+@@ -1591 +1685,3 @@
+-                for slash_position in memchr::memchr_iter(b'\\', self.source[expr.range].as_bytes())
++                let source = self.source_bytes(expr.range)?;
++                self.charge_source_work(source.len())?;
++                for slash_position in memchr::memchr_iter(b'\\', source)
+@@ -1597 +1693 @@
+-                    );
++                    )?;
+@@ -1600,2 +1696,3 @@
+-                if let Some(quote_position) =
+-                    memchr::memmem::find(self.source[expr.range].as_bytes(), quote_bytes)
++                let source = self.source_bytes(expr.range)?;
++                self.charge_source_work(source.len())?;
++                if let Some(quote_position) = memchr::memmem::find(source, quote_bytes)
+@@ -1607 +1704 @@
+-                    );
++                    )?;
+@@ -1611,4 +1708,4 @@
+-            self.check_fstring_comments(range);
+-        }
+-
+-        InterpolatedStringData {
++            self.check_fstring_comments(range)?;
++        }
++
++        Ok(InterpolatedStringData {
+@@ -1618 +1715 @@
+-        }
++        })
+@@ -1622,9 +1719,16 @@
+-    fn check_fstring_comments(&mut self, range: TextRange) {
+-        self.unsupported_syntax_errors
+-            .extend(self.tokens.in_range(range).iter().filter_map(|token| {
+-                token.kind().is_comment().then_some(UnsupportedSyntaxError {
+-                    kind: UnsupportedSyntaxErrorKind::Pep701FString(FStringKind::Comment),
+-                    range: token.range(),
+-                    target_version: self.options.target_version,
+-                })
+-            }));
++    fn check_fstring_comments(&mut self, range: TextRange) -> PResult<()> {
++        let mut comments = Vec::new();
++        let count = self.tokens.in_range(range)?.len();
++        self.reserve(&mut comments, count)?;
++        for token in self.tokens.in_range(range)? {
++            if token.kind().is_comment() {
++                comments.push(token.range());
++            }
++        }
++        for comment in comments {
++            self.add_unsupported_syntax_error(
++                UnsupportedSyntaxErrorKind::Pep701FString(FStringKind::Comment),
++                comment,
++            )?;
++        }
++        Ok(())
+@@ -1644 +1748,2 @@
+-    ) -> ast::InterpolatedStringElements {
++    ) -> PResult<ast::InterpolatedStringElements> {
++        let _guard = self.enter_parse()?;
+@@ -1653 +1758 @@
+-                        parser.parse_interpolated_element(flags, string_kind),
++                        parser.parse_interpolated_element(flags, string_kind)?,
+@@ -1658 +1763 @@
+-                            parser.bump_value(middle_token_kind)
++                            parser.bump_value(middle_token_kind)?
+@@ -1661,0 +1767,2 @@
++                        parser.charge_source_work(value.len())?;
++                        parser.charge_allocation(value.len().saturating_mul(16))?;
+@@ -1663,2 +1770,3 @@
+-                            parse_interpolated_string_literal_element(value, flags, range)
+-                                .unwrap_or_else(|lex_error| {
++                            match parse_interpolated_string_literal_element(value, flags, range) {
++                                Ok(element) => element,
++                                Err(lex_error) => {
+@@ -1672 +1780 @@
+-                                    );
++                                    )?;
+@@ -1678 +1786,2 @@
+-                                }),
++                                }
++                            },
+@@ -1684,2 +1793,2 @@
+-                        parser.bump_any();
+-                        return;
++                        parser.bump_any()?;
++                        return Ok(());
+@@ -1697,0 +1807 @@
++                parser.reserve(&mut elements, 1)?;
+@@ -1698,0 +1809 @@
++                Ok(())
+@@ -1700,3 +1811,4 @@
+-        );
+-
+-        ast::InterpolatedStringElements::from(elements)
++        )?;
++
++        self.charge_allocation(elements.len().saturating_mul(std::mem::size_of::<InterpolatedStringElement>()))?;
++        Ok(ast::InterpolatedStringElements::from(elements))
+@@ -1714 +1826,2 @@
+-    ) -> ast::InterpolatedElement {
++    ) -> PResult<ast::InterpolatedElement> {
++        let _guard = self.enter_parse()?;
+@@ -1716 +1829 @@
+-        self.bump(TokenKind::Lbrace);
++        self.bump(TokenKind::Lbrace)?;
+@@ -1739 +1852 @@
+-        let value = self.parse_expression_list(ExpressionContext::yield_or_starred_bitwise_or());
++        let value = self.parse_expression_list(ExpressionContext::yield_or_starred_bitwise_or())?;
+@@ -1758,3 +1871,3 @@
+-            );
+-        }
+-        let debug_text = if self.eat(TokenKind::Equal) {
++            )?;
++        }
++        let debug_text = if self.eat(TokenKind::Equal)? {
+@@ -1763,4 +1876 @@
+-            Some(ast::DebugText {
+-                leading: self.src_text(leading_range).to_string(),
+-                trailing: self.src_text(trailing_range).to_string(),
+-            })
++            Some(self.debug_text(leading_range, value.range(), trailing_range)?)
+@@ -1771 +1881 @@
+-        let conversion = if self.eat(TokenKind::Exclamation) {
++        let conversion = if self.eat(TokenKind::Exclamation)? {
+@@ -1785 +1895 @@
+-                    );
++                    )?;
+@@ -1787 +1897 @@
+-                let TokenValue::Name(name) = self.bump_value(TokenKind::Name) else {
++                let TokenValue::Name(name) = self.bump_value(TokenKind::Name)? else {
+@@ -1807 +1917 @@
+-                        );
++                        )?;
+@@ -1826 +1936 @@
+-                );
++                )?;
+@@ -1828 +1938 @@
+-                self.bump_any();
++                self.bump_any()?;
+@@ -1835 +1945 @@
+-        let format_spec = if self.eat(TokenKind::Colon) {
++        let format_spec = if self.eat(TokenKind::Colon)? {
+@@ -1841 +1951 @@
+-            );
++            )?;
+@@ -1852 +1962 @@
+-        if !self.eat(TokenKind::Rbrace) {
++        if !self.eat(TokenKind::Rbrace)? {
+@@ -1888,4 +1998,4 @@
+-            );
+-        }
+-
+-        ast::InterpolatedElement {
++            )?;
++        }
++
++        Ok(ast::InterpolatedElement {
+@@ -1898 +2008 @@
+-        }
++        })
+@@ -1908 +2018,2 @@
+-    fn parse_list_like_expression(&mut self) -> Expr {
++    fn parse_list_like_expression(&mut self) -> PResult<Expr> {
++        let _guard = self.enter_parse()?;
+@@ -1911 +2022 @@
+-        self.bump(TokenKind::Lsqb);
++        self.bump(TokenKind::Lsqb)?;
+@@ -1918 +2029 @@
+-            );
++            )?;
+@@ -1922,2 +2033,2 @@
+-        if self.eat(TokenKind::Rsqb) {
+-            return Expr::List(ast::ExprList {
++        if self.eat(TokenKind::Rsqb)? {
++            return Ok(Expr::List(ast::ExprList {
+@@ -1928 +2039 @@
+-            });
++            }));
+@@ -1933,3 +2044,3 @@
+-            self.parse_named_expression_or_higher(ExpressionContext::starred_bitwise_or());
+-
+-        match self.current_token_kind() {
++            self.parse_named_expression_or_higher(ExpressionContext::starred_bitwise_or())?;
++
++        Ok(match self.current_token_kind() {
+@@ -1943 +2054 @@
+-                    );
++                    )?;
+@@ -1946,4 +2057,4 @@
+-                Expr::ListComp(self.parse_list_comprehension_expression(first_element.expr, start))
+-            }
+-            _ => Expr::List(self.parse_list_expression(first_element.expr, start)),
+-        }
++                Expr::ListComp(self.parse_list_comprehension_expression(first_element.expr, start)?)
++            }
++            _ => Expr::List(self.parse_list_expression(first_element.expr, start)?),
++        })
+@@ -1962 +2073,2 @@
+-    fn parse_set_or_dict_like_expression(&mut self) -> Expr {
++    fn parse_set_or_dict_like_expression(&mut self) -> PResult<Expr> {
++        let _guard = self.enter_parse()?;
+@@ -1964 +2076 @@
+-        self.bump(TokenKind::Lbrace);
++        self.bump(TokenKind::Lbrace)?;
+@@ -1971 +2083 @@
+-            );
++            )?;
+@@ -1975,2 +2087,2 @@
+-        if self.eat(TokenKind::Rbrace) {
+-            return Expr::Dict(ast::ExprDict {
++        if self.eat(TokenKind::Rbrace)? {
++            return Ok(Expr::Dict(ast::ExprDict {
+@@ -1980,4 +2092,4 @@
+-            });
+-        }
+-
+-        if self.eat(TokenKind::DoubleStar) {
++            }));
++        }
++
++        if self.eat(TokenKind::DoubleStar)? {
+@@ -1986,3 +2098,3 @@
+-            let value = self.parse_expression_with_bitwise_or_precedence();
+-
+-            return Expr::Dict(self.parse_dictionary_expression(None, value.expr, start));
++            let value = self.parse_expression_with_bitwise_or_precedence()?;
++
++            return Ok(Expr::Dict(self.parse_dictionary_expression(None, value.expr, start)?));
+@@ -1995,3 +2107,3 @@
+-            self.parse_named_expression_or_higher(ExpressionContext::starred_bitwise_or());
+-
+-        match self.current_token_kind() {
++            self.parse_named_expression_or_higher(ExpressionContext::starred_bitwise_or())?;
++
++        Ok(match self.current_token_kind() {
+@@ -2003 +2115 @@
+-                    );
++                    )?;
+@@ -2023 +2135 @@
+-                    );
++                    )?;
+@@ -2026 +2138 @@
+-                Expr::SetComp(self.parse_set_comprehension_expression(key_or_element.expr, start))
++                Expr::SetComp(self.parse_set_comprehension_expression(key_or_element.expr, start)?)
+@@ -2036 +2148 @@
+-                        ),
++                        )?,
+@@ -2040 +2152 @@
+-                        ),
++                        )?,
+@@ -2045,2 +2157,2 @@
+-                self.bump(TokenKind::Colon);
+-                let value = self.parse_conditional_expression_or_higher();
++                self.bump(TokenKind::Colon)?;
++                let value = self.parse_conditional_expression_or_higher()?;
+@@ -2053 +2165 @@
+-                    ))
++                    )?)
+@@ -2059 +2171 @@
+-                    ))
++                    )?)
+@@ -2062,2 +2174,2 @@
+-            _ => Expr::Set(self.parse_set_expression(key_or_element, start)),
+-        }
++            _ => Expr::Set(self.parse_set_expression(key_or_element, start)?),
++        })
+@@ -2071 +2183,2 @@
+-    fn parse_parenthesized_expression(&mut self) -> ParsedExpr {
++    fn parse_parenthesized_expression(&mut self) -> PResult<ParsedExpr> {
++        let _guard = self.enter_parse()?;
+@@ -2073 +2186 @@
+-        self.bump(TokenKind::Lpar);
++        self.bump(TokenKind::Lpar)?;
+@@ -2081 +2194 @@
+-            );
++            )?;
+@@ -2085,2 +2198,2 @@
+-        if self.eat(TokenKind::Rpar) {
+-            return Expr::Tuple(ast::ExprTuple {
++        if self.eat(TokenKind::Rpar)? {
++            return Ok(Expr::Tuple(ast::ExprTuple {
+@@ -2093 +2206 @@
+-            .into();
++            .into());
+@@ -2099,3 +2212,3 @@
+-            self.parse_named_expression_or_higher(ExpressionContext::yield_or_starred_bitwise_or());
+-
+-        match self.current_token_kind() {
++            self.parse_named_expression_or_higher(ExpressionContext::yield_or_starred_bitwise_or())?;
++
++        Ok(match self.current_token_kind() {
+@@ -2107 +2220 @@
+-                    });
++                    })?;
+@@ -2120 +2233 @@
+-                    );
++                    )?;
+@@ -2127 +2240 @@
+-                ));
++                )?);
+@@ -2137 +2250 @@
+-                    self.add_error(ParseErrorType::InvalidStarredExpressionUsage, &parsed_expr);
++                    self.add_error(ParseErrorType::InvalidStarredExpressionUsage, &parsed_expr)?;
+@@ -2140 +2253 @@
+-                self.expect(TokenKind::Rpar);
++                self.expect(TokenKind::Rpar)?;
+@@ -2145 +2258 @@
+-        }
++        })
+@@ -2156,2 +2269,3 @@
+-        mut parse_func: impl FnMut(&mut Parser<'src>) -> ParsedExpr,
+-    ) -> ast::ExprTuple {
++        mut parse_func: impl FnMut(&mut Parser<'src, 'check>) -> PResult<ParsedExpr>,
++    ) -> PResult<ast::ExprTuple> {
++        let _guard = self.enter_parse()?;
+@@ -2162,4 +2276,6 @@
+-            self.expect(TokenKind::Comma);
+-        }
+-
+-        let mut elts = vec![first_element];
++            self.expect(TokenKind::Comma)?;
++        }
++
++        let mut elts = Vec::new();
++        self.reserve(&mut elts, 1)?;
++        elts.push(first_element);
+@@ -2168,2 +2284,4 @@
+-            elts.push(parse_func(p).expr);
+-        });
++            p.reserve(&mut elts, 1)?;
++            elts.push(parse_func(p)?.expr);
++            Ok(())
++        })?;
+@@ -2172,4 +2290,4 @@
+-            self.expect(TokenKind::Rpar);
+-        }
+-
+-        ast::ExprTuple {
++            self.expect(TokenKind::Rpar)?;
++        }
++
++        Ok(ast::ExprTuple {
+@@ -2181 +2299 @@
+-        }
++        })
+@@ -2187 +2305,2 @@
+-    fn parse_list_expression(&mut self, first_element: Expr, start: TextSize) -> ast::ExprList {
++    fn parse_list_expression(&mut self, first_element: Expr, start: TextSize) -> PResult<ast::ExprList> {
++        let _guard = self.enter_parse()?;
+@@ -2189,4 +2308,6 @@
+-            self.expect(TokenKind::Comma);
+-        }
+-
+-        let mut elts = vec![first_element];
++            self.expect(TokenKind::Comma)?;
++        }
++
++        let mut elts = Vec::new();
++        self.reserve(&mut elts, 1)?;
++        elts.push(first_element);
+@@ -2194,0 +2316 @@
++            parser.reserve(&mut elts, 1)?;
+@@ -2197 +2319 @@
+-                    .parse_named_expression_or_higher(ExpressionContext::starred_bitwise_or())
++                    .parse_named_expression_or_higher(ExpressionContext::starred_bitwise_or())?
+@@ -2200,5 +2322,6 @@
+-        });
+-
+-        self.expect(TokenKind::Rsqb);
+-
+-        ast::ExprList {
++            Ok(())
++        })?;
++
++        self.expect(TokenKind::Rsqb)?;
++
++        Ok(ast::ExprList {
+@@ -2209 +2332 @@
+-        }
++        })
+@@ -2215 +2338,2 @@
+-    fn parse_set_expression(&mut self, first_element: ParsedExpr, start: TextSize) -> ast::ExprSet {
++    fn parse_set_expression(&mut self, first_element: ParsedExpr, start: TextSize) -> PResult<ast::ExprSet> {
++        let _guard = self.enter_parse()?;
+@@ -2217 +2341 @@
+-            self.expect(TokenKind::Comma);
++            self.expect(TokenKind::Comma)?;
+@@ -2232,4 +2356,6 @@
+-            );
+-        }
+-
+-        let mut elts = vec![first_element.expr];
++            )?;
++        }
++
++        let mut elts = Vec::new();
++        self.reserve(&mut elts, 1)?;
++        elts.push(first_element.expr);
+@@ -2239 +2365 @@
+-                parser.parse_named_expression_or_higher(ExpressionContext::starred_bitwise_or());
++                parser.parse_named_expression_or_higher(ExpressionContext::starred_bitwise_or())?;
+@@ -2247,3 +2373,4 @@
+-                );
+-            }
+-
++                )?;
++            }
++
++            parser.reserve(&mut elts, 1)?;
+@@ -2251,5 +2378,6 @@
+-        });
+-
+-        self.expect(TokenKind::Rbrace);
+-
+-        ast::ExprSet {
++            Ok(())
++        })?;
++
++        self.expect(TokenKind::Rbrace)?;
++
++        Ok(ast::ExprSet {
+@@ -2259 +2387 @@
+-        }
++        })
+@@ -2270 +2398,2 @@
+-    ) -> ast::ExprDict {
++    ) -> PResult<ast::ExprDict> {
++        let _guard = self.enter_parse()?;
+@@ -2272,4 +2401,6 @@
+-            self.expect(TokenKind::Comma);
+-        }
+-
+-        let mut items = vec![ast::DictItem { key, value }];
++            self.expect(TokenKind::Comma)?;
++        }
++
++        let mut items = Vec::new();
++        self.reserve(&mut items, 1)?;
++        items.push(ast::DictItem { key, value });
+@@ -2278 +2409 @@
+-            if parser.eat(TokenKind::DoubleStar) {
++            if parser.eat(TokenKind::DoubleStar)? {
+@@ -2280,0 +2412 @@
++                parser.reserve(&mut items, 1)?;
+@@ -2283 +2415 @@
+-                    value: parser.parse_expression_with_bitwise_or_precedence().expr,
++                    value: parser.parse_expression_with_bitwise_or_precedence()?.expr,
+@@ -2286,3 +2418,4 @@
+-                let key = parser.parse_conditional_expression_or_higher().expr;
+-                parser.expect(TokenKind::Colon);
+-
++                let key = parser.parse_conditional_expression_or_higher()?.expr;
++                parser.expect(TokenKind::Colon)?;
++
++                parser.reserve(&mut items, 1)?;
+@@ -2291 +2424 @@
+-                    value: parser.parse_conditional_expression_or_higher().expr,
++                    value: parser.parse_conditional_expression_or_higher()?.expr,
+@@ -2294,5 +2427,6 @@
+-        });
+-
+-        self.expect(TokenKind::Rbrace);
+-
+-        ast::ExprDict {
++            Ok(())
++        })?;
++
++        self.expect(TokenKind::Rbrace)?;
++
++        Ok(ast::ExprDict {
+@@ -2302 +2436 @@
+-        }
++        })
+@@ -2311 +2445,2 @@
+-    fn parse_generators(&mut self) -> Vec<ast::Comprehension> {
++    fn parse_generators(&mut self) -> PResult<Vec<ast::Comprehension>> {
++        let _guard = self.enter_parse()?;
+@@ -2319,4 +2454,5 @@
+-            generators.push(self.parse_comprehension());
+-        }
+-
+-        generators
++            self.reserve(&mut generators, 1)?;
++            generators.push(self.parse_comprehension()?);
++        }
++
++        Ok(generators)
+@@ -2332 +2468,2 @@
+-    fn parse_comprehension(&mut self) -> ast::Comprehension {
++    fn parse_comprehension(&mut self) -> PResult<ast::Comprehension> {
++        let _guard = self.enter_parse()?;
+@@ -2335 +2472 @@
+-        let is_async = self.eat(TokenKind::Async);
++        let is_async = self.eat(TokenKind::Async)?;
+@@ -2341 +2478 @@
+-            self.expect(TokenKind::For);
++            self.expect(TokenKind::For)?;
+@@ -2343 +2480 @@
+-            self.bump(TokenKind::For);
++            self.bump(TokenKind::For)?;
+@@ -2347 +2484 @@
+-            self.parse_expression_list(ExpressionContext::starred_conditional().with_in_excluded());
++            self.parse_expression_list(ExpressionContext::starred_conditional().with_in_excluded())?;
+@@ -2350,4 +2487,4 @@
+-        self.validate_assignment_target(&target.expr);
+-
+-        self.expect(TokenKind::In);
+-        let iter = self.parse_simple_expression(ExpressionContext::default());
++        self.validate_assignment_target(&target.expr)?;
++
++        self.expect(TokenKind::In)?;
++        let iter = self.parse_simple_expression(ExpressionContext::default())?;
+@@ -2358 +2495 @@
+-        while self.eat(TokenKind::If) {
++        while self.eat(TokenKind::If)? {
+@@ -2361,2 +2498,3 @@
+-            let parsed_expr = self.parse_simple_expression(ExpressionContext::default());
+-
++            let parsed_expr = self.parse_simple_expression(ExpressionContext::default())?;
++
++            self.reserve(&mut ifs, 1)?;
+@@ -2366 +2504 @@
+-        ast::Comprehension {
++        Ok(ast::Comprehension {
+@@ -2373 +2511 @@
+-        }
++        })
+@@ -2387,2 +2525,3 @@
+-    ) -> ast::ExprGenerator {
+-        let generators = self.parse_generators();
++    ) -> PResult<ast::ExprGenerator> {
++        let _guard = self.enter_parse()?;
++        let generators = self.parse_generators()?;
+@@ -2391,4 +2530,4 @@
+-            self.expect(TokenKind::Rpar);
+-        }
+-
+-        ast::ExprGenerator {
++            self.expect(TokenKind::Rpar)?;
++        }
++
++        Ok(ast::ExprGenerator {
+@@ -2400 +2539 @@
+-        }
++        })
+@@ -2410,6 +2549,7 @@
+-    ) -> ast::ExprListComp {
+-        let generators = self.parse_generators();
+-
+-        self.expect(TokenKind::Rsqb);
+-
+-        ast::ExprListComp {
++    ) -> PResult<ast::ExprListComp> {
++        let _guard = self.enter_parse()?;
++        let generators = self.parse_generators()?;
++
++        self.expect(TokenKind::Rsqb)?;
++
++        Ok(ast::ExprListComp {
+@@ -2420 +2560 @@
+-        }
++        })
+@@ -2431,6 +2571,7 @@
+-    ) -> ast::ExprDictComp {
+-        let generators = self.parse_generators();
+-
+-        self.expect(TokenKind::Rbrace);
+-
+-        ast::ExprDictComp {
++    ) -> PResult<ast::ExprDictComp> {
++        let _guard = self.enter_parse()?;
++        let generators = self.parse_generators()?;
++
++        self.expect(TokenKind::Rbrace)?;
++
++        Ok(ast::ExprDictComp {
+@@ -2442 +2583 @@
+-        }
++        })
+@@ -2452,6 +2593,7 @@
+-    ) -> ast::ExprSetComp {
+-        let generators = self.parse_generators();
+-
+-        self.expect(TokenKind::Rbrace);
+-
+-        ast::ExprSetComp {
++    ) -> PResult<ast::ExprSetComp> {
++        let _guard = self.enter_parse()?;
++        let generators = self.parse_generators()?;
++
++        self.expect(TokenKind::Rbrace)?;
++
++        Ok(ast::ExprSetComp {
+@@ -2462 +2604 @@
+-        }
++        })
+@@ -2481 +2623,2 @@
+-    fn parse_starred_expression(&mut self, context: ExpressionContext) -> ast::ExprStarred {
++    fn parse_starred_expression(&mut self, context: ExpressionContext) -> PResult<ast::ExprStarred> {
++        let _guard = self.enter_parse()?;
+@@ -2483 +2626 @@
+-        self.bump(TokenKind::Star);
++        self.bump(TokenKind::Star)?;
+@@ -2492,3 +2635,3 @@
+-        };
+-
+-        ast::ExprStarred {
++        }?;
++
++        Ok(ast::ExprStarred {
+@@ -2499 +2642 @@
+-        }
++        })
+@@ -2509 +2652,2 @@
+-    fn parse_await_expression(&mut self) -> ast::ExprAwait {
++    fn parse_await_expression(&mut self) -> PResult<ast::ExprAwait> {
++        let _guard = self.enter_parse()?;
+@@ -2511 +2655 @@
+-        self.bump(TokenKind::Await);
++        self.bump(TokenKind::Await)?;
+@@ -2516,3 +2660,3 @@
+-        );
+-
+-        ast::ExprAwait {
++        )?;
++
++        Ok(ast::ExprAwait {
+@@ -2522 +2666 @@
+-        }
++        })
+@@ -2532 +2676,2 @@
+-    fn parse_yield_expression(&mut self) -> Expr {
++    fn parse_yield_expression(&mut self) -> PResult<Expr> {
++        let _guard = self.enter_parse()?;
+@@ -2534,3 +2679,3 @@
+-        self.bump(TokenKind::Yield);
+-
+-        if self.eat(TokenKind::From) {
++        self.bump(TokenKind::Yield)?;
++
++        if self.eat(TokenKind::From)? {
+@@ -2540,2 +2685,2 @@
+-        let value = self.at_expr().then(|| {
+-            let parsed_expr = self.parse_expression_list(ExpressionContext::starred_bitwise_or());
++        let value = if self.at_expr() {
++            let parsed_expr = self.parse_expression_list(ExpressionContext::starred_bitwise_or())?;
+@@ -2562,6 +2707,8 @@
+-            );
+-
+-            Box::new(parsed_expr.expr)
+-        });
+-
+-        Expr::Yield(ast::ExprYield {
++            )?;
++
++            Some(Box::new(parsed_expr.expr))
++        } else {
++            None
++        };
++
++        Ok(Expr::Yield(ast::ExprYield {
+@@ -2571 +2718 @@
+-        })
++        }))
+@@ -2580 +2727,2 @@
+-    fn parse_yield_from_expression(&mut self, start: TextSize) -> Expr {
++    fn parse_yield_from_expression(&mut self, start: TextSize) -> PResult<Expr> {
++        let _guard = self.enter_parse()?;
+@@ -2597 +2745 @@
+-            .parse_expression_list(ExpressionContext::default())
++            .parse_expression_list(ExpressionContext::default())?
+@@ -2602 +2750 @@
+-                self.add_error(ParseErrorType::UnparenthesizedTupleExpression, &expr);
++                self.add_error(ParseErrorType::UnparenthesizedTupleExpression, &expr)?;
+@@ -2607 +2755 @@
+-        Expr::YieldFrom(ast::ExprYieldFrom {
++        Ok(Expr::YieldFrom(ast::ExprYieldFrom {
+@@ -2611 +2759 @@
+-        })
++        }))
+@@ -2625,2 +2773,3 @@
+-    ) -> ast::ExprNamed {
+-        self.bump(TokenKind::ColonEqual);
++    ) -> PResult<ast::ExprNamed> {
++        let _guard = self.enter_parse()?;
++        self.bump(TokenKind::ColonEqual)?;
+@@ -2629 +2778 @@
+-            self.add_error(ParseErrorType::InvalidNamedAssignmentTarget, target.range());
++            self.add_error(ParseErrorType::InvalidNamedAssignmentTarget, target.range())?;
+@@ -2633 +2782 @@
+-        let value = self.parse_conditional_expression_or_higher();
++        let value = self.parse_conditional_expression_or_higher()?;
+@@ -2645,3 +2794,3 @@
+-        self.add_unsupported_syntax_error(UnsupportedSyntaxErrorKind::Walrus, range);
+-
+-        ast::ExprNamed {
++        self.add_unsupported_syntax_error(UnsupportedSyntaxErrorKind::Walrus, range)?;
++
++        Ok(ast::ExprNamed {
+@@ -2652 +2801 @@
+-        }
++        })
+@@ -2662 +2811,2 @@
+-    fn parse_lambda_expr(&mut self) -> ast::ExprLambda {
++    fn parse_lambda_expr(&mut self) -> PResult<ast::ExprLambda> {
++        let _guard = self.enter_parse()?;
+@@ -2664 +2814 @@
+-        self.bump(TokenKind::Lambda);
++        self.bump(TokenKind::Lambda)?;
+@@ -2671 +2821 @@
+-            Some(Box::new(self.parse_parameters(FunctionKind::Lambda)))
++            Some(Box::new(self.parse_parameters(FunctionKind::Lambda)?))
+@@ -2674 +2824 @@
+-        self.expect(TokenKind::Colon);
++        self.expect(TokenKind::Colon)?;
+@@ -2693,3 +2843,3 @@
+-        let body = self.parse_conditional_expression_or_higher();
+-
+-        ast::ExprLambda {
++        let body = self.parse_conditional_expression_or_higher()?;
++
++        Ok(ast::ExprLambda {
+@@ -2700 +2850 @@
+-        }
++        })
+@@ -2710,10 +2860,11 @@
+-    pub(super) fn parse_if_expression(&mut self, body: Expr, start: TextSize) -> ast::ExprIf {
+-        self.bump(TokenKind::If);
+-
+-        let test = self.parse_simple_expression(ExpressionContext::default());
+-
+-        self.expect(TokenKind::Else);
+-
+-        let orelse = self.parse_conditional_expression_or_higher();
+-
+-        ast::ExprIf {
++    pub(super) fn parse_if_expression(&mut self, body: Expr, start: TextSize) -> PResult<ast::ExprIf> {
++        let _guard = self.enter_parse()?;
++        self.bump(TokenKind::If)?;
++
++        let test = self.parse_simple_expression(ExpressionContext::default())?;
++
++        self.expect(TokenKind::Else)?;
++
++        let orelse = self.parse_conditional_expression_or_higher()?;
++
++        Ok(ast::ExprIf {
+@@ -2725 +2876 @@
+-        }
++        })
+@@ -2734 +2885,2 @@
+-    fn parse_ipython_escape_command_expression(&mut self) -> ast::ExprIpyEscapeCommand {
++    fn parse_ipython_escape_command_expression(&mut self) -> PResult<ast::ExprIpyEscapeCommand> {
++        let _guard = self.enter_parse()?;
+@@ -2738 +2890 @@
+-            self.bump_value(TokenKind::IpyEscapeCommand)
++            self.bump_value(TokenKind::IpyEscapeCommand)?
+@@ -2756,4 +2908,4 @@
+-            self.add_error(ParseErrorType::UnexpectedIpythonEscapeCommand, &command);
+-        }
+-
+-        command
++            self.add_error(ParseErrorType::UnexpectedIpythonEscapeCommand, &command)?;
++        }
++
++        Ok(command)
+@@ -2766 +2918,3 @@
+-    fn validate_arguments(&mut self, arguments: &ast::Arguments, has_trailing_comma: bool) {
++    fn validate_arguments(&mut self, arguments: &ast::Arguments, has_trailing_comma: bool) -> PResult<()> {
++        self.charge_work(arguments.keywords.len())?;
++        self.charge_allocation(arguments.keywords.len().saturating_mul(64).saturating_add(512))?;
+@@ -2775,0 +2930,3 @@
++            if !self.options.ast_only {
++                self.charge_source_work(arg_name.len())?;
++            }
+@@ -2776,0 +2934 @@
++                self.charge_allocation(arg_name.len())?;
+@@ -2780 +2938 @@
+-                );
++                )?;
+@@ -2785,0 +2944 @@
++                self.charge_work(1)?;
+@@ -2801 +2960 @@
+-                    self.add_error(ParseErrorType::UnparenthesizedGeneratorExpression, range);
++                    self.add_error(ParseErrorType::UnparenthesizedGeneratorExpression, range)?;
+@@ -2804,0 +2964 @@
++        Ok(())
+--- a/crates/ruff_python_parser/src/parser/statement.rs
++++ b/crates/ruff_python_parser/src/parser/statement.rs
+@@ -13,0 +14 @@
++use crate::parser::PResult;
+@@ -80 +81 @@
+-impl<'src> Parser<'src> {
++impl<'src, 'check> Parser<'src, 'check> {
+@@ -112 +113,2 @@
+-    pub(super) fn parse_statement(&mut self) -> Stmt {
++    pub(super) fn parse_statement(&mut self) -> PResult<Stmt> {
++        let _guard = self.enter_parse()?;
+@@ -115,10 +117,10 @@
+-        match self.current_token_kind() {
+-            TokenKind::If => Stmt::If(self.parse_if_statement()),
+-            TokenKind::For => Stmt::For(self.parse_for_statement(start)),
+-            TokenKind::While => Stmt::While(self.parse_while_statement()),
+-            TokenKind::Def => Stmt::FunctionDef(self.parse_function_definition(vec![], start)),
+-            TokenKind::Class => Stmt::ClassDef(self.parse_class_definition(vec![], start)),
+-            TokenKind::Try => Stmt::Try(self.parse_try_statement()),
+-            TokenKind::With => Stmt::With(self.parse_with_statement(start)),
+-            TokenKind::At => self.parse_decorators(),
+-            TokenKind::Async => self.parse_async_statement(),
++        Ok(match self.current_token_kind() {
++            TokenKind::If => Stmt::If(self.parse_if_statement()?),
++            TokenKind::For => Stmt::For(self.parse_for_statement(start)?),
++            TokenKind::While => Stmt::While(self.parse_while_statement()?),
++            TokenKind::Def => Stmt::FunctionDef(self.parse_function_definition(vec![], start)?),
++            TokenKind::Class => Stmt::ClassDef(self.parse_class_definition(vec![], start)?),
++            TokenKind::Try => Stmt::Try(self.parse_try_statement()?),
++            TokenKind::With => Stmt::With(self.parse_with_statement(start)?),
++            TokenKind::At => self.parse_decorators()?,
++            TokenKind::Async => self.parse_async_statement()?,
+@@ -130 +132 @@
+-                    match self.classify_match_token() {
++                    match self.classify_match_token()? {
+@@ -132 +134 @@
+-                            return Stmt::Match(self.parse_match_statement());
++                            return Ok(Stmt::Match(self.parse_match_statement()?));
+@@ -135,2 +137,2 @@
+-                            if let Some(match_stmt) = self.try_parse_match_statement() {
+-                                return Stmt::Match(match_stmt);
++                            if let Some(match_stmt) = self.try_parse_match_statement()? {
++                                return Ok(Stmt::Match(match_stmt));
+@@ -143,3 +145,3 @@
+-                self.parse_single_simple_statement()
+-            }
+-        }
++                self.parse_single_simple_statement()?
++            }
++        })
+@@ -153,2 +155,3 @@
+-    fn parse_single_simple_statement(&mut self) -> Stmt {
+-        let stmt = self.parse_simple_statement();
++    fn parse_single_simple_statement(&mut self) -> PResult<Stmt> {
++        let _guard = self.enter_parse()?;
++        let stmt = self.parse_simple_statement()?;
+@@ -157,2 +160,2 @@
+-        let has_eaten_semicolon = self.eat(TokenKind::Semi);
+-        let has_eaten_newline = self.eat(TokenKind::Newline);
++        let has_eaten_semicolon = self.eat(TokenKind::Semi)?;
++        let has_eaten_newline = self.eat(TokenKind::Newline)?;
+@@ -169 +172 @@
+-                );
++                )?;
+@@ -176,5 +179,5 @@
+-                );
+-            }
+-        }
+-
+-        stmt
++                )?;
++            }
++        }
++
++        Ok(stmt)
+@@ -192 +195,2 @@
+-    fn parse_simple_statements(&mut self) -> Vec<Stmt> {
++    fn parse_simple_statements(&mut self) -> PResult<Vec<Stmt>> {
++        let _guard = self.enter_parse()?;
+@@ -199,3 +203,4 @@
+-            stmts.push(self.parse_simple_statement());
+-
+-            if !self.eat(TokenKind::Semi) {
++            self.reserve(&mut stmts, 1)?;
++            stmts.push(self.parse_simple_statement()?);
++
++            if !self.eat(TokenKind::Semi)? {
+@@ -208 +213 @@
+-                    );
++                    )?;
+@@ -227 +232 @@
+-        if !self.eat(TokenKind::Newline) {
++        if !self.eat(TokenKind::Newline)? {
+@@ -235 +240 @@
+-                );
++                )?;
+@@ -250 +255 @@
+-                );
++                )?;
+@@ -256 +261 @@
+-        stmts
++        Ok(stmts)
+@@ -262,13 +267,14 @@
+-    fn parse_simple_statement(&mut self) -> Stmt {
+-        match self.current_token_kind() {
+-            TokenKind::Return => Stmt::Return(self.parse_return_statement()),
+-            TokenKind::Import => Stmt::Import(self.parse_import_statement()),
+-            TokenKind::From => Stmt::ImportFrom(self.parse_from_import_statement()),
+-            TokenKind::Pass => Stmt::Pass(self.parse_pass_statement()),
+-            TokenKind::Continue => Stmt::Continue(self.parse_continue_statement()),
+-            TokenKind::Break => Stmt::Break(self.parse_break_statement()),
+-            TokenKind::Raise => Stmt::Raise(self.parse_raise_statement()),
+-            TokenKind::Del => Stmt::Delete(self.parse_delete_statement()),
+-            TokenKind::Assert => Stmt::Assert(self.parse_assert_statement()),
+-            TokenKind::Global => Stmt::Global(self.parse_global_statement()),
+-            TokenKind::Nonlocal => Stmt::Nonlocal(self.parse_nonlocal_statement()),
++    fn parse_simple_statement(&mut self) -> PResult<Stmt> {
++        let _guard = self.enter_parse()?;
++        Ok(match self.current_token_kind() {
++            TokenKind::Return => Stmt::Return(self.parse_return_statement()?),
++            TokenKind::Import => Stmt::Import(self.parse_import_statement()?),
++            TokenKind::From => Stmt::ImportFrom(self.parse_from_import_statement()?),
++            TokenKind::Pass => Stmt::Pass(self.parse_pass_statement()?),
++            TokenKind::Continue => Stmt::Continue(self.parse_continue_statement()?),
++            TokenKind::Break => Stmt::Break(self.parse_break_statement()?),
++            TokenKind::Raise => Stmt::Raise(self.parse_raise_statement()?),
++            TokenKind::Del => Stmt::Delete(self.parse_delete_statement()?),
++            TokenKind::Assert => Stmt::Assert(self.parse_assert_statement()?),
++            TokenKind::Global => Stmt::Global(self.parse_global_statement()?),
++            TokenKind::Nonlocal => Stmt::Nonlocal(self.parse_nonlocal_statement()?),
+@@ -276 +282 @@
+-                Stmt::IpyEscapeCommand(self.parse_ipython_escape_command_statement())
++                Stmt::IpyEscapeCommand(self.parse_ipython_escape_command_statement()?)
+@@ -282 +288 @@
+-                    let (first, second) = self.peek2();
++                    let (first, second) = self.peek2()?;
+@@ -287 +293 @@
+-                        return Stmt::TypeAlias(self.parse_type_alias_statement());
++                        return Ok(Stmt::TypeAlias(self.parse_type_alias_statement()?));
+@@ -295 +301 @@
+-                    self.parse_expression_list(ExpressionContext::yield_or_starred_bitwise_or());
++                    self.parse_expression_list(ExpressionContext::yield_or_starred_bitwise_or())?;
+@@ -298 +304 @@
+-                    Stmt::Assign(self.parse_assign_statement(parsed_expr, start))
++                    Stmt::Assign(self.parse_assign_statement(parsed_expr, start)?)
+@@ -300 +306 @@
+-                    Stmt::AnnAssign(self.parse_annotated_assignment_statement(parsed_expr, start))
++                    Stmt::AnnAssign(self.parse_annotated_assignment_statement(parsed_expr, start)?)
+@@ -306 +312 @@
+-                    ))
++                    )?)
+@@ -309 +315 @@
+-                        self.parse_ipython_help_end_escape_command_statement(&parsed_expr),
++                        self.parse_ipython_help_end_escape_command_statement(&parsed_expr)?,
+@@ -319 +325 @@
+-        }
++        })
+@@ -329 +335,2 @@
+-    fn parse_delete_statement(&mut self) -> ast::StmtDelete {
++    fn parse_delete_statement(&mut self) -> PResult<ast::StmtDelete> {
++        let _guard = self.enter_parse()?;
+@@ -331 +338 @@
+-        self.bump(TokenKind::Del);
++        self.bump(TokenKind::Del)?;
+@@ -345 +352 @@
+-                );
++                )?;
+@@ -353,3 +360,3 @@
+-                parser.validate_delete_target(&target.expr);
+-
+-                target.expr
++                parser.validate_delete_target(&target.expr)?;
++
++                Ok(target.expr)
+@@ -357 +364 @@
+-        );
++        )?;
+@@ -365,4 +372,4 @@
+-            );
+-        }
+-
+-        ast::StmtDelete {
++            )?;
++        }
++
++        Ok(ast::StmtDelete {
+@@ -372 +379 @@
+-        }
++        })
+@@ -382 +389,2 @@
+-    fn parse_return_statement(&mut self) -> ast::StmtReturn {
++    fn parse_return_statement(&mut self) -> PResult<ast::StmtReturn> {
++        let _guard = self.enter_parse()?;
+@@ -384 +392 @@
+-        self.bump(TokenKind::Return);
++        self.bump(TokenKind::Return)?;
+@@ -392,2 +400,2 @@
+-        let value = self.at_expr().then(|| {
+-            let parsed_expr = self.parse_expression_list(ExpressionContext::starred_bitwise_or());
++        let value = if self.at_expr() {
++            let parsed_expr = self.parse_expression_list(ExpressionContext::starred_bitwise_or())?;
+@@ -412,6 +420,8 @@
+-            );
+-
+-            Box::new(parsed_expr.expr)
+-        });
+-
+-        ast::StmtReturn {
++            )?;
++
++            Some(Box::new(parsed_expr.expr))
++        } else {
++            None
++        };
++
++        Ok(ast::StmtReturn {
+@@ -421 +431 @@
+-        }
++        })
+@@ -432 +442 @@
+-    pub(super) fn check_tuple_unpacking(&mut self, expr: &Expr, kind: UnsupportedSyntaxErrorKind) {
++    pub(super) fn check_tuple_unpacking(&mut self, expr: &Expr, kind: UnsupportedSyntaxErrorKind) -> PResult<()> {
+@@ -434 +444 @@
+-            return;
++            return Ok(());
+@@ -443 +453 @@
+-            return;
++            return Ok(());
+@@ -446,0 +457 @@
++            self.charge_work(1)?;
+@@ -448,3 +459,4 @@
+-                self.add_unsupported_syntax_error(kind, elt.range());
+-            }
+-        }
++                self.add_unsupported_syntax_error(kind, elt.range())?;
++            }
++        }
++        Ok(())
+@@ -460 +472,2 @@
+-    fn parse_raise_statement(&mut self) -> ast::StmtRaise {
++    fn parse_raise_statement(&mut self) -> PResult<ast::StmtRaise> {
++        let _guard = self.enter_parse()?;
+@@ -462 +475 @@
+-        self.bump(TokenKind::Raise);
++        self.bump(TokenKind::Raise)?;
+@@ -475 +488 @@
+-                );
++                )?;
+@@ -483 +496 @@
+-                let exc = self.parse_expression_list(ExpressionContext::default());
++                let exc = self.parse_expression_list(ExpressionContext::default())?;
+@@ -494 +507 @@
+-                    self.add_error(ParseErrorType::UnparenthesizedTupleExpression, &exc);
++                    self.add_error(ParseErrorType::UnparenthesizedTupleExpression, &exc)?;
+@@ -501 +514 @@
+-        let cause = self.eat(TokenKind::From).then(|| {
++        let cause = if self.eat(TokenKind::From)? {
+@@ -506 +519 @@
+-            let cause = self.parse_expression_list(ExpressionContext::default());
++            let cause = self.parse_expression_list(ExpressionContext::default())?;
+@@ -516,7 +529,9 @@
+-                self.add_error(ParseErrorType::UnparenthesizedTupleExpression, &cause);
+-            }
+-
+-            Box::new(cause.expr)
+-        });
+-
+-        ast::StmtRaise {
++                self.add_error(ParseErrorType::UnparenthesizedTupleExpression, &cause)?;
++            }
++
++            Some(Box::new(cause.expr))
++        } else {
++            None
++        };
++
++        Ok(ast::StmtRaise {
+@@ -527 +542 @@
+-        }
++        })
+@@ -537 +552,2 @@
+-    fn parse_import_statement(&mut self) -> ast::StmtImport {
++    fn parse_import_statement(&mut self) -> PResult<ast::StmtImport> {
++        let _guard = self.enter_parse()?;
+@@ -539 +555 @@
+-        self.bump(TokenKind::Import);
++        self.bump(TokenKind::Import)?;
+@@ -556 +572 @@
+-            });
++            })?;
+@@ -561,4 +577,4 @@
+-            self.add_error(ParseErrorType::EmptyImportNames, self.current_token_range());
+-        }
+-
+-        ast::StmtImport {
++            self.add_error(ParseErrorType::EmptyImportNames, self.current_token_range())?;
++        }
++
++        Ok(ast::StmtImport {
+@@ -568 +584 @@
+-        }
++        })
+@@ -578 +594,2 @@
+-    fn parse_from_import_statement(&mut self) -> ast::StmtImportFrom {
++    fn parse_from_import_statement(&mut self) -> PResult<ast::StmtImportFrom> {
++        let _guard = self.enter_parse()?;
+@@ -580 +597 @@
+-        self.bump(TokenKind::From);
++        self.bump(TokenKind::From)?;
+@@ -588 +605 @@
+-            if self.eat(TokenKind::Dot) {
++            if self.eat(TokenKind::Dot)? {
+@@ -590 +607 @@
+-            } else if self.eat(TokenKind::Ellipsis) {
++            } else if self.eat(TokenKind::Ellipsis)? {
+@@ -603 +620 @@
+-            Some(self.parse_dotted_name())
++            Some(self.parse_dotted_name()?)
+@@ -612 +629 @@
+-                );
++                )?;
+@@ -620 +637 @@
+-        self.expect(TokenKind::Import);
++        self.expect(TokenKind::Import)?;
+@@ -626 +643 @@
+-        let parenthesized = Parenthesized::from(self.eat(TokenKind::Lpar));
++        let parenthesized = Parenthesized::from(self.eat(TokenKind::Lpar)?);
+@@ -639 +656 @@
+-                let alias = parser.parse_alias(ImportStyle::ImportFrom);
++                let alias = parser.parse_alias(ImportStyle::ImportFrom)?;
+@@ -640,0 +658 @@
++                parser.reserve(&mut names, 1)?;
+@@ -641,0 +660 @@
++                Ok(())
+@@ -643 +662 @@
+-        );
++        )?;
+@@ -650 +669 @@
+-            self.add_error(ParseErrorType::EmptyImportNames, self.current_token_range());
++            self.add_error(ParseErrorType::EmptyImportNames, self.current_token_range())?;
+@@ -662 +681 @@
+-            );
++            )?;
+@@ -671,4 +690,4 @@
+-            self.expect(TokenKind::Rpar);
+-        }
+-
+-        ast::StmtImportFrom {
++            self.expect(TokenKind::Rpar)?;
++        }
++
++        Ok(ast::StmtImportFrom {
+@@ -680 +699 @@
+-        }
++        })
+@@ -688 +707,2 @@
+-    fn parse_alias(&mut self, style: ImportStyle) -> ast::Alias {
++    fn parse_alias(&mut self, style: ImportStyle) -> PResult<ast::Alias> {
++        let _guard = self.enter_parse()?;
+@@ -690 +710 @@
+-        if self.eat(TokenKind::Star) {
++        if self.eat(TokenKind::Star)? {
+@@ -692 +712 @@
+-            return ast::Alias {
++            return Ok(ast::Alias {
+@@ -701 +721 @@
+-            };
++            });
+@@ -705,2 +725,2 @@
+-            ImportStyle::Import => self.parse_dotted_name(),
+-            ImportStyle::ImportFrom => self.parse_identifier(),
++            ImportStyle::Import => self.parse_dotted_name()?,
++            ImportStyle::ImportFrom => self.parse_identifier()?,
+@@ -709 +729 @@
+-        let asname = if self.eat(TokenKind::As) {
++        let asname = if self.eat(TokenKind::As)? {
+@@ -715 +735 @@
+-                Some(self.parse_identifier())
++                Some(self.parse_identifier()?)
+@@ -722 +742 @@
+-                );
++                )?;
+@@ -729 +749 @@
+-        ast::Alias {
++        Ok(ast::Alias {
+@@ -734 +754 @@
+-        }
++        })
+@@ -740 +760,2 @@
+-    fn parse_dotted_name(&mut self) -> ast::Identifier {
++    fn parse_dotted_name(&mut self) -> PResult<ast::Identifier> {
++        let _guard = self.enter_parse()?;
+@@ -743 +764,3 @@
+-        let mut dotted_name: CompactString = self.parse_identifier().id.into();
++        let identifier = self.parse_identifier()?;
++        self.charge_allocation(identifier.id.len().saturating_mul(4))?;
++        let mut dotted_name: CompactString = identifier.id.into();
+@@ -746 +769 @@
+-        while self.eat(TokenKind::Dot) {
++        while self.eat(TokenKind::Dot)? {
+@@ -751,0 +775 @@
++            self.charge_allocation(4)?;
+@@ -753 +777,4 @@
+-            dotted_name.push_str(&self.parse_identifier());
++            let identifier = self.parse_identifier()?;
++            self.charge_source_work(identifier.id.len())?;
++            self.charge_allocation(identifier.id.len().saturating_mul(4))?;
++            dotted_name.push_str(&identifier);
+@@ -759 +786 @@
+-        ast::Identifier {
++        Ok(ast::Identifier {
+@@ -763 +790 @@
+-        }
++        })
+@@ -773 +800,2 @@
+-    fn parse_pass_statement(&mut self) -> ast::StmtPass {
++    fn parse_pass_statement(&mut self) -> PResult<ast::StmtPass> {
++        let _guard = self.enter_parse()?;
+@@ -775,2 +803,2 @@
+-        self.bump(TokenKind::Pass);
+-        ast::StmtPass {
++        self.bump(TokenKind::Pass)?;
++        Ok(ast::StmtPass {
+@@ -779 +807 @@
+-        }
++        })
+@@ -789 +817,2 @@
+-    fn parse_continue_statement(&mut self) -> ast::StmtContinue {
++    fn parse_continue_statement(&mut self) -> PResult<ast::StmtContinue> {
++        let _guard = self.enter_parse()?;
+@@ -791,2 +820,2 @@
+-        self.bump(TokenKind::Continue);
+-        ast::StmtContinue {
++        self.bump(TokenKind::Continue)?;
++        Ok(ast::StmtContinue {
+@@ -795 +824 @@
+-        }
++        })
+@@ -805 +834,2 @@
+-    fn parse_break_statement(&mut self) -> ast::StmtBreak {
++    fn parse_break_statement(&mut self) -> PResult<ast::StmtBreak> {
++        let _guard = self.enter_parse()?;
+@@ -807,2 +837,2 @@
+-        self.bump(TokenKind::Break);
+-        ast::StmtBreak {
++        self.bump(TokenKind::Break)?;
++        Ok(ast::StmtBreak {
+@@ -811 +841 @@
+-        }
++        })
+@@ -821 +851,2 @@
+-    fn parse_assert_statement(&mut self) -> ast::StmtAssert {
++    fn parse_assert_statement(&mut self) -> PResult<ast::StmtAssert> {
++        let _guard = self.enter_parse()?;
+@@ -823 +854 @@
+-        self.bump(TokenKind::Assert);
++        self.bump(TokenKind::Assert)?;
+@@ -833,3 +864,3 @@
+-        let test = self.parse_conditional_expression_or_higher();
+-
+-        let msg = if self.eat(TokenKind::Comma) {
++        let test = self.parse_conditional_expression_or_higher()?;
++
++        let msg = if self.eat(TokenKind::Comma)? {
+@@ -842 +873 @@
+-                Some(Box::new(self.parse_conditional_expression_or_higher().expr))
++                Some(Box::new(self.parse_conditional_expression_or_higher()?.expr))
+@@ -849 +880 @@
+-                );
++                )?;
+@@ -856 +887 @@
+-        ast::StmtAssert {
++        Ok(ast::StmtAssert {
+@@ -861 +892 @@
+-        }
++        })
+@@ -871 +902,2 @@
+-    fn parse_global_statement(&mut self) -> ast::StmtGlobal {
++    fn parse_global_statement(&mut self) -> PResult<ast::StmtGlobal> {
++        let _guard = self.enter_parse()?;
+@@ -873 +905 @@
+-        self.bump(TokenKind::Global);
++        self.bump(TokenKind::Global)?;
+@@ -885 +917 @@
+-        );
++        )?;
+@@ -890 +922 @@
+-            self.add_error(ParseErrorType::EmptyGlobalNames, self.current_token_range());
++            self.add_error(ParseErrorType::EmptyGlobalNames, self.current_token_range())?;
+@@ -896 +928 @@
+-        ast::StmtGlobal {
++        Ok(ast::StmtGlobal {
+@@ -900 +932 @@
+-        }
++        })
+@@ -910 +942,2 @@
+-    fn parse_nonlocal_statement(&mut self) -> ast::StmtNonlocal {
++    fn parse_nonlocal_statement(&mut self) -> PResult<ast::StmtNonlocal> {
++        let _guard = self.enter_parse()?;
+@@ -912 +945 @@
+-        self.bump(TokenKind::Nonlocal);
++        self.bump(TokenKind::Nonlocal)?;
+@@ -926 +959 @@
+-        );
++        )?;
+@@ -935 +968 @@
+-            );
++            )?;
+@@ -942 +975 @@
+-        ast::StmtNonlocal {
++        Ok(ast::StmtNonlocal {
+@@ -946 +979 @@
+-        }
++        })
+@@ -956 +989,2 @@
+-    fn parse_type_alias_statement(&mut self) -> ast::StmtTypeAlias {
++    fn parse_type_alias_statement(&mut self) -> PResult<ast::StmtTypeAlias> {
++        let _guard = self.enter_parse()?;
+@@ -959 +993 @@
+-        self.bump(TokenKind::Type);
++        self.bump(TokenKind::Type)?;
+@@ -972,3 +1006,3 @@
+-        );
+-
+-        let mut name = Expr::Name(self.parse_name());
++        )?;
++
++        let mut name = Expr::Name(self.parse_name()?);
+@@ -977,3 +1011,3 @@
+-        let type_params = self.try_parse_type_params();
+-
+-        self.expect(TokenKind::Equal);
++        let type_params = self.try_parse_type_params()?;
++
++        self.expect(TokenKind::Equal)?;
+@@ -991,3 +1025,3 @@
+-        let value = self.parse_conditional_expression_or_higher();
+-
+-        ast::StmtTypeAlias {
++        let value = self.parse_conditional_expression_or_higher()?;
++
++        Ok(ast::StmtTypeAlias {
+@@ -999 +1033 @@
+-        }
++        })
+@@ -1007 +1041,2 @@
+-    fn parse_ipython_escape_command_statement(&mut self) -> ast::StmtIpyEscapeCommand {
++    fn parse_ipython_escape_command_statement(&mut self) -> PResult<ast::StmtIpyEscapeCommand> {
++        let _guard = self.enter_parse()?;
+@@ -1011 +1046 @@
+-            self.bump_value(TokenKind::IpyEscapeCommand)
++            self.bump_value(TokenKind::IpyEscapeCommand)?
+@@ -1018,4 +1053,4 @@
+-            self.add_error(ParseErrorType::UnexpectedIpythonEscapeCommand, range);
+-        }
+-
+-        ast::StmtIpyEscapeCommand {
++            self.add_error(ParseErrorType::UnexpectedIpythonEscapeCommand, range)?;
++        }
++
++        Ok(ast::StmtIpyEscapeCommand {
+@@ -1026 +1061 @@
+-        }
++        })
+@@ -1037 +1072,2 @@
+-    ) -> ast::StmtIpyEscapeCommand {
++    ) -> PResult<ast::StmtIpyEscapeCommand> {
++        let _guard = self.enter_parse()?;
+@@ -1041 +1077,2 @@
+-        fn unparse_expr(parser: &mut Parser, expr: &Expr, buffer: &mut String) {
++        fn unparse_expr(parser: &mut Parser<'_, '_>, expr: &Expr, buffer: &mut String) -> PResult<()> {
++            let _guard = parser.enter_parse()?;
+@@ -1043,0 +1081,2 @@
++                    parser.charge_source_work(id.len())?;
++                    parser.charge_allocation(id.len().saturating_mul(4))?;
+@@ -1047 +1086,2 @@
+-                    unparse_expr(parser, value, buffer);
++                    unparse_expr(parser, value, buffer)?;
++                    parser.charge_allocation(4)?;
+@@ -1054,0 +1095,3 @@
++                        let length = slice.range().len().to_usize();
++                        parser.charge_source_work(length)?;
++                        parser.charge_allocation(length.saturating_mul(4))?;
+@@ -1063,2 +1106,5 @@
+-                        );
+-                        buffer.push_str(parser.src_text(slice.range()));
++                        )?;
++                        let text = parser.src_text(slice.range())?;
++                        parser.charge_source_work(text.len())?;
++                        parser.charge_allocation(text.len().saturating_mul(4))?;
++                        buffer.push_str(text);
+@@ -1066,0 +1113 @@
++                    parser.charge_allocation(4)?;
+@@ -1070 +1117,3 @@
+-                    unparse_expr(parser, value, buffer);
++                    unparse_expr(parser, value, buffer)?;
++                    parser.charge_source_work(attr.len())?;
++                    parser.charge_allocation(attr.len().saturating_add(1).saturating_mul(4))?;
+@@ -1081 +1130 @@
+-                    );
++                    )?;
+@@ -1083,0 +1133 @@
++            Ok(())
+@@ -1087,3 +1137,3 @@
+-        self.bump(TokenKind::Question);
+-
+-        let kind = if self.eat(TokenKind::Question) {
++        self.bump(TokenKind::Question)?;
++
++        let kind = if self.eat(TokenKind::Question)? {
+@@ -1103 +1153 @@
+-            );
++            )?;
+@@ -1112 +1162 @@
+-            );
++            )?;
+@@ -1116,3 +1166,3 @@
+-        unparse_expr(self, &parsed_expr.expr, &mut value);
+-
+-        ast::StmtIpyEscapeCommand {
++        unparse_expr(self, &parsed_expr.expr, &mut value)?;
++
++        Ok(ast::StmtIpyEscapeCommand {
+@@ -1123 +1173 @@
+-        }
++        })
+@@ -1133,4 +1183,7 @@
+-    fn parse_assign_statement(&mut self, target: ParsedExpr, start: TextSize) -> ast::StmtAssign {
+-        self.bump(TokenKind::Equal);
+-
+-        let mut targets = vec![target.expr];
++    fn parse_assign_statement(&mut self, target: ParsedExpr, start: TextSize) -> PResult<ast::StmtAssign> {
++        let _guard = self.enter_parse()?;
++        self.bump(TokenKind::Equal)?;
++
++        let mut targets = Vec::new();
++        self.reserve(&mut targets, 1)?;
++        targets.push(target.expr);
+@@ -1160 +1213 @@
+-            self.parse_expression_list(ExpressionContext::yield_or_starred_bitwise_or());
++            self.parse_expression_list(ExpressionContext::yield_or_starred_bitwise_or())?;
+@@ -1165 +1218 @@
+-                parser.bump(TokenKind::Equal);
++                parser.bump(TokenKind::Equal)?;
+@@ -1168 +1221 @@
+-                    parser.parse_expression_list(ExpressionContext::yield_or_starred_bitwise_or());
++                    parser.parse_expression_list(ExpressionContext::yield_or_starred_bitwise_or())?;
+@@ -1171,0 +1225 @@
++                parser.reserve(&mut targets, 1)?;
+@@ -1173 +1227,2 @@
+-            });
++                Ok(())
++            })?;
+@@ -1183,4 +1238,4 @@
+-            self.validate_assignment_target(target);
+-        }
+-
+-        ast::StmtAssign {
++            self.validate_assignment_target(target)?;
++        }
++
++        Ok(ast::StmtAssign {
+@@ -1191 +1246 @@
+-        }
++        })
+@@ -1205,2 +1260,3 @@
+-    ) -> ast::StmtAnnAssign {
+-        self.bump(TokenKind::Colon);
++    ) -> PResult<ast::StmtAnnAssign> {
++        let _guard = self.enter_parse()?;
++        self.bump(TokenKind::Colon)?;
+@@ -1219 +1275 @@
+-        self.validate_annotated_assignment_target(&target.expr);
++        self.validate_annotated_assignment_target(&target.expr)?;
+@@ -1239,3 +1295,3 @@
+-        let annotation = self.parse_conditional_expression_or_higher();
+-
+-        let value = if self.eat(TokenKind::Equal) {
++        let annotation = self.parse_conditional_expression_or_higher()?;
++
++        let value = if self.eat(TokenKind::Equal)? {
+@@ -1248 +1304 @@
+-                    self.parse_expression_list(ExpressionContext::yield_or_starred_bitwise_or())
++                    self.parse_expression_list(ExpressionContext::yield_or_starred_bitwise_or())?
+@@ -1257 +1313 @@
+-                );
++                )?;
+@@ -1264 +1320 @@
+-        ast::StmtAnnAssign {
++        Ok(ast::StmtAnnAssign {
+@@ -1271 +1327 @@
+-        }
++        })
+@@ -1286 +1342,2 @@
+-    ) -> ast::StmtAugAssign {
++    ) -> PResult<ast::StmtAugAssign> {
++        let _guard = self.enter_parse()?;
+@@ -1288 +1345 @@
+-        self.bump_ts(AUGMENTED_ASSIGN_SET);
++        self.bump_ts(AUGMENTED_ASSIGN_SET)?;
+@@ -1301 +1358 @@
+-            self.add_error(ParseErrorType::InvalidAugmentedAssignmentTarget, &target);
++            self.add_error(ParseErrorType::InvalidAugmentedAssignmentTarget, &target)?;
+@@ -1318,3 +1375,3 @@
+-        let value = self.parse_expression_list(ExpressionContext::yield_or_starred_bitwise_or());
+-
+-        ast::StmtAugAssign {
++        let value = self.parse_expression_list(ExpressionContext::yield_or_starred_bitwise_or())?;
++
++        Ok(ast::StmtAugAssign {
+@@ -1326 +1383 @@
+-        }
++        })
+@@ -1336 +1393,2 @@
+-    fn parse_if_statement(&mut self) -> ast::StmtIf {
++    fn parse_if_statement(&mut self) -> PResult<ast::StmtIf> {
++        let _guard = self.enter_parse()?;
+@@ -1338 +1396 @@
+-        self.bump(TokenKind::If);
++        self.bump(TokenKind::If)?;
+@@ -1347 +1405 @@
+-        let test = self.parse_named_expression_or_higher(ExpressionContext::default());
++        let test = self.parse_named_expression_or_higher(ExpressionContext::default())?;
+@@ -1354 +1412 @@
+-        self.expect(TokenKind::Colon);
++        self.expect(TokenKind::Colon)?;
+@@ -1359 +1417 @@
+-        let body = self.parse_body(Clause::If);
++        let body = self.parse_body(Clause::If)?;
+@@ -1370 +1428 @@
+-        });
++        })?;
+@@ -1373,4 +1431,5 @@
+-            elif_else_clauses.push(self.parse_elif_or_else_clause(ElifOrElse::Else));
+-        }
+-
+-        ast::StmtIf {
++            self.reserve(&mut elif_else_clauses, 1)?;
++            elif_else_clauses.push(self.parse_elif_or_else_clause(ElifOrElse::Else)?);
++        }
++
++        Ok(ast::StmtIf {
+@@ -1382 +1441 @@
+-        }
++        })
+@@ -1390 +1449,2 @@
+-    fn parse_elif_or_else_clause(&mut self, kind: ElifOrElse) -> ast::ElifElseClause {
++    fn parse_elif_or_else_clause(&mut self, kind: ElifOrElse) -> PResult<ast::ElifElseClause> {
++        let _guard = self.enter_parse()?;
+@@ -1392 +1452 @@
+-        self.bump(kind.as_token_kind());
++        self.bump(kind.as_token_kind())?;
+@@ -1403 +1463 @@
+-                self.parse_named_expression_or_higher(ExpressionContext::default())
++                self.parse_named_expression_or_higher(ExpressionContext::default())?
+@@ -1417,5 +1477,5 @@
+-        self.expect(TokenKind::Colon);
+-
+-        let body = self.parse_body(kind.as_clause());
+-
+-        ast::ElifElseClause {
++        self.expect(TokenKind::Colon)?;
++
++        let body = self.parse_body(kind.as_clause())?;
++
++        Ok(ast::ElifElseClause {
+@@ -1426 +1486 @@
+-        }
++        })
+@@ -1436 +1496,2 @@
+-    fn parse_try_statement(&mut self) -> ast::StmtTry {
++    fn parse_try_statement(&mut self) -> PResult<ast::StmtTry> {
++        let _guard = self.enter_parse()?;
+@@ -1438,2 +1499,2 @@
+-        self.bump(TokenKind::Try);
+-        self.expect(TokenKind::Colon);
++        self.bump(TokenKind::Try)?;
++        self.expect(TokenKind::Colon)?;
+@@ -1443 +1504 @@
+-        let try_body = self.parse_body(Clause::Try);
++        let try_body = self.parse_body(Clause::Try)?;
+@@ -1472 +1533 @@
+-            let (handler, kind) = p.parse_except_clause();
++            let (handler, kind) = p.parse_except_clause()?;
+@@ -1474 +1535 @@
+-                p.add_unsupported_syntax_error(UnsupportedSyntaxErrorKind::ExceptStar, range);
++                p.add_unsupported_syntax_error(UnsupportedSyntaxErrorKind::ExceptStar, range)?;
+@@ -1478,0 +1540 @@
++                p.reserve(&mut mixed_except_ranges, 1)?;
+@@ -1481,2 +1543,2 @@
+-            handler
+-        });
++            Ok(handler)
++        })?;
+@@ -1491 +1553 @@
+-            );
++            )?;
+@@ -1510,3 +1572,3 @@
+-        let orelse = if self.eat(TokenKind::Else) {
+-            self.expect(TokenKind::Colon);
+-            self.parse_body(Clause::Else)
++        let orelse = if self.eat(TokenKind::Else)? {
++            self.expect(TokenKind::Colon)?;
++            self.parse_body(Clause::Else)?
+@@ -1517,3 +1579,3 @@
+-        let (finalbody, has_finally) = if self.eat(TokenKind::Finally) {
+-            self.expect(TokenKind::Colon);
+-            (self.parse_body(Clause::Finally), true)
++        let (finalbody, has_finally) = if self.eat(TokenKind::Finally)? {
++            self.expect(TokenKind::Colon)?;
++            (self.parse_body(Clause::Finally)?, true)
+@@ -1537 +1599 @@
+-            );
++            )?;
+@@ -1553 +1615 @@
+-            );
++            )?;
+@@ -1568 +1630 @@
+-        ast::StmtTry {
++        Ok(ast::StmtTry {
+@@ -1576 +1638 @@
+-        }
++        })
+@@ -1584 +1646,2 @@
+-    fn parse_except_clause(&mut self) -> (ExceptHandler, ExceptClauseKind) {
++    fn parse_except_clause(&mut self) -> PResult<(ExceptHandler, ExceptClauseKind)> {
++        let _guard = self.enter_parse()?;
+@@ -1586 +1649 @@
+-        self.bump(TokenKind::Except);
++        self.bump(TokenKind::Except)?;
+@@ -1589 +1652 @@
+-        let block_kind = if self.eat(TokenKind::Star) {
++        let block_kind = if self.eat(TokenKind::Star)? {
+@@ -1605 +1668 @@
+-            let parsed_expr = self.parse_expression_list(ExpressionContext::default());
++            let parsed_expr = self.parse_expression_list(ExpressionContext::default())?;
+@@ -1629 +1692 @@
+-                    );
++                    )?;
+@@ -1655 +1718 @@
+-                    );
++                    )?;
+@@ -1678 +1741 @@
+-                );
++                )?;
+@@ -1683 +1746 @@
+-        let name = if self.eat(TokenKind::As) {
++        let name = if self.eat(TokenKind::As)? {
+@@ -1690 +1753 @@
+-                Some(self.parse_identifier())
++                Some(self.parse_identifier()?)
+@@ -1702 +1765 @@
+-                );
++                )?;
+@@ -1715,5 +1778,5 @@
+-        self.expect(TokenKind::Colon);
+-
+-        let except_body = self.parse_body(Clause::Except);
+-
+-        (
++        self.expect(TokenKind::Colon)?;
++
++        let except_body = self.parse_body(Clause::Except)?;
++
++        Ok((
+@@ -1728 +1791 @@
+-        )
++        ))
+@@ -1741,2 +1804,3 @@
+-    fn parse_for_statement(&mut self, start: TextSize) -> ast::StmtFor {
+-        self.bump(TokenKind::For);
++    fn parse_for_statement(&mut self, start: TextSize) -> PResult<ast::StmtFor> {
++        let _guard = self.enter_parse()?;
++        self.bump(TokenKind::For)?;
+@@ -1768 +1832 @@
+-            self.parse_expression_list(ExpressionContext::starred_conditional().with_in_excluded());
++            self.parse_expression_list(ExpressionContext::starred_conditional().with_in_excluded())?;
+@@ -1780 +1844 @@
+-        self.validate_assignment_target(&target.expr);
++        self.validate_assignment_target(&target.expr)?;
+@@ -1785 +1849 @@
+-        self.expect(TokenKind::In);
++        self.expect(TokenKind::In)?;
+@@ -1795 +1859 @@
+-        let iter = self.parse_expression_list(ExpressionContext::starred_bitwise_or());
++        let iter = self.parse_expression_list(ExpressionContext::starred_bitwise_or())?;
+@@ -1817,9 +1881,9 @@
+-        );
+-
+-        self.expect(TokenKind::Colon);
+-
+-        let body = self.parse_body(Clause::For);
+-
+-        let orelse = if self.eat(TokenKind::Else) {
+-            self.expect(TokenKind::Colon);
+-            self.parse_body(Clause::Else)
++        )?;
++
++        self.expect(TokenKind::Colon)?;
++
++        let body = self.parse_body(Clause::For)?;
++
++        let orelse = if self.eat(TokenKind::Else)? {
++            self.expect(TokenKind::Colon)?;
++            self.parse_body(Clause::Else)?
+@@ -1830 +1894 @@
+-        ast::StmtFor {
++        Ok(ast::StmtFor {
+@@ -1838 +1902 @@
+-        }
++        })
+@@ -1848 +1912,2 @@
+-    fn parse_while_statement(&mut self) -> ast::StmtWhile {
++    fn parse_while_statement(&mut self) -> PResult<ast::StmtWhile> {
++        let _guard = self.enter_parse()?;
+@@ -1850 +1915 @@
+-        self.bump(TokenKind::While);
++        self.bump(TokenKind::While)?;
+@@ -1862 +1927 @@
+-        let test = self.parse_named_expression_or_higher(ExpressionContext::default());
++        let test = self.parse_named_expression_or_higher(ExpressionContext::default())?;
+@@ -1869,7 +1934,7 @@
+-        self.expect(TokenKind::Colon);
+-
+-        let body = self.parse_body(Clause::While);
+-
+-        let orelse = if self.eat(TokenKind::Else) {
+-            self.expect(TokenKind::Colon);
+-            self.parse_body(Clause::Else)
++        self.expect(TokenKind::Colon)?;
++
++        let body = self.parse_body(Clause::While)?;
++
++        let orelse = if self.eat(TokenKind::Else)? {
++            self.expect(TokenKind::Colon)?;
++            self.parse_body(Clause::Else)?
+@@ -1880 +1945 @@
+-        ast::StmtWhile {
++        Ok(ast::StmtWhile {
+@@ -1886 +1951 @@
+-        }
++        })
+@@ -1905,2 +1970,3 @@
+-    ) -> ast::StmtFunctionDef {
+-        self.bump(TokenKind::Def);
++    ) -> PResult<ast::StmtFunctionDef> {
++        let _guard = self.enter_parse()?;
++        self.bump(TokenKind::Def)?;
+@@ -1911 +1977 @@
+-        let name = self.parse_identifier();
++        let name = self.parse_identifier()?;
+@@ -1917 +1983 @@
+-        let type_params = self.try_parse_type_params();
++        let type_params = self.try_parse_type_params()?;
+@@ -1931 +1997 @@
+-            );
++            )?;
+@@ -1946,3 +2012,3 @@
+-        let parameters = self.parse_parameters(FunctionKind::FunctionDef);
+-
+-        let returns = if self.eat(TokenKind::Rarrow) {
++        let parameters = self.parse_parameters(FunctionKind::FunctionDef)?;
++
++        let returns = if self.eat(TokenKind::Rarrow)? {
+@@ -1959 +2025 @@
+-                let returns = self.parse_expression_list(ExpressionContext::default());
++                let returns = self.parse_expression_list(ExpressionContext::default())?;
+@@ -1980 +2046 @@
+-                    );
++                    )?;
+@@ -1990 +2056 @@
+-                );
++                )?;
+@@ -1998 +2064 @@
+-        self.expect(TokenKind::Colon);
++        self.expect(TokenKind::Colon)?;
+@@ -2004,3 +2070,3 @@
+-        let body = self.parse_body(Clause::FunctionDef);
+-
+-        ast::StmtFunctionDef {
++        let body = self.parse_body(Clause::FunctionDef)?;
++
++        Ok(ast::StmtFunctionDef {
+@@ -2016 +2082 @@
+-        }
++        })
+@@ -2033,2 +2099,3 @@
+-    ) -> ast::StmtClassDef {
+-        self.bump(TokenKind::Class);
++    ) -> PResult<ast::StmtClassDef> {
++        let _guard = self.enter_parse()?;
++        self.bump(TokenKind::Class)?;
+@@ -2040 +2107 @@
+-        let name = self.parse_identifier();
++        let name = self.parse_identifier()?;
+@@ -2046 +2113 @@
+-        let type_params = self.try_parse_type_params();
++        let type_params = self.try_parse_type_params()?;
+@@ -2060 +2127 @@
+-            );
++            )?;
+@@ -2066,5 +2133,7 @@
+-        let arguments = self
+-            .at(TokenKind::Lpar)
+-            .then(|| Box::new(self.parse_arguments()));
+-
+-        self.expect(TokenKind::Colon);
++        let arguments = if self.at(TokenKind::Lpar) {
++            Some(Box::new(self.parse_arguments()?))
++        } else {
++            None
++        };
++
++        self.expect(TokenKind::Colon)?;
+@@ -2076,3 +2145,3 @@
+-        let body = self.parse_body(Clause::Class);
+-
+-        ast::StmtClassDef {
++        let body = self.parse_body(Clause::Class)?;
++
++        Ok(ast::StmtClassDef {
+@@ -2086 +2155 @@
+-        }
++        })
+@@ -2099,9 +2168,10 @@
+-    fn parse_with_statement(&mut self, start: TextSize) -> ast::StmtWith {
+-        self.bump(TokenKind::With);
+-
+-        let items = self.parse_with_items();
+-        self.expect(TokenKind::Colon);
+-
+-        let body = self.parse_body(Clause::With);
+-
+-        ast::StmtWith {
++    fn parse_with_statement(&mut self, start: TextSize) -> PResult<ast::StmtWith> {
++        let _guard = self.enter_parse()?;
++        self.bump(TokenKind::With)?;
++
++        let items = self.parse_with_items()?;
++        self.expect(TokenKind::Colon)?;
++
++        let body = self.parse_body(Clause::With)?;
++
++        Ok(ast::StmtWith {
+@@ -2113 +2183 @@
+-        }
++        })
+@@ -2119 +2189,2 @@
+-    fn parse_with_items(&mut self) -> Vec<WithItem> {
++    fn parse_with_items(&mut self) -> PResult<Vec<WithItem>> {
++        let _guard = self.enter_parse()?;
+@@ -2126,2 +2197,2 @@
+-            );
+-            return vec![];
++            )?;
++            return Ok(vec![]);
+@@ -2132,2 +2203,2 @@
+-        if self.at(TokenKind::Lpar) {
+-            if let Some(items) = self.try_parse_parenthesized_with_items() {
++        Ok(if self.at(TokenKind::Lpar) {
++            if let Some(items) = self.try_parse_parenthesized_with_items()? {
+@@ -2171,3 +2242,3 @@
+-                );
+-
+-                self.expect(TokenKind::Rpar);
++                )?;
++
++                self.expect(TokenKind::Rpar)?;
+@@ -2195,2 +2266,2 @@
+-                    |p| p.parse_with_item(WithItemParsingState::Regular).item,
+-                )
++                    |p| Ok(p.parse_with_item(WithItemParsingState::Regular)?.item),
++                )?
+@@ -2201,3 +2272,3 @@
+-                |p| p.parse_with_item(WithItemParsingState::Regular).item,
+-            )
+-        }
++                |p| Ok(p.parse_with_item(WithItemParsingState::Regular)?.item),
++            )?
++        })
+@@ -2231,2 +2302,3 @@
+-    fn try_parse_parenthesized_with_items(&mut self) -> Option<Vec<WithItem>> {
+-        let checkpoint = self.checkpoint();
++    fn try_parse_parenthesized_with_items(&mut self) -> PResult<Option<Vec<WithItem>>> {
++        let _guard = self.enter_parse()?;
++        let checkpoint = self.checkpoint()?;
+@@ -2237 +2309 @@
+-        self.bump(TokenKind::Lpar);
++        self.bump(TokenKind::Lpar)?;
+@@ -2249 +2321 @@
+-            let parsed_with_item = p.parse_with_item(WithItemParsingState::Speculative);
++            let parsed_with_item = p.parse_with_item(WithItemParsingState::Speculative)?;
+@@ -2250,0 +2323 @@
++            p.reserve(&mut parsed_with_items, 1)?;
+@@ -2252 +2325,2 @@
+-        });
++            Ok(())
++        })?;
+@@ -2263,0 +2338 @@
++                self.charge_work(1)?;
+@@ -2276 +2351 @@
+-                self.add_error(error, &parsed_with_item.item.context_expr);
++                self.add_error(error, &parsed_with_item.item.context_expr)?;
+@@ -2283 +2358 @@
+-            && matches!(self.peek(), TokenKind::Colon | TokenKind::Newline)
++            && matches!(self.peek()?, TokenKind::Colon | TokenKind::Newline)
+@@ -2293,2 +2368,3 @@
+-                if parsed_with_items.iter().any(|parsed_with_item| {
+-                    !parsed_with_item.is_parenthesized
++                for parsed_with_item in &parsed_with_items {
++                    self.charge_work(1)?;
++                    if !parsed_with_item.is_parenthesized
+@@ -2299,2 +2375,4 @@
+-                }) {
+-                    with_item_kind = WithItemKind::ParenthesizedExpression;
++                    {
++                        with_item_kind = WithItemKind::ParenthesizedExpression;
++                        break;
++                    }
+@@ -2323,6 +2401,7 @@
+-            Some(
+-                parsed_with_items
+-                    .into_iter()
+-                    .map(|parsed_with_item| parsed_with_item.item)
+-                    .collect(),
+-            )
++            let mut items = Vec::new();
++            self.reserve(&mut items, parsed_with_items.len())?;
++            for parsed_with_item in parsed_with_items {
++                self.charge_work(1)?;
++                items.push(parsed_with_item.item);
++            }
++            Ok(Some(items))
+@@ -2330,3 +2409,3 @@
+-            self.rewind(checkpoint);
+-
+-            None
++            self.rewind(checkpoint)?;
++
++            Ok(None)
+@@ -2339 +2418,2 @@
+-    fn parse_with_item(&mut self, state: WithItemParsingState) -> ParsedWithItem {
++    fn parse_with_item(&mut self, state: WithItemParsingState) -> PResult<ParsedWithItem> {
++        let _guard = self.enter_parse()?;
+@@ -2366,3 +2446,3 @@
+-                )
+-            }
+-            WithItemParsingState::Regular => self.parse_conditional_expression_or_higher(),
++                )?
++            }
++            WithItemParsingState::Regular => self.parse_conditional_expression_or_higher()?,
+@@ -2371,5 +2451,7 @@
+-        let optional_vars = self
+-            .at(TokenKind::As)
+-            .then(|| Box::new(self.parse_with_item_optional_vars().expr));
+-
+-        ParsedWithItem {
++        let optional_vars = if self.at(TokenKind::As) {
++            Some(Box::new(self.parse_with_item_optional_vars()?.expr))
++        } else {
++            None
++        };
++
++        Ok(ParsedWithItem {
+@@ -2383 +2465 @@
+-        }
++        })
+@@ -2391,2 +2473,3 @@
+-    fn parse_with_item_optional_vars(&mut self) -> ParsedExpr {
+-        self.bump(TokenKind::As);
++    fn parse_with_item_optional_vars(&mut self) -> PResult<ParsedExpr> {
++        let _guard = self.enter_parse()?;
++        self.bump(TokenKind::As)?;
+@@ -2395 +2478 @@
+-            .parse_conditional_expression_or_higher_impl(ExpressionContext::starred_conditional());
++            .parse_conditional_expression_or_higher_impl(ExpressionContext::starred_conditional())?;
+@@ -2398 +2481 @@
+-        self.validate_assignment_target(&target.expr);
++        self.validate_assignment_target(&target.expr)?;
+@@ -2402 +2485 @@
+-        target
++        Ok(target)
+@@ -2431,2 +2514,3 @@
+-    fn try_parse_match_statement(&mut self) -> Option<ast::StmtMatch> {
+-        let checkpoint = self.checkpoint();
++    fn try_parse_match_statement(&mut self) -> PResult<Option<ast::StmtMatch>> {
++        let _guard = self.enter_parse()?;
++        let checkpoint = self.checkpoint()?;
+@@ -2435,5 +2519,5 @@
+-        self.bump(TokenKind::Match);
+-
+-        let subject = self.parse_match_subject_expression();
+-
+-        match self.current_token_kind() {
++        self.bump(TokenKind::Match)?;
++
++        let subject = self.parse_match_subject_expression()?;
++
++        Ok(match self.current_token_kind() {
+@@ -2442,3 +2526,3 @@
+-                self.bump(TokenKind::Colon);
+-
+-                let cases = self.parse_match_body();
++                self.bump(TokenKind::Colon)?;
++
++                let cases = self.parse_match_body()?;
+@@ -2453 +2537 @@
+-            TokenKind::Newline if matches!(self.peek2(), (TokenKind::Indent, TokenKind::Case)) => {
++            TokenKind::Newline if matches!(self.peek2()?, (TokenKind::Indent, TokenKind::Case)) => {
+@@ -2465,3 +2549,3 @@
+-                );
+-
+-                let cases = self.parse_match_body();
++                )?;
++
++                let cases = self.parse_match_body()?;
+@@ -2478 +2562 @@
+-                self.rewind(checkpoint);
++                self.rewind(checkpoint)?;
+@@ -2482 +2566 @@
+-        }
++        })
+@@ -2492 +2576,2 @@
+-    fn parse_match_statement(&mut self) -> ast::StmtMatch {
++    fn parse_match_statement(&mut self) -> PResult<ast::StmtMatch> {
++        let _guard = self.enter_parse()?;
+@@ -2494 +2579 @@
+-        self.bump(TokenKind::Match);
++        self.bump(TokenKind::Match)?;
+@@ -2498,4 +2583,4 @@
+-        let subject = self.parse_match_subject_expression();
+-        self.expect(TokenKind::Colon);
+-
+-        let cases = self.parse_match_body();
++        let subject = self.parse_match_subject_expression()?;
++        self.expect(TokenKind::Colon)?;
++
++        let cases = self.parse_match_body()?;
+@@ -2515,3 +2600,3 @@
+-        self.add_unsupported_syntax_error(UnsupportedSyntaxErrorKind::Match, match_range);
+-
+-        ast::StmtMatch {
++        self.add_unsupported_syntax_error(UnsupportedSyntaxErrorKind::Match, match_range)?;
++
++        Ok(ast::StmtMatch {
+@@ -2522 +2607 @@
+-        }
++        })
+@@ -2526 +2611,2 @@
+-    fn parse_match_subject_expression(&mut self) -> Expr {
++    fn parse_match_subject_expression(&mut self) -> PResult<Expr> {
++        let _guard = self.enter_parse()?;
+@@ -2538 +2624 @@
+-            self.parse_named_expression_or_higher(ExpressionContext::starred_bitwise_or());
++            self.parse_named_expression_or_higher(ExpressionContext::starred_bitwise_or())?;
+@@ -2559 +2645 @@
+-        if self.at(TokenKind::Comma) {
++        Ok(if self.at(TokenKind::Comma) {
+@@ -2562 +2648 @@
+-            });
++            })?;
+@@ -2570 +2656 @@
+-                self.add_error(ParseErrorType::InvalidStarredExpressionUsage, &subject);
++                self.add_error(ParseErrorType::InvalidStarredExpressionUsage, &subject)?;
+@@ -2573 +2659 @@
+-        }
++        })
+@@ -2580 +2666,2 @@
+-    fn parse_match_body(&mut self) -> Vec<ast::MatchCase> {
++    fn parse_match_body(&mut self) -> PResult<Vec<ast::MatchCase>> {
++        let _guard = self.enter_parse()?;
+@@ -2583 +2670 @@
+-        self.expect(TokenKind::Newline);
++        self.expect(TokenKind::Newline)?;
+@@ -2586 +2673 @@
+-        if !self.eat(TokenKind::Indent) {
++        if !self.eat(TokenKind::Indent)? {
+@@ -2595,4 +2682,4 @@
+-            );
+-        }
+-
+-        let cases = self.parse_match_case_blocks();
++            )?;
++        }
++
++        let cases = self.parse_match_case_blocks()?;
+@@ -2601,3 +2688,3 @@
+-        self.expect(TokenKind::Dedent);
+-
+-        cases
++        self.expect(TokenKind::Dedent)?;
++
++        Ok(cases)
+@@ -2607 +2694,2 @@
+-    fn parse_match_case_blocks(&mut self) -> Vec<ast::MatchCase> {
++    fn parse_match_case_blocks(&mut self) -> PResult<Vec<ast::MatchCase>> {
++        let _guard = self.enter_parse()?;
+@@ -2620,2 +2708,2 @@
+-            );
+-            return cases;
++            )?;
++            return Ok(cases);
+@@ -2628,4 +2716,5 @@
+-            cases.push(self.parse_match_case());
+-        }
+-
+-        cases
++            self.reserve(&mut cases, 1)?;
++            cases.push(self.parse_match_case()?);
++        }
++
++        Ok(cases)
+@@ -2641 +2730,2 @@
+-    fn parse_match_case(&mut self) -> ast::MatchCase {
++    fn parse_match_case(&mut self) -> PResult<ast::MatchCase> {
++        let _guard = self.enter_parse()?;
+@@ -2643 +2733 @@
+-        self.bump(TokenKind::Case);
++        self.bump(TokenKind::Case)?;
+@@ -2648,3 +2738,3 @@
+-        let pattern = self.parse_match_patterns();
+-
+-        let guard = if self.eat(TokenKind::If) {
++        let pattern = self.parse_match_patterns()?;
++
++        let guard = if self.eat(TokenKind::If)? {
+@@ -2670 +2760 @@
+-                    self.parse_named_expression_or_higher(ExpressionContext::default())
++                    self.parse_named_expression_or_higher(ExpressionContext::default())?
+@@ -2680 +2770 @@
+-                );
++                )?;
+@@ -2687 +2777 @@
+-        self.expect(TokenKind::Colon);
++        self.expect(TokenKind::Colon)?;
+@@ -2693,3 +2783,3 @@
+-        let body = self.parse_body(Clause::Case);
+-
+-        ast::MatchCase {
++        let body = self.parse_body(Clause::Case)?;
++
++        Ok(ast::MatchCase {
+@@ -2701 +2791 @@
+-        }
++        })
+@@ -2713 +2803,2 @@
+-    fn parse_async_statement(&mut self) -> Stmt {
++    fn parse_async_statement(&mut self) -> PResult<Stmt> {
++        let _guard = self.enter_parse()?;
+@@ -2715,3 +2806,3 @@
+-        self.bump(TokenKind::Async);
+-
+-        match self.current_token_kind() {
++        self.bump(TokenKind::Async)?;
++
++        Ok(match self.current_token_kind() {
+@@ -2722 +2813 @@
+-                ..self.parse_function_definition(vec![], async_start)
++                ..self.parse_function_definition(vec![], async_start)?
+@@ -2729 +2820 @@
+-                ..self.parse_with_statement(async_start)
++                ..self.parse_with_statement(async_start)?
+@@ -2736 +2827 @@
+-                ..self.parse_for_statement(async_start)
++                ..self.parse_for_statement(async_start)?
+@@ -2750 +2841 @@
+-                );
++                )?;
+@@ -2754,3 +2845,3 @@
+-                self.parse_statement()
+-            }
+-        }
++                self.parse_statement()?
++            }
++        })
+@@ -2762 +2853,2 @@
+-    fn parse_decorators(&mut self) -> Stmt {
++    fn parse_decorators(&mut self) -> PResult<Stmt> {
++        let _guard = self.enter_parse()?;
+@@ -2778,3 +2870,3 @@
+-            self.bump(TokenKind::At);
+-
+-            let parsed_expr = self.parse_named_expression_or_higher(ExpressionContext::default());
++            self.bump(TokenKind::At)?;
++
++            let parsed_expr = self.parse_named_expression_or_higher(ExpressionContext::default())?;
+@@ -2854 +2946 @@
+-                    );
++                    )?;
+@@ -2865,0 +2958 @@
++            self.reserve(&mut decorators, 1)?;
+@@ -2876,8 +2969,8 @@
+-            self.expect(TokenKind::Newline);
+-        }
+-
+-        match self.current_token_kind() {
+-            TokenKind::Def => Stmt::FunctionDef(self.parse_function_definition(decorators, start)),
+-            TokenKind::Class => Stmt::ClassDef(self.parse_class_definition(decorators, start)),
+-            TokenKind::Async if self.peek() == TokenKind::Def => {
+-                self.bump(TokenKind::Async);
++            self.expect(TokenKind::Newline)?;
++        }
++
++        Ok(match self.current_token_kind() {
++            TokenKind::Def => Stmt::FunctionDef(self.parse_function_definition(decorators, start)?),
++            TokenKind::Class => Stmt::ClassDef(self.parse_class_definition(decorators, start)?),
++            TokenKind::Async if self.peek()? == TokenKind::Def => {
++                self.bump(TokenKind::Async)?;
+@@ -2890 +2983 @@
+-                    ..self.parse_function_definition(decorators, start)
++                    ..self.parse_function_definition(decorators, start)?
+@@ -2904 +2997 @@
+-                );
++                )?;
+@@ -2920,3 +3013,3 @@
+-                self.parse_statement()
+-            }
+-        }
++                self.parse_statement()?
++            }
++        })
+@@ -2929 +3022,2 @@
+-    fn parse_body(&mut self, parent_clause: Clause) -> Vec<Stmt> {
++    fn parse_body(&mut self, parent_clause: Clause) -> PResult<Vec<Stmt>> {
++        let _guard = self.enter_parse()?;
+@@ -2934 +3028 @@
+-        if self.eat(TokenKind::Newline) {
++        if self.eat(TokenKind::Newline)? {
+@@ -2954 +3048 @@
+-            );
++            )?;
+@@ -2964,4 +3058,4 @@
+-            );
+-        }
+-
+-        Vec::new()
++            )?;
++        }
++
++        Ok(Vec::new())
+@@ -2975,2 +3069,3 @@
+-    fn parse_block(&mut self) -> Vec<Stmt> {
+-        self.bump(TokenKind::Indent);
++    fn parse_block(&mut self) -> PResult<Vec<Stmt>> {
++        let _guard = self.enter_parse()?;
++        self.bump(TokenKind::Indent)?;
+@@ -2979,5 +3074,5 @@
+-            self.parse_list_into_vec(RecoveryContextKind::BlockStatements, Self::parse_statement);
+-
+-        self.expect(TokenKind::Dedent);
+-
+-        statements
++            self.parse_list_into_vec(RecoveryContextKind::BlockStatements, Self::parse_statement)?;
++
++        self.expect(TokenKind::Dedent)?;
++
++        Ok(statements)
+@@ -3001,2 +3096,3 @@
+-    ) -> ast::Parameter {
+-        let name = self.parse_identifier();
++    ) -> PResult<ast::Parameter> {
++        let _guard = self.enter_parse()?;
++        let name = self.parse_identifier()?;
+@@ -3007 +3103 @@
+-            FunctionKind::FunctionDef if self.eat(TokenKind::Colon) => {
++            FunctionKind::FunctionDef if self.eat(TokenKind::Colon)? => {
+@@ -3023 +3119 @@
+-                            );
++                            )?;
+@@ -3047 +3143 @@
+-                                );
++                                )?;
+@@ -3061 +3157 @@
+-                            self.parse_conditional_expression_or_higher()
++                            self.parse_conditional_expression_or_higher()?
+@@ -3072 +3168 @@
+-                    );
++                    )?;
+@@ -3079 +3175 @@
+-        ast::Parameter {
++        Ok(ast::Parameter {
+@@ -3084 +3180 @@
+-        }
++        })
+@@ -3099,4 +3195,5 @@
+-    ) -> ast::ParameterWithDefault {
+-        let parameter = self.parse_parameter(start, function_kind, AllowStarAnnotation::No);
+-
+-        let default = if self.eat(TokenKind::Equal) {
++    ) -> PResult<ast::ParameterWithDefault> {
++        let _guard = self.enter_parse()?;
++        let parameter = self.parse_parameter(start, function_kind, AllowStarAnnotation::No)?;
++
++        let default = if self.eat(TokenKind::Equal)? {
+@@ -3114 +3211 @@
+-                Some(Box::new(self.parse_conditional_expression_or_higher().expr))
++                Some(Box::new(self.parse_conditional_expression_or_higher()?.expr))
+@@ -3122 +3219 @@
+-                );
++                )?;
+@@ -3129 +3226 @@
+-        ast::ParameterWithDefault {
++        Ok(ast::ParameterWithDefault {
+@@ -3134 +3231 @@
+-        }
++        })
+@@ -3140 +3237,2 @@
+-    pub(super) fn parse_parameters(&mut self, function_kind: FunctionKind) -> ast::Parameters {
++    pub(super) fn parse_parameters(&mut self, function_kind: FunctionKind) -> PResult<ast::Parameters> {
++        let _guard = self.enter_parse()?;
+@@ -3144 +3242 @@
+-            self.expect(TokenKind::Lpar);
++            self.expect(TokenKind::Lpar)?;
+@@ -3173 +3271 @@
+-                );
++                )?;
+@@ -3179 +3277 @@
+-                    parser.bump(TokenKind::Star);
++                    parser.bump(TokenKind::Star)?;
+@@ -3182 +3280 @@
+-                        let param = parser.parse_parameter(param_start, function_kind, AllowStarAnnotation::Yes);
++                        let param = parser.parse_parameter(param_start, function_kind, AllowStarAnnotation::Yes)?;
+@@ -3191 +3289 @@
+-                            );
++                            )?;
+@@ -3205 +3303 @@
+-                            );
++                            )?;
+@@ -3225 +3323 @@
+-                            );
++                            )?;
+@@ -3238 +3336 @@
+-                            );
++                            )?;
+@@ -3247,3 +3345,3 @@
+-                    parser.bump(TokenKind::DoubleStar);
+-
+-                    let param = parser.parse_parameter(param_start, function_kind, AllowStarAnnotation::No);
++                    parser.bump(TokenKind::DoubleStar)?;
++
++                    let param = parser.parse_parameter(param_start, function_kind, AllowStarAnnotation::No)?;
+@@ -3260 +3358 @@
+-                        );
++                        )?;
+@@ -3269 +3367 @@
+-                        );
++                        )?;
+@@ -3282 +3380 @@
+-                        );
++                        )?;
+@@ -3290 +3388 @@
+-                    parser.bump(TokenKind::Slash);
++                    parser.bump(TokenKind::Slash)?;
+@@ -3302 +3400 @@
+-                        );
++                        )?;
+@@ -3314 +3412 @@
+-                        );
++                        )?;
+@@ -3328 +3426 @@
+-                        );
++                        )?;
+@@ -3350 +3448 @@
+-                        );
++                        )?;
+@@ -3356 +3454 @@
+-                    let param = parser.parse_parameter_with_default(param_start, function_kind);
++                    let param = parser.parse_parameter_with_default(param_start, function_kind)?;
+@@ -3372 +3470 @@
+-                            .add_error(ParseErrorType::NonDefaultParamAfterDefaultParam, &param);
++                            .add_error(ParseErrorType::NonDefaultParamAfterDefaultParam, &param)?;
+@@ -3381,0 +3480 @@
++                        parser.reserve(&mut parameters.kwonlyargs, 1)?;
+@@ -3383,0 +3483 @@
++                        parser.reserve(&mut parameters.args, 1)?;
+@@ -3393 +3493,2 @@
+-        });
++            Ok(())
++        })?;
+@@ -3402 +3503 @@
+-            self.add_error(ParseErrorType::ExpectedKeywordParam, star_range);
++            self.add_error(ParseErrorType::ExpectedKeywordParam, star_range)?;
+@@ -3406 +3507 @@
+-            self.expect(TokenKind::Rpar);
++            self.expect(TokenKind::Rpar)?;
+@@ -3411 +3512 @@
+-        parameters
++        Ok(parameters)
+@@ -3418,2 +3519,7 @@
+-    fn try_parse_type_params(&mut self) -> Option<ast::TypeParams> {
+-        self.at(TokenKind::Lsqb).then(|| self.parse_type_params())
++    fn try_parse_type_params(&mut self) -> PResult<Option<ast::TypeParams>> {
++        let _guard = self.enter_parse()?;
++        if self.at(TokenKind::Lsqb) {
++            Ok(Some(self.parse_type_params()?))
++        } else {
++            Ok(None)
++        }
+@@ -3429 +3535,2 @@
+-    fn parse_type_params(&mut self) -> ast::TypeParams {
++    fn parse_type_params(&mut self) -> PResult<ast::TypeParams> {
++        let _guard = self.enter_parse()?;
+@@ -3431 +3538 @@
+-        self.bump(TokenKind::Lsqb);
++        self.bump(TokenKind::Lsqb)?;
+@@ -3436 +3543 @@
+-        );
++        )?;
+@@ -3443,6 +3550,6 @@
+-            self.add_error(ParseErrorType::EmptyTypeParams, self.current_token_range());
+-        }
+-
+-        self.expect(TokenKind::Rsqb);
+-
+-        ast::TypeParams {
++            self.add_error(ParseErrorType::EmptyTypeParams, self.current_token_range())?;
++        }
++
++        self.expect(TokenKind::Rsqb)?;
++
++        Ok(ast::TypeParams {
+@@ -3452 +3559 @@
+-        }
++        })
+@@ -3458 +3565,2 @@
+-    fn parse_type_param(&mut self) -> ast::TypeParam {
++    fn parse_type_param(&mut self) -> PResult<ast::TypeParam> {
++        let _guard = self.enter_parse()?;
+@@ -3477,2 +3585,2 @@
+-        if self.eat(TokenKind::Star) {
+-            let name = self.parse_identifier();
++        Ok(if self.eat(TokenKind::Star)? {
++            let name = self.parse_identifier()?;
+@@ -3481 +3589 @@
+-            let default = if self.eat(TokenKind::Equal) {
++            let default = if self.eat(TokenKind::Equal)? {
+@@ -3492 +3600 @@
+-                        )
++                        )?
+@@ -3502 +3610 @@
+-                    );
++                    )?;
+@@ -3513 +3621 @@
+-                );
++                )?;
+@@ -3530,2 +3638,2 @@
+-        } else if self.eat(TokenKind::DoubleStar) {
+-            let name = self.parse_identifier();
++        } else if self.eat(TokenKind::DoubleStar)? {
++            let name = self.parse_identifier()?;
+@@ -3534 +3642 @@
+-            let default = if self.eat(TokenKind::Equal) {
++            let default = if self.eat(TokenKind::Equal)? {
+@@ -3542 +3650 @@
+-                    Some(Box::new(self.parse_conditional_expression_or_higher().expr))
++                    Some(Box::new(self.parse_conditional_expression_or_higher()?.expr))
+@@ -3550 +3658 @@
+-                    );
++                    )?;
+@@ -3561 +3669 @@
+-                );
++                )?;
+@@ -3579,3 +3687,3 @@
+-            let name = self.parse_identifier();
+-
+-            let bound = if self.eat(TokenKind::Colon) {
++            let name = self.parse_identifier()?;
++
++            let bound = if self.eat(TokenKind::Colon)? {
+@@ -3588 +3696 @@
+-                    Some(Box::new(self.parse_conditional_expression_or_higher().expr))
++                    Some(Box::new(self.parse_conditional_expression_or_higher()?.expr))
+@@ -3596 +3704 @@
+-                    );
++                    )?;
+@@ -3604 +3712 @@
+-            let default = if self.eat(TokenKind::Equal) {
++            let default = if self.eat(TokenKind::Equal)? {
+@@ -3613 +3721 @@
+-                    Some(Box::new(self.parse_conditional_expression_or_higher().expr))
++                    Some(Box::new(self.parse_conditional_expression_or_higher()?.expr))
+@@ -3622 +3730 @@
+-                    );
++                    )?;
+@@ -3646 +3754 @@
+-                );
++                )?;
+@@ -3656 +3764 @@
+-        }
++        })
+@@ -3665 +3773,2 @@
+-    pub(super) fn validate_assignment_target(&mut self, expr: &Expr) {
++    pub(super) fn validate_assignment_target(&mut self, expr: &Expr) -> PResult<()> {
++        let _guard = self.enter_parse()?;
+@@ -3667 +3776 @@
+-            Expr::Starred(ast::ExprStarred { value, .. }) => self.validate_assignment_target(value),
++            Expr::Starred(ast::ExprStarred { value, .. }) => self.validate_assignment_target(value)?,
+@@ -3670 +3779 @@
+-                    self.validate_assignment_target(expr);
++                    self.validate_assignment_target(expr)?;
+@@ -3674,2 +3783,3 @@
+-            _ => self.add_error(ParseErrorType::InvalidAssignmentTarget, expr.range()),
+-        }
++            _ => self.add_error(ParseErrorType::InvalidAssignmentTarget, expr.range())?,
++        }
++        Ok(())
+@@ -3682 +3792 @@
+-    fn validate_annotated_assignment_target(&mut self, expr: &Expr) {
++    fn validate_annotated_assignment_target(&mut self, expr: &Expr) -> PResult<()> {
+@@ -3689 +3799 @@
+-            ),
++            )?,
+@@ -3695 +3805 @@
+-            ),
++            )?,
+@@ -3697,2 +3807,3 @@
+-            _ => self.add_error(ParseErrorType::InvalidAnnotatedAssignmentTarget, expr),
+-        }
++            _ => self.add_error(ParseErrorType::InvalidAnnotatedAssignmentTarget, expr)?,
++        }
++        Ok(())
+@@ -3706 +3817,2 @@
+-    fn validate_delete_target(&mut self, expr: &Expr) {
++    fn validate_delete_target(&mut self, expr: &Expr) -> PResult<()> {
++        let _guard = self.enter_parse()?;
+@@ -3710 +3822 @@
+-                    self.validate_delete_target(expr);
++                    self.validate_delete_target(expr)?;
+@@ -3714,2 +3826,3 @@
+-            _ => self.add_error(ParseErrorType::InvalidDeleteTarget, expr),
+-        }
++            _ => self.add_error(ParseErrorType::InvalidDeleteTarget, expr)?,
++        }
++        Ok(())
+@@ -3723 +3836 @@
+-    fn classify_match_token(&mut self) -> MatchTokenKind {
++    fn classify_match_token(&mut self) -> PResult<MatchTokenKind> {
+@@ -3726,3 +3839,3 @@
+-        let (first, second) = self.peek2();
+-
+-        match first {
++        let (first, second) = self.peek2()?;
++
++        Ok(match first {
+@@ -3832 +3945 @@
+-        }
++        })
+@@ -3863,2 +3976,3 @@
+-        mut parse_clause: impl FnMut(&mut Parser<'src>) -> T,
+-    ) -> Vec<T> {
++        mut parse_clause: impl FnMut(&mut Parser<'src, 'check>) -> PResult<T>,
++    ) -> PResult<Vec<T>> {
++        let _guard = self.enter_parse()?;
+@@ -3882 +3996,2 @@
+-            clauses.push(parse_clause(self));
++            self.reserve(&mut clauses, 1)?;
++            clauses.push(parse_clause(self)?);
+@@ -3887 +4002 @@
+-        clauses
++        Ok(clauses)
+--- a/crates/ruff_python_parser/src/parser/pattern.rs
++++ b/crates/ruff_python_parser/src/parser/pattern.rs
+@@ -1,0 +2 @@
++use ruff_python_ast::visitor::source_order::{self, SourceOrderVisitor, TraversalSignal};
+@@ -9 +10 @@
+-use crate::parser::{Parser, RecoveryContextKind, SequenceMatchPatternParentheses, recovery};
++use crate::parser::{PResult, Parser, RecoveryContextKind, SequenceMatchPatternParentheses, recovery};
+@@ -54 +55 @@
+-impl Parser<'_> {
++impl<'src, 'check> Parser<'src, 'check> {
+@@ -72 +73,2 @@
+-    pub(super) fn parse_match_patterns(&mut self) -> Pattern {
++    pub(super) fn parse_match_patterns(&mut self) -> PResult<Pattern> {
++        let _guard = self.enter_parse()?;
+@@ -77 +79 @@
+-        let pattern = self.parse_match_pattern(AllowStarPattern::Yes);
++        let pattern = self.parse_match_pattern(AllowStarPattern::Yes)?;
+@@ -80 +82,3 @@
+-            Pattern::MatchSequence(self.parse_sequence_match_pattern(pattern, start, None))
++            Ok(Pattern::MatchSequence(
++                self.parse_sequence_match_pattern(pattern, start, None)?,
++            ))
+@@ -84,3 +88,3 @@
+-                self.add_error(ParseErrorType::InvalidStarPatternUsage, &pattern);
+-            }
+-            pattern
++                self.add_error(ParseErrorType::InvalidStarPatternUsage, &pattern)?;
++            }
++            Ok(pattern)
+@@ -93 +97,2 @@
+-    fn parse_match_pattern(&mut self, allow_star_pattern: AllowStarPattern) -> Pattern {
++    fn parse_match_pattern(&mut self, allow_star_pattern: AllowStarPattern) -> PResult<Pattern> {
++        let _guard = self.enter_parse()?;
+@@ -98 +103 @@
+-        let mut lhs = self.parse_match_pattern_lhs(allow_star_pattern);
++        let mut lhs = self.parse_match_pattern_lhs(allow_star_pattern)?;
+@@ -104,4 +109,6 @@
+-                self.add_error(ParseErrorType::InvalidStarPatternUsage, &lhs);
+-            }
+-
+-            let mut patterns = vec![lhs];
++                self.add_error(ParseErrorType::InvalidStarPatternUsage, &lhs)?;
++            }
++
++            let mut patterns = Vec::new();
++            self.reserve(&mut patterns, 1)?;
++            patterns.push(lhs);
+@@ -110 +117 @@
+-            while self.eat(TokenKind::Vbar) {
++            while self.eat(TokenKind::Vbar)? {
+@@ -112 +119,2 @@
+-                let pattern = self.parse_match_pattern_lhs(AllowStarPattern::No);
++                self.reserve(&mut patterns, 1)?;
++                let pattern = self.parse_match_pattern_lhs(AllowStarPattern::No)?;
+@@ -124 +132 @@
+-        if self.eat(TokenKind::As) {
++        if self.eat(TokenKind::As)? {
+@@ -127,4 +135,4 @@
+-                self.add_error(ParseErrorType::InvalidStarPatternUsage, &lhs);
+-            }
+-
+-            let ident = self.parse_identifier();
++                self.add_error(ParseErrorType::InvalidStarPatternUsage, &lhs)?;
++            }
++
++            let ident = self.parse_identifier()?;
+@@ -139 +147 @@
+-        lhs
++        Ok(lhs)
+@@ -145 +153,2 @@
+-    fn parse_match_pattern_lhs(&mut self, allow_star_pattern: AllowStarPattern) -> Pattern {
++    fn parse_match_pattern_lhs(&mut self, allow_star_pattern: AllowStarPattern) -> PResult<Pattern> {
++        let _guard = self.enter_parse()?;
+@@ -149 +158 @@
+-            TokenKind::Lbrace => Pattern::MatchMapping(self.parse_match_pattern_mapping()),
++            TokenKind::Lbrace => Pattern::MatchMapping(self.parse_match_pattern_mapping()?),
+@@ -151 +160 @@
+-                let star_pattern = self.parse_match_pattern_star();
++                let star_pattern = self.parse_match_pattern_star()?;
+@@ -153 +162 @@
+-                    self.add_error(ParseErrorType::InvalidStarPatternUsage, &star_pattern);
++                    self.add_error(ParseErrorType::InvalidStarPatternUsage, &star_pattern)?;
+@@ -157,2 +166,2 @@
+-            TokenKind::Lpar | TokenKind::Lsqb => self.parse_parenthesized_or_sequence_pattern(),
+-            _ => self.parse_match_pattern_literal(),
++            TokenKind::Lpar | TokenKind::Lsqb => self.parse_parenthesized_or_sequence_pattern()?,
++            _ => self.parse_match_pattern_literal()?,
+@@ -162 +171 @@
+-            lhs = Pattern::MatchClass(self.parse_match_pattern_class(lhs, start));
++            lhs = Pattern::MatchClass(self.parse_match_pattern_class(lhs, start)?);
+@@ -169,4 +178,4 @@
+-            lhs = Pattern::MatchValue(self.parse_complex_literal_pattern(lhs, start));
+-        }
+-
+-        lhs
++            lhs = Pattern::MatchValue(self.parse_complex_literal_pattern(lhs, start)?);
++        }
++
++        Ok(lhs)
+@@ -182 +191,2 @@
+-    fn parse_match_pattern_mapping(&mut self) -> ast::PatternMatchMapping {
++    fn parse_match_pattern_mapping(&mut self) -> PResult<ast::PatternMatchMapping> {
++        let _guard = self.enter_parse()?;
+@@ -184 +194 @@
+-        self.bump(TokenKind::Lbrace);
++        self.bump(TokenKind::Lbrace)?;
+@@ -193,2 +203,2 @@
+-            if parser.eat(TokenKind::DoubleStar) {
+-                let identifier = parser.parse_identifier();
++            if parser.eat(TokenKind::DoubleStar)? {
++                let identifier = parser.parse_identifier()?;
+@@ -201 +211 @@
+-                    );
++                    )?;
+@@ -209 +219,3 @@
+-                let key = match parser.parse_match_pattern_lhs(AllowStarPattern::No) {
++                parser.reserve(&mut keys, 1)?;
++                parser.reserve(&mut patterns, 1)?;
++                let key = match parser.parse_match_pattern_lhs(AllowStarPattern::No)? {
+@@ -234,2 +246,2 @@
+-                        );
+-                        recovery::pattern_to_expr(pattern)
++                        )?;
++                        parser.recover_pattern_expr(pattern)?
+@@ -240,3 +252,3 @@
+-                parser.expect(TokenKind::Colon);
+-
+-                patterns.push(parser.parse_match_pattern(AllowStarPattern::No));
++                parser.expect(TokenKind::Colon)?;
++
++                patterns.push(parser.parse_match_pattern(AllowStarPattern::No)?);
+@@ -250,8 +262,9 @@
+-                    );
+-                }
+-            }
+-        });
+-
+-        self.expect(TokenKind::Rbrace);
+-
+-        ast::PatternMatchMapping {
++                    )?;
++                }
++            }
++            Ok(())
++        })?;
++
++        self.expect(TokenKind::Rbrace)?;
++
++        Ok(ast::PatternMatchMapping {
+@@ -263 +276 @@
+-        }
++        })
+@@ -273 +286,2 @@
+-    fn parse_match_pattern_star(&mut self) -> ast::PatternMatchStar {
++    fn parse_match_pattern_star(&mut self) -> PResult<ast::PatternMatchStar> {
++        let _guard = self.enter_parse()?;
+@@ -275,5 +289,5 @@
+-        self.bump(TokenKind::Star);
+-
+-        let ident = self.parse_identifier();
+-
+-        ast::PatternMatchStar {
++        self.bump(TokenKind::Star)?;
++
++        let ident = self.parse_identifier()?;
++
++        Ok(ast::PatternMatchStar {
+@@ -287 +301 @@
+-        }
++        })
+@@ -297 +311,2 @@
+-    fn parse_parenthesized_or_sequence_pattern(&mut self) -> Pattern {
++    fn parse_parenthesized_or_sequence_pattern(&mut self) -> PResult<Pattern> {
++        let _guard = self.enter_parse()?;
+@@ -299 +314 @@
+-        let parentheses = if self.eat(TokenKind::Lpar) {
++        let parentheses = if self.eat(TokenKind::Lpar)? {
+@@ -302 +317 @@
+-            self.bump(TokenKind::Lsqb);
++            self.bump(TokenKind::Lsqb)?;
+@@ -319,5 +334,5 @@
+-            );
+-        }
+-
+-        if self.eat(parentheses.closing_kind()) {
+-            return Pattern::MatchSequence(ast::PatternMatchSequence {
++            )?;
++        }
++
++        if self.eat(parentheses.closing_kind())? {
++            return Ok(Pattern::MatchSequence(ast::PatternMatchSequence {
+@@ -327,4 +342,4 @@
+-            });
+-        }
+-
+-        let mut pattern = self.parse_match_pattern(AllowStarPattern::Yes);
++            }));
++        }
++
++        let mut pattern = self.parse_match_pattern(AllowStarPattern::Yes)?;
+@@ -337 +352 @@
+-            ));
++            )?);
+@@ -339,4 +354,4 @@
+-            self.expect(parentheses.closing_kind());
+-        }
+-
+-        pattern
++            self.expect(parentheses.closing_kind())?;
++        }
++
++        Ok(pattern)
+@@ -357,2 +372,3 @@
+-    ) -> ast::PatternMatchSequence {
+-        if parentheses.is_some_and(|parentheses| {
++    ) -> PResult<ast::PatternMatchSequence> {
++        let _guard = self.enter_parse()?;
++        let single_element = if let Some(parentheses) = parentheses {
+@@ -360,2 +376,5 @@
+-                || (self.at(TokenKind::Comma) && self.peek() == parentheses.closing_kind())
+-        }) {
++                || (self.at(TokenKind::Comma) && self.peek()? == parentheses.closing_kind())
++        } else {
++            false
++        };
++        if single_element {
+@@ -363 +382 @@
+-            self.eat(TokenKind::Comma);
++            self.eat(TokenKind::Comma)?;
+@@ -365,4 +384,6 @@
+-            self.expect(TokenKind::Comma);
+-        }
+-
+-        let mut patterns = vec![first_element];
++            self.expect(TokenKind::Comma)?;
++        }
++
++        let mut patterns = Vec::new();
++        self.reserve(&mut patterns, 1)?;
++        patterns.push(first_element);
+@@ -372,2 +393,6 @@
+-            |parser| patterns.push(parser.parse_match_pattern(AllowStarPattern::Yes)),
+-        );
++            |parser| {
++                parser.reserve(&mut patterns, 1)?;
++                patterns.push(parser.parse_match_pattern(AllowStarPattern::Yes)?);
++                Ok(())
++            },
++        )?;
+@@ -376,4 +401,4 @@
+-            self.expect(parentheses.closing_kind());
+-        }
+-
+-        ast::PatternMatchSequence {
++            self.expect(parentheses.closing_kind())?;
++        }
++
++        Ok(ast::PatternMatchSequence {
+@@ -383 +408 @@
+-        }
++        })
+@@ -389 +414,2 @@
+-    fn parse_match_pattern_literal(&mut self) -> Pattern {
++    fn parse_match_pattern_literal(&mut self) -> PResult<Pattern> {
++        let _guard = self.enter_parse()?;
+@@ -391 +417 @@
+-        match self.current_token_kind() {
++        Ok(match self.current_token_kind() {
+@@ -393 +419 @@
+-                self.bump(TokenKind::None);
++                self.bump(TokenKind::None)?;
+@@ -401 +427 @@
+-                self.bump(TokenKind::True);
++                self.bump(TokenKind::True)?;
+@@ -409 +435 @@
+-                self.bump(TokenKind::False);
++                self.bump(TokenKind::False)?;
+@@ -417 +443 @@
+-                let str = self.parse_strings();
++                let str = self.parse_strings()?;
+@@ -426 +452 @@
+-                let TokenValue::Complex { real, imag } = self.bump_value(TokenKind::Complex) else {
++                let TokenValue::Complex { real, imag } = self.bump_value(TokenKind::Complex)? else {
+@@ -442 +468 @@
+-                let TokenValue::Int(value) = self.bump_value(TokenKind::Int) else {
++                let TokenValue::Int(value) = self.bump_value(TokenKind::Int)? else {
+@@ -458 +484 @@
+-                let TokenValue::Float(value) = self.bump_value(TokenKind::Float) else {
++                let TokenValue::Float(value) = self.bump_value(TokenKind::Float)? else {
+@@ -477 +503 @@
+-                        self.peek(),
++                        self.peek()?,
+@@ -483 +509 @@
+-                        );
++                        )?;
+@@ -491 +517 @@
+-                            );
++                            )?;
+@@ -494 +520 @@
+-                        return Pattern::MatchValue(ast::PatternMatchValue {
++                        return Ok(Pattern::MatchValue(ast::PatternMatchValue {
+@@ -498 +524 @@
+-                        });
++                        }));
+@@ -503 +529 @@
+-                    if self.peek() == TokenKind::Dot {
++                    if self.peek()? == TokenKind::Dot {
+@@ -510,3 +536,3 @@
+-                        let id = Expr::Name(self.parse_name());
+-
+-                        let attribute = self.parse_attr_expr_for_match_pattern(id, start);
++                        let id = Expr::Name(self.parse_name()?);
++
++                        let attribute = self.parse_attr_expr_for_match_pattern(id, start)?;
+@@ -527 +553 @@
+-                        let ident = self.parse_identifier();
++                        let ident = self.parse_identifier()?;
+@@ -547 +573 @@
+-                    );
++                    )?;
+@@ -561 +587 @@
+-        }
++        })
+@@ -576,2 +602,3 @@
+-    ) -> ast::PatternMatchValue {
+-        let operator = if self.eat(TokenKind::Plus) {
++    ) -> PResult<ast::PatternMatchValue> {
++        let _guard = self.enter_parse()?;
++        let operator = if self.eat(TokenKind::Plus)? {
+@@ -580 +607 @@
+-            self.bump(TokenKind::Minus);
++            self.bump(TokenKind::Minus)?;
+@@ -586 +613 @@
+-                self.add_error(ParseErrorType::ExpectedRealNumber, &lhs);
++                self.add_error(ParseErrorType::ExpectedRealNumber, &lhs)?;
+@@ -590,2 +617,2 @@
+-            self.add_error(ParseErrorType::ExpectedRealNumber, &lhs);
+-            Box::new(recovery::pattern_to_expr(lhs))
++            self.add_error(ParseErrorType::ExpectedRealNumber, &lhs)?;
++            Box::new(self.recover_pattern_expr(lhs)?)
+@@ -594 +621 @@
+-        let rhs_pattern = self.parse_match_pattern_lhs(AllowStarPattern::No);
++        let rhs_pattern = self.parse_match_pattern_lhs(AllowStarPattern::No)?;
+@@ -597 +624 @@
+-                self.add_error(ParseErrorType::ExpectedImaginaryNumber, &rhs);
++                self.add_error(ParseErrorType::ExpectedImaginaryNumber, &rhs)?;
+@@ -601,2 +628,2 @@
+-            self.add_error(ParseErrorType::ExpectedImaginaryNumber, &rhs_pattern);
+-            Box::new(recovery::pattern_to_expr(rhs_pattern))
++            self.add_error(ParseErrorType::ExpectedImaginaryNumber, &rhs_pattern)?;
++            Box::new(self.recover_pattern_expr(rhs_pattern)?)
+@@ -607 +634 @@
+-        ast::PatternMatchValue {
++        Ok(ast::PatternMatchValue {
+@@ -617 +644 @@
+-        }
++        })
+@@ -621 +648,6 @@
+-    fn parse_attr_expr_for_match_pattern(&mut self, mut lhs: Expr, start: TextSize) -> Expr {
++    fn parse_attr_expr_for_match_pattern(
++        &mut self,
++        mut lhs: Expr,
++        start: TextSize,
++    ) -> PResult<Expr> {
++        let mut guard = self.enter_parse()?;
+@@ -623,4 +655,6 @@
+-            lhs = Expr::Attribute(self.parse_attribute_expression(lhs, start));
+-        }
+-
+-        lhs
++            // Iterative parsing still builds a recursively nested attribute AST.
++            self.extend_parse(&mut guard)?;
++            lhs = Expr::Attribute(self.parse_attribute_expression(lhs, start)?);
++        }
++
++        Ok(lhs)
+@@ -642 +676,2 @@
+-    ) -> ast::PatternMatchClass {
++    ) -> PResult<ast::PatternMatchClass> {
++        let _guard = self.enter_parse()?;
+@@ -676,2 +711,2 @@
+-                );
+-                Box::new(recovery::pattern_to_expr(pattern))
++                )?;
++                Box::new(self.recover_pattern_expr(pattern)?)
+@@ -681 +716 @@
+-        self.bump(TokenKind::Lpar);
++        self.bump(TokenKind::Lpar)?;
+@@ -692,3 +727,3 @@
+-                let pattern = parser.parse_match_pattern(AllowStarPattern::No);
+-
+-                if parser.eat(TokenKind::Equal) {
++                let pattern = parser.parse_match_pattern(AllowStarPattern::No)?;
++
++                if parser.eat(TokenKind::Equal)? {
+@@ -711 +746 @@
+-                        );
++                        )?;
+@@ -719 +754,2 @@
+-                    let value_pattern = parser.parse_match_pattern(AllowStarPattern::No);
++                    parser.reserve(&mut keywords, 1)?;
++                    let value_pattern = parser.parse_match_pattern(AllowStarPattern::No)?;
+@@ -728,0 +765 @@
++                    parser.reserve(&mut patterns, 1)?;
+@@ -738,2 +775,3 @@
+-                    );
+-                }
++                    )?;
++                }
++                Ok(())
+@@ -741,5 +779,5 @@
+-        );
+-
+-        self.expect(TokenKind::Rpar);
+-
+-        ast::PatternMatchClass {
++        )?;
++
++        self.expect(TokenKind::Rpar)?;
++
++        Ok(ast::PatternMatchClass {
+@@ -755 +793,73 @@
+-        }
++        })
++    }
++
++    /// Bound recovery before its flat OR patterns become left-deep expressions.
++    fn recover_pattern_expr(&mut self, pattern: Pattern) -> PResult<Expr> {
++        if self.tokens.is_legacy() {
++            return Ok(recovery::pattern_to_expr(pattern));
++        }
++
++        struct RecoveryBudget<F> {
++            charge: F,
++            result: PResult<()>,
++        }
++
++        impl<'ast, F: FnMut() -> PResult<()>> SourceOrderVisitor<'ast> for RecoveryBudget<F> {
++            fn enter_node(&mut self, _node: ast::AnyNodeRef<'ast>) -> TraversalSignal {
++                if self.result.is_ok() {
++                    self.result = (self.charge)();
++                }
++                if self.result.is_ok() {
++                    TraversalSignal::Traverse
++                } else {
++                    TraversalSignal::Skip
++                }
++            }
++
++            fn visit_pattern(&mut self, pattern: &'ast Pattern) {
++                if let Pattern::MatchOr(or_pattern) = pattern {
++                    if self.enter_node(pattern.into()).is_traverse() {
++                        for alternative in &or_pattern.patterns {
++                            if self.result.is_err() {
++                                break;
++                            }
++                            self.visit_pattern(alternative);
++                        }
++                    }
++                } else {
++                    source_order::walk_pattern(self, pattern);
++                }
++            }
++        }
++
++        // Prepay source-order sibling loops, including their bounded skipped tails
++        // after failure. No visitor descends after the first failed charge.
++        self.charge_work(pattern.range().len().to_usize().saturating_mul(16))?;
++        let mut guard = self.enter_parse()?;
++        {
++            let mut budget = RecoveryBudget {
++                charge: || {
++                    // Retain current_depth + 1 + 2 * visited_nodes, not just the
++                    // input's depth. This covers OR fold nodes plus every existing
++                    // expression descendant, and conservatively bounds output depth.
++                    self.extend_parse(&mut guard)?;
++                    self.extend_parse(&mut guard)?;
++                    self.charge_work(16)?;
++                    // Cover boxes, converted vectors and their growth (including
++                    // mapping rest entries and class keyword wrappers) before any
++                    // allocation in the otherwise infallible conversion helper.
++                    self.charge_allocation(
++                        8 * (std::mem::size_of::<Expr>()
++                            + std::mem::size_of::<ast::DictItem>()
++                            + std::mem::size_of::<ast::Keyword>()),
++                    )
++                },
++                result: Ok(()),
++            };
++            budget.visit_pattern(&pattern);
++            budget.result?;
++        }
++
++        let expression = recovery::pattern_to_expr(pattern);
++        drop(guard);
++        Ok(expression)
+--- a/crates/ruff_python_parser/src/parser/progress.rs
++++ b/crates/ruff_python_parser/src/parser/progress.rs
+@@ -22 +22 @@
+-    fn has_progressed(self, p: &Parser) -> bool {
++    fn has_progressed(self, p: &Parser<'_, '_>) -> bool {
+@@ -35 +35 @@
+-    pub(super) fn assert_progressing(&mut self, p: &Parser) {
++    pub(super) fn assert_progressing(&mut self, p: &Parser<'_, '_>) {
+@@ -38,2 +38 @@
+-            "The parser is no longer progressing. Stuck at '{}' {:?}:{:?}",
+-            p.src_text(p.current_token_range()),
++            "The parser is no longer progressing. Stuck at {:?}:{:?}, token {:?}",
+@@ -41,0 +41 @@
++            p.current_token_id(),

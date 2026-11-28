@@ -19,7 +19,7 @@ pub(super) struct ParserProgress(Option<TokenId>);
 impl ParserProgress {
     /// Returns true if the parser has passed this position
     #[inline]
-    fn has_progressed(self, p: &Parser) -> bool {
+    fn has_progressed(self, p: &Parser<'_, '_>) -> bool {
         match self.0 {
             None => true,
             Some(prev_token_id) => prev_token_id != p.current_token_id(),
@@ -32,13 +32,13 @@ impl ParserProgress {
     ///
     /// Panics if the parser hasn't progressed since the last call.
     #[inline]
-    pub(super) fn assert_progressing(&mut self, p: &Parser) {
+    pub(super) fn assert_progressing(&mut self, p: &Parser<'_, '_>) {
         assert!(
             self.has_progressed(p),
-            "The parser is no longer progressing. Stuck at '{}' {:?}:{:?}",
-            p.src_text(p.current_token_range()),
+            "The parser is no longer progressing. Stuck at {:?}:{:?}, token {:?}",
             p.current_token_kind(),
             p.current_token_range(),
+            p.current_token_id(),
         );
 
         self.0 = Some(p.current_token_id());

@@ -8,7 +8,7 @@ can accumulate even in one directory.
 ## Overview
 
 Distribution is approved personal/company Git source, not registry publication.
-Root `publish = false`; five local Ruff crates and their notices/two patches travel
+Root `publish = false`; five local Ruff crates and their notices/maintained patches travel
 in the checkout. No external fork, submodule or unpublished registry-version family
 is needed. Private consumer material still stays outside generic source.
 
@@ -74,7 +74,16 @@ Never use `cargo fmt --all`, which recursively touches local path dependencies.
 Scope Clippy to product code with `--all-targets --no-deps -- -D warnings`.
 The preserved Ruff sources are verified by hash and patch provenance instead of
 product formatting/Clippy policy; upstream compiler warnings remain visible.
-Vendor schema 2 tracks two disjoint reviewed four-file patches: the unchanged
+F2 schema 3 passed integrity checks: three patches, with the third nine-file
+parser/source/debug patch layered **after** the old policy patch, not three
+disjoint patches. Preserve the old two patches and 65-source pristine map. Verified
+closure is 89 files / 67 Rust sources / 2,219,373 bytes (65 upstream + two authored),
+14 modified / 51 unchanged upstream; 264 source paths verified before docs freeze.
+All 84 vendor tests passed after the final fix. Exact implementation hashes and
+ordered-reversal/checker receipts are in the F2 ledger; review both authored hashes
+and layer order. Current F2 consumer/cleanup passed; receipts are in the ledger.
+The following is the **historical F1 schema-2** layout,
+not current-tree integrity evidence: two disjoint reviewed four-file patches, the unchanged
 policy patch (`options.rs`, `expression.rs`, `pattern.rs`, `statement.rs`) and F1's
 lexer patch (`lexer.rs`, `lexer/{cursor,indentation,interpolated_string}.rs`). A
 separately hashed original MIT `lexer/byte.rs` is authored code, not pristine
@@ -131,7 +140,29 @@ delete another session's data or silently claim cleanup succeeded.
 
 ## Edge Cases
 
-### Current direction: F1 lexer goal proved, all delivery gates passed
+### Current direction: all bounded private F2 delivery gates PASS
+
+The byte Module parser/source/debug implementation passed 743 library tests
+(191 ignored), including all 35 F2 tests, plus 18 adapter / 8 engine tests and all
+185 explicit reference/native/Ruff gates (including known-limit assertions, not
+all parity matches). Product formatting/all-target Clippy, scripts and finalized
+schema-3/source checks passed; exact receipts and the stack regression fix are in
+the ledger. Current independent consumer and guarded cleanup passed; target is
+absent, follow-up `already_clean`, no Cargo afterward. No owned scratch/debug/test
+artifacts remain. The tested snapshot does not attest these final receipt prose
+bytes; use the F2 receipt, not F1 consumer/cache PASS. No Cargo/build checks follow
+this prose-only closeout, which authorizes no further implementation.
+See the primary [F2 ledger](python-analysis.md#f2-byte-module-parser-source-and-debug-experiment)
+for APIs, construction/reduction quotas, debug identity and failure-priority limits.
+Production helper/Python >=3.12 and frontend-5/facts-7 names remain unchanged;
+fingerprints change. F3, full G4, approved version policy and cutover are excluded.
+User-reported HEAD `805edb0` is committed F1, initially clean; F2 is uncommitted
+and unstaged, with no commit or push.
+
+### Historical F1: lexer goal proved, all delivery gates passed
+
+The following F1 counts, hashes, authorization and cache receipts describe that
+handoff only; the F2 status above supersedes its future-work statements.
 
 F1 implements one shared fallible byte core behind legacy `Lexer(&str)` and the
 doc-hidden experimental byte facade, not a separate lexer or byte parser. Original
@@ -180,10 +211,11 @@ artifacts/global caches untouched. Final source/Git/helper checks are read-only,
 without rebuilding. F1 does not prove byte parser input, AST/debug construction,
 CPython admission, F2 or full G4, and does not authorize further implementation.
 Earlier cache receipts remain historical. Actual pre-F1 HEAD was user-reported
-`fdf4e58` (facts-6 commit, initially clean/ahead one), not `523cd7b`; current F1 work
-remains uncommitted and unstaged; no commits or pushes were made. F2 parser/source/
-debug/admission/lazy-failure precedence and version/product policy require separate
-approval; no source repair, unchecked UTF-8, public selector or cutover is approved.
+`fdf4e58` (facts-6 commit, initially clean/ahead one), not `523cd7b`; F1 work was then
+uncommitted and unstaged; no agent commits or pushes were made. Bounded F2 is now
+authorized, but full admission/lazy-failure precedence remains open and version/
+product policy still requires approval; no source repair, unchecked UTF-8, public
+selector or cutover is approved.
 
 ### Historical F0 feasibility checkpoint
 
@@ -213,7 +245,7 @@ byte/visitor/codec **23 / 43 / 24 passed**, no skips, together covering all **28
 unique tests**. Source **256 paths**, unchanged vendor **85/65/1,882,473 bytes** and
 Git whitespace checks passed. Independent review found no blocking correction;
 the ADR assigned scalar/error/EOF/lookahead/rewind proof to F1 and BOM-coordinate
-anchors to F2. See the current F1 ledger above for progress beyond that audit.
+anchors to F2. See the current F2 ledger for progress beyond that audit.
 
 This scripts/docs/CI-only slice needed no Rust build or consumer rerun and made no
 native-engine/vendor change. Helper **`already_clean`**; no fresh cache removal
@@ -466,8 +498,9 @@ of completion.
 **Historical architecture stop; standing constraint:** unchanged Ruff requires `&str`; CPython-admitted
 malformed non-ASCII UTF-8 comment bytes cannot pass that interface unchanged.
 No rewriting workaround is permitted. The [authorized F0 audit](python-native-replacement-feasibility.md)
-was not a compiled byte frontend. F1 now supplies lexical evidence only; F2 and
-production compatibility boundaries still need separate approval, not
+was not a compiled byte frontend. F1 supplies lexical evidence and authorized F2
+now implements the private parser/source/debug seam. Production compatibility
+boundaries still need separate acceptance, not
 permission to narrow production's Python >=3.12 contract. Codec/type-comment and
 platform/resource gaps remain; passing the current validation does not close these
 compatibility gates or approve production cutover.

@@ -6,8 +6,26 @@
 contract.** The user authorized this bounded byte-aware Ruff and version-strategy
 investigation after the private G2/G3 implementation checkpoint.
 
-**Current: bounded private F1 lexer goal COMPLETE / PROVED by compiled tests;
-all F1 delivery gates PASS, including checkout consumer and guarded cache cleanup.**
+**Current: authorized private F2 byte Module parser/source/debug implementation.**
+The bounded implementation is validated: 743 library tests passed (191 ignored),
+including all 35 F2; preservation/oracles, scripts and provenance checks passed.
+Current consumer validation and guarded cleanup passed: **all bounded F2 delivery
+gates PASS**, target absent, no Cargo afterward. These are not inherited F1 passes;
+the consumer snapshot does not attest final receipt prose. See the primary [F2 ledger](python-analysis.md#f2-byte-module-parser-source-and-debug-experiment)
+for architecture, defaults, construction/reduction envelope, evidence and open gates.
+One existing Ruff grammar/shared fallible core serves closed Legacy/Bytes providers;
+the checked entry exposes AST callbacks only after both diagnostic channels and
+provider finish. Debug Source owner/ranges retain bytes and use identity equality,
+not semantic equality or synthesized CPython constants. Later source faults can
+still win over earlier syntax: lazy CPython failure priority is unresolved, never
+an exception certificate. This is not full admission, F3 or full G4 acceptance.
+User-reported HEAD `805edb0` contains committed F1 and was initially clean; F2 is
+uncommitted and unstaged, no commit/push. This closeout authorizes no further
+implementation. Production helper/Python >=3.12 and frontend-5/facts-7 names remain;
+fingerprints change. Native immutable profiles remain proposed, not approved.
+
+**Historical F1 handoff:** bounded private F1 lexer goal COMPLETE / PROVED by compiled tests;
+all F1 delivery gates PASS, including checkout consumer and guarded cache cleanup.
 The [F1 ledger](python-analysis.md#f1-shared-byte-lexer-experiment)
 records the shared fallible byte core, frozen baseline, tests and provenance. F0's
 conditional GO/uncompiled finding below is historical and superseded only for
@@ -19,14 +37,18 @@ replacement, source repair, tool installation, public profile/API changes,
 automatic fallback, a default switch or a narrower production contract. Existing
 frontend-5/facts-7 policies are preserved. Production remains
 `python-static-8-generic-facts` with the explicitly selected Python >=3.12 helper.
-F1's bounded vendor expansion is now authorized; F2 parser/source/debug changes
-and version/product policy still require separate approval. The user-reported
+F1 and bounded private F2 parser/source/debug changes are authorized;
+version/product policy still requires separate approval. The historical
 actual pre-F1 HEAD is `fdf4e58` (facts-6 commit, initially clean/ahead one), not the
-historical `523cd7b` checkpoint. Current F1 changes remain uncommitted and unstaged.
+`523cd7b` checkpoint. F1 changes were then uncommitted and unstaged; they are now
+user-committed at `805edb0`.
 F1 completion does not prove byte parser input, AST/debug construction, CPython
 admission, F2 or full G4, and does not authorize further implementation.
 
-## F1 Current Lexical Evidence
+## Historical F1 Lexical Evidence
+
+The entire F1 receipt below describes that handoff, including hashes/counts/cache
+and future F2 obligations. It does not attest current F2 validation or authorization.
 
 ### Overview
 
@@ -62,9 +84,10 @@ at/after the cursor and non-newlines. Original pointers, bytes and ranges remain
 ### Edge Cases
 
 Raw NUL is a scalar here; root NUL policy remains separate. Lexically opaque
-type/ignore payloads are not semantic admission. Debug-shaped field comments do
-not prove debug constants, AST admission or lazy failure precedence: those remain
-F2, along with byte parser/source access and BOM/coordinate anchors. G4 is open.
+type/ignore payloads are not semantic admission. Debug-shaped field comments did
+not prove debug constants, AST admission or lazy failure precedence at F1 handoff.
+F2 now adds parser/source/debug ranges and coordinate anchors, not CPython debug
+constants or lazy failure-priority closure. G4 is open.
 
 The coordinator reports **all 131 private Ruff tests passed** after fixes,
 including **23 F1 ordinary** (22 acceptance + one baseline) and **17 existing
@@ -121,7 +144,8 @@ as future F2/F3/version requirements; their cache receipts do not describe F1.
 
 1. **Byte input.** CPython admits some malformed UTF-8 bytes in comments. At F0,
    Ruff's parser, token source, lexer and cursor required whole-source `&str`.
-   F1 changes the lexical seam only; parser integration remains F2.
+   F1 changed the lexical seam only; F2 now implements private parser integration,
+   with final acceptance and the remaining compatibility obligations still open.
    Replacing, masking, stripping or lossily decoding those bytes would
    change the parser input; hashing the original would not make that acceptable.
 2. **Version semantics.** The helper calls the selected interpreter's
@@ -187,12 +211,13 @@ CPython also accepts `b'x=f"{call() # \xff\n=}"\n'`. Its synthesized debug
 constant is `"call() \n="`: comment text is absent, while the newline remains.
 Leading, parenthesized and correctly quoted nested debug witnesses are included.
 
-Ruff's `parser/expression.rs::parse_interpolated_element` currently obtains debug
+At F0, Ruff's `parser/expression.rs::parse_interpolated_element` obtained debug
 gaps through `src_text(...).to_string()`, and `ruff_python_ast::DebugText` stores
-`String`s. A gap can include malformed comment bytes. Checked identifier/string
+`String`s. F2 now retains legacy Text strings and adds Source owner/ranges; see the
+current ledger. A gap can include malformed comment bytes. Checked identifier/string
 token views alone therefore do not solve the byte interface.
 
-The prototype must select an exact representation: range-backed debug spans or
+The F0 proposal required an exact representation: range-backed debug spans or
 fragments alongside the ordinary text representation are candidates. It must audit
 `comparable.rs` and every consumer. It must neither invent empty/lossy strings nor
 claim AST equality from range equality alone. Ideomancer needs helper-observable
@@ -216,8 +241,9 @@ string lexer loses lexical state and is not a byte-input solution.
 
 ## Proposed Byte Architecture
 
-This remains a proposed end-to-end design, not an implemented byte parser. F1
-implements only its shared lexical seam:
+The full replacement pipeline below remains a design, not integrated byte facts.
+F1 implements the shared lexical seam and F2 implements the private checked Module
+parser/source/debug seam. Encoding, compatibility and fact integration remain open:
 
 ```text
 captured immutable bytes + original digest
@@ -349,7 +375,7 @@ implications, not locally tested additional interpreter profiles:
 | --- | --- |
 | F0: this feasibility investigation | Source-driven design and reproducible reference observations; distinguish conditional feasibility from a native demonstration |
 | F1: separately bounded lexer experiment | Original malformed comment bytes retained; contextual tokenization, spans, lookahead/rewind/re-lex and ordinary UTF-8 differential preservation demonstrated without a reconstructed source string |
-| F2: parser/source/debug experiment | One parse with exact byte-span/debug representation; no unchecked text access or recovered-AST consumption; reference admission and selected failure-priority witnesses demonstrated |
+| F2: authorized parser/source/debug experiment | **All bounded implementation/delivery gates PASS**, including 35 F2 tests, preservation/oracles, schema-3 provenance and current consumer/cleanup; exact receipts in the F2 ledger. Byte-span/debug identity is explicit, no recovery-AST callback. Full CPython semantics/admission, debug constants, type comments/codecs, lazy failure priority and resource equivalence remain open; no further implementation authorized |
 | F3: captured-byte fact integration | Existing 364 positives plus byte witnesses compare full facts/IDs/diagnostics/raw replay; original hashes, decoded offsets, rollback, redaction, budgets and cancellation preserved |
 | V: approved version contract | Explicit reference membership, patch policy, selection, maintenance and identity semantics; unknown-version behavior approved, no silent production narrowing |
 | G4 replacement acceptance | Remaining codecs, grammar, contextual errors, failures and resource obligations have no unexplained differences in the approved contract |

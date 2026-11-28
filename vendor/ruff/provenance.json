@@ -17,22 +17,60 @@
       "patched_sha256": "d0ecf32ab5eb537110ca79a0521dba21cc70f0d1118ece4f95a73f5bffc7c9d7"
     }
   },
+  "byte_parser_experiment": {
+    "crates/ruff_python_ast/src/comparable.rs": {
+      "original_sha256": "a543493a918cd0051fa7588f0aaec50678732909476c3d5633220c80677ce8f5",
+      "patched_sha256": "653487e7bea796ba4e935d4ba33b80007c20bbbf0fbc04ff65a1ff21fc891ae9"
+    },
+    "crates/ruff_python_ast/src/nodes.rs": {
+      "original_sha256": "8bc63e7418e906036610789e9180d69fe4c8efcb88e0d65aac2ac056191e9c58",
+      "patched_sha256": "13993f5d1b107d657d4c817f530017c1c9f3d0ef1a19b0069a56a49eea636c48"
+    },
+    "crates/ruff_python_parser/src/lib.rs": {
+      "original_sha256": "0736ac25bfaea70a38ee32f3402a6851c3a4e203461f66d4493993fa0c667acf",
+      "patched_sha256": "bfa4857b5fd5b6a1026ddf6dc4d4588d9c9636173667f3e9ead202c2d887b160"
+    },
+    "crates/ruff_python_parser/src/parser/expression.rs": {
+      "original_sha256": "c79561ea157ae483f50a809d9ae667871640125de0865a95d59861fa4dee5ded",
+      "patched_sha256": "4448214cf4761208e892005f0c8c542ab00af7e810f498de5c461316387143cc"
+    },
+    "crates/ruff_python_parser/src/parser/mod.rs": {
+      "original_sha256": "e3b29f498c4c4be41182864af79ed3312f633bc16212f7d7e667bb3ccf429a7e",
+      "patched_sha256": "b25859a73c4a4d00e7f80e309d52231fd8217db2664b4093cd955a1fa8fff035"
+    },
+    "crates/ruff_python_parser/src/parser/pattern.rs": {
+      "original_sha256": "4b12b54bad12cccd9f58b5ed99ef7f5845dd868b9358b60c7d1368694851b1f8",
+      "patched_sha256": "58e711ad13f3aae18e8b136c0be7cce9148545183cb05f6791b101ca24261dee"
+    },
+    "crates/ruff_python_parser/src/parser/progress.rs": {
+      "original_sha256": "3d4ec92e9041221df5e62495f93685f3c41652eaa8b0f21ef232f0baf3d7f1bb",
+      "patched_sha256": "85e9228d7867c147bad5ad2d92b7efcf8af48379d81ad5a60ba7f788fb04b91e"
+    },
+    "crates/ruff_python_parser/src/parser/statement.rs": {
+      "original_sha256": "fc32574c5850b85b444ec408b992b209f37c73bd86385f88425638e04d20e1c9",
+      "patched_sha256": "5c4d7af4d53ae9e8fa9eb37449e9891d648d65f0838e641f21c2aab8f9be63ca"
+    },
+    "crates/ruff_python_parser/src/token_source.rs": {
+      "original_sha256": "6596adc98c218aa9a8da1821818bb9dea1808fddd37d967f700ce4fa455a5b07",
+      "patched_sha256": "10299d30e835a0ce411bba04f46855a485a65bb16f3ac763312d00d5f6113408"
+    }
+  },
   "files": {
     "LICENSE": {
       "bytes": 69789,
       "sha256": "3209c0b7fb7257c05b16433728c1e974bac40000fef171b8e9e89f095623c954"
     },
     "README.md": {
-      "bytes": 7491,
-      "sha256": "d81009b521b7af2e598321377d52e65f337f40ef145847e3403a7ed0af185335"
+      "bytes": 8950,
+      "sha256": "f00961c03dae53f342ce14942668f79970f28d8fdea6c886eac566f6f77faab8"
     },
     "crates/ruff_python_ast/Cargo.toml": {
       "bytes": 972,
       "sha256": "8a76176d451dd50a8509c8087996f341659208e458cc175c1be8775f5e3e5c81"
     },
     "crates/ruff_python_ast/src/comparable.rs": {
-      "bytes": 63488,
-      "sha256": "a543493a918cd0051fa7588f0aaec50678732909476c3d5633220c80677ce8f5"
+      "bytes": 64100,
+      "sha256": "653487e7bea796ba4e935d4ba33b80007c20bbbf0fbc04ff65a1ff21fc891ae9"
     },
     "crates/ruff_python_ast/src/docstrings.rs": {
       "bytes": 811,
@@ -75,8 +113,8 @@
       "sha256": "585a3f9f160fa7d6f52b3f5934f57f396eb3be336cd48df5df2c52172a153554"
     },
     "crates/ruff_python_ast/src/nodes.rs": {
-      "bytes": 117098,
-      "sha256": "8bc63e7418e906036610789e9180d69fe4c8efcb88e0d65aac2ac056191e9c58"
+      "bytes": 119689,
+      "sha256": "13993f5d1b107d657d4c817f530017c1c9f3d0ef1a19b0069a56a49eea636c48"
     },
     "crates/ruff_python_ast/src/operator_precedence.rs": {
       "bytes": 7069,
@@ -142,6 +180,10 @@
       "bytes": 975,
       "sha256": "6b9e384120782776c65e67292bf1a851f4e6937b6e14e28e62c477e9af9102e5"
     },
+    "crates/ruff_python_parser/src/byte.rs": {
+      "bytes": 15510,
+      "sha256": "3ff0ea87b77a23f7a594477007d6c8e180456dca0467dafb7012165b6f635e86"
+    },
     "crates/ruff_python_parser/src/error.rs": {
       "bytes": 40515,
       "sha256": "4d90f522d79ab237799c62a650c7b9da9b94d40974348992c6f720ccc411b69d"
@@ -151,8 +193,8 @@
       "sha256": "b2a695c560189a04302b909d5a44b4634ac1aaa94a145de395d5b2e4a0963479"
     },
     "crates/ruff_python_parser/src/lexer/byte.rs": {
-      "bytes": 16312,
-      "sha256": "d8e617b7bb9401e96263997b99151cfa02e3dd0af1254a384c7569e12d2fec94"
+      "bytes": 20182,
+      "sha256": "51e1a17a6f917b099e2f418286a1e9dea1a44630ccb0e2adc9c8a96223c6e40f"
     },
     "crates/ruff_python_parser/src/lexer/cursor.rs": {
       "bytes": 6402,
@@ -167,40 +209,40 @@
       "sha256": "d0ecf32ab5eb537110ca79a0521dba21cc70f0d1118ece4f95a73f5bffc7c9d7"
     },
     "crates/ruff_python_parser/src/lib.rs": {
-      "bytes": 39503,
-      "sha256": "0736ac25bfaea70a38ee32f3402a6851c3a4e203461f66d4493993fa0c667acf"
+      "bytes": 39532,
+      "sha256": "bfa4857b5fd5b6a1026ddf6dc4d4588d9c9636173667f3e9ead202c2d887b160"
     },
     "crates/ruff_python_parser/src/parser/expression.rs": {
-      "bytes": 111507,
-      "sha256": "c79561ea157ae483f50a809d9ae667871640125de0865a95d59861fa4dee5ded"
+      "bytes": 119294,
+      "sha256": "4448214cf4761208e892005f0c8c542ab00af7e810f498de5c461316387143cc"
     },
     "crates/ruff_python_parser/src/parser/helpers.rs": {
       "bytes": 4434,
       "sha256": "df3ca52620bee5ba5cfc18a999c15b1ddfab0599fd48b89066bad7e73082e4f8"
     },
     "crates/ruff_python_parser/src/parser/mod.rs": {
-      "bytes": 57860,
-      "sha256": "e3b29f498c4c4be41182864af79ed3312f633bc16212f7d7e667bb3ccf429a7e"
+      "bytes": 62034,
+      "sha256": "b25859a73c4a4d00e7f80e309d52231fd8217db2664b4093cd955a1fa8fff035"
     },
     "crates/ruff_python_parser/src/parser/options.rs": {
       "bytes": 2025,
       "sha256": "9aae4bfecf678023dc9bb49159d96318ec956f208d4e72e9b54e4a8e728ae1cf"
     },
     "crates/ruff_python_parser/src/parser/pattern.rs": {
-      "bytes": 29750,
-      "sha256": "4b12b54bad12cccd9f58b5ed99ef7f5845dd868b9358b60c7d1368694851b1f8"
+      "bytes": 34406,
+      "sha256": "58e711ad13f3aae18e8b136c0be7cce9148545183cb05f6791b101ca24261dee"
     },
     "crates/ruff_python_parser/src/parser/progress.rs": {
-      "bytes": 1454,
-      "sha256": "3d4ec92e9041221df5e62495f93685f3c41652eaa8b0f21ef232f0baf3d7f1bb"
+      "bytes": 1462,
+      "sha256": "85e9228d7867c147bad5ad2d92b7efcf8af48379d81ad5a60ba7f788fb04b91e"
     },
     "crates/ruff_python_parser/src/parser/recovery.rs": {
       "bytes": 7752,
       "sha256": "9ed829ddc74180393658a42991ffd067f68f1cd7c2ee4ead29c16477cda2bd5a"
     },
     "crates/ruff_python_parser/src/parser/statement.rs": {
-      "bytes": 144023,
-      "sha256": "fc32574c5850b85b444ec408b992b209f37c73bd86385f88425638e04d20e1c9"
+      "bytes": 149993,
+      "sha256": "5c4d7af4d53ae9e8fa9eb37449e9891d648d65f0838e641f21c2aab8f9be63ca"
     },
     "crates/ruff_python_parser/src/semantic_errors.rs": {
       "bytes": 67809,
@@ -219,8 +261,8 @@
       "sha256": "b9e0b92f7bbd24636ab6a7675e36371370a518f0f471a9b2ac969ee32c449ffe"
     },
     "crates/ruff_python_parser/src/token_source.rs": {
-      "bytes": 7466,
-      "sha256": "6596adc98c218aa9a8da1821818bb9dea1808fddd37d967f700ce4fa455a5b07"
+      "bytes": 19172,
+      "sha256": "10299d30e835a0ce411bba04f46855a485a65bb16f3ac763312d00d5f6113408"
     },
     "crates/ruff_python_parser/src/typing.rs": {
       "bytes": 3073,
@@ -334,6 +376,10 @@
       "bytes": 60159,
       "sha256": "4f4d3a244236a3e730ab805716f23f581483fa6e7a38060b1ea10c344fe5aac5"
     },
+    "patches/byte-parser-experiment.patch": {
+      "bytes": 185240,
+      "sha256": "c4a65d811a5d8bd8d2aca121c75219e6a5f2c00a4b04957278dc02157d9daf45"
+    },
     "upstream/Cargo.lock": {
       "bytes": 114898,
       "sha256": "ccc843838d16f203d18a3410dd120e72e750a89ee42164145ae9cbf181fb6f47"
@@ -364,11 +410,18 @@
     }
   },
   "local_sources": {
-    "crates/ruff_python_parser/src/lexer/byte.rs": {
-      "bytes": 16312,
+    "crates/ruff_python_parser/src/byte.rs": {
+      "bytes": 15510,
       "license": "MIT",
       "origin": "Ideomancer-authored",
-      "sha256": "d8e617b7bb9401e96263997b99151cfa02e3dd0af1254a384c7569e12d2fec94"
+      "sha256": "3ff0ea87b77a23f7a594477007d6c8e180456dca0467dafb7012165b6f635e86"
+    },
+    "crates/ruff_python_parser/src/lexer/byte.rs": {
+      "bytes": 20182,
+      "license": "MIT",
+      "origin": "Ideomancer-authored",
+      "previous_sha256": "d8e617b7bb9401e96263997b99151cfa02e3dd0af1254a384c7569e12d2fec94",
+      "sha256": "51e1a17a6f917b099e2f418286a1e9dea1a44630ccb0e2adc9c8a96223c6e40f"
     }
   },
   "policy": {
@@ -651,7 +704,7 @@
       "sha256": "3aef3ac8ac0f1dad4cfa1ccbe1469b2b4a1fcf684f97a985bbe88a0a3d2b0fb3"
     }
   },
-  "schema_version": 2,
+  "schema_version": 3,
   "upstream": {
     "archive_sha256": "e4613ad9fe6f7293510586649aab788e10610ab80fe9dd509ba7ac2364413631",
     "archive_url": "https://codeload.github.com/astral-sh/ruff/tar.gz/87f0feb21a1af67195bebf94d811770393f9f447",

@@ -6,6 +6,15 @@
 //! location in the source code, and other contextual information (e.g., whether they
 //! represent reads or writes, which is typically encoded in the Python AST).
 //!
+//! Debug text is an exception to trivia- and location-independent comparison.
+//! [`ast::DebugText::Text`] retains legacy equality and hashing of its two text gaps.
+//! [`ast::DebugText::Source`] uses identity-based equality and hashing: the source
+//! owner and all three raw ranges participate. Independent parses must use fresh
+//! owners, so matching offsets alone cannot make their debug metadata equal;
+//! clones retain their owner. Text and source variants are never equal. This is
+//! not semantic comparison of source-backed debug text or a projection of CPython's
+//! synthesized debug constant.
+//!
 //! For example, in `[(a, b) for a, b in c]`, the `(a, b)` and `a, b` expressions are
 //! considered equal, despite the former being parenthesized, and despite the former
 //! being a write ([`ast::ExprContext::Store`]) and the latter being a read

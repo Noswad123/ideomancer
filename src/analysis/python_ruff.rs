@@ -15,6 +15,9 @@ mod byte_lexer_tests;
 
 #[cfg(test)]
 mod byte_lexer_acceptance;
+
+#[cfg(test)]
+mod byte_parser_tests;
 pub(super) use facts::CandidateReport;
 
 pub(super) fn extract_fact_candidates(

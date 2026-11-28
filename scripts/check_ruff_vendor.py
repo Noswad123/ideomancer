@@ -19,12 +19,16 @@ import tomllib
 COMMIT = "87f0feb21a1af67195bebf94d811770393f9f447"
 ARCHIVE_SHA256 = "e4613ad9fe6f7293510586649aab788e10610ab80fe9dd509ba7ac2364413631"
 LOCK_SHA256 = "ccc843838d16f203d18a3410dd120e72e750a89ee42164145ae9cbf181fb6f47"
-PROVENANCE_SHA256 = "83b701ef82cd549d1b01501520f57b9504e3decac32cdc7d151add639f892800"
+PROVENANCE_SHA256 = "fa1ff1036b4c0fea10fa63454fa3aeba5f8c46a16ca023d635170fb870e6300f"
 PRISTINE_SHA256 = "7e25402b858763700567914d71410161c80128b29605de3cdb29c8f03eafe44b"
 POLICY_PATCH_SHA256 = "e79a66530f58f63371c0423f5f0469ff82f9b0193f57b6ba8672c3c33aa4e90e"
 BYTE_PATCH_SHA256 = "4f4d3a244236a3e730ab805716f23f581483fa6e7a38060b1ea10c344fe5aac5"
-BYTE_SOURCE_SHA256 = "d8e617b7bb9401e96263997b99151cfa02e3dd0af1254a384c7569e12d2fec94"
+F1_BYTE_SOURCE_SHA256 = "d8e617b7bb9401e96263997b99151cfa02e3dd0af1254a384c7569e12d2fec94"
+BYTE_SOURCE_SHA256 = "51e1a17a6f917b099e2f418286a1e9dea1a44630ccb0e2adc9c8a96223c6e40f"
+BYTE_PARSER_PATCH_SHA256 = "c4a65d811a5d8bd8d2aca121c75219e6a5f2c00a4b04957278dc02157d9daf45"
+BYTE_PARSER_SOURCE_SHA256 = "3ff0ea87b77a23f7a594477007d6c8e180456dca0467dafb7012165b6f635e86"
 BYTE_SOURCE = "crates/ruff_python_parser/src/lexer/byte.rs"
+BYTE_PARSER_SOURCE = "crates/ruff_python_parser/src/byte.rs"
 MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_TOTAL_BYTES = 4 * 1024 * 1024
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -40,6 +44,24 @@ BYTE_LEXER_FILES = (
     "crates/ruff_python_parser/src/lexer/indentation.rs",
     "crates/ruff_python_parser/src/lexer/interpolated_string.rs",
 )
+BYTE_PARSER_FILES = (
+    "crates/ruff_python_ast/src/nodes.rs",
+    "crates/ruff_python_ast/src/comparable.rs",
+    "crates/ruff_python_parser/src/lib.rs",
+    "crates/ruff_python_parser/src/token_source.rs",
+    "crates/ruff_python_parser/src/parser/mod.rs",
+    "crates/ruff_python_parser/src/parser/expression.rs",
+    "crates/ruff_python_parser/src/parser/statement.rs",
+    "crates/ruff_python_parser/src/parser/pattern.rs",
+    "crates/ruff_python_parser/src/parser/progress.rs",
+)
+# These are post-policy inputs to F2, not hashes of the current source files.
+POLICY_OUTPUT_SHA256 = dict(zip(POLICY_FILES, (
+    "9aae4bfecf678023dc9bb49159d96318ec956f208d4e72e9b54e4a8e728ae1cf",
+    "c79561ea157ae483f50a809d9ae667871640125de0865a95d59861fa4dee5ded",
+    "fc32574c5850b85b444ec408b992b209f37c73bd86385f88425638e04d20e1c9",
+    "4b12b54bad12cccd9f58b5ed99ef7f5845dd868b9358b60c7d1368694851b1f8",
+), strict=True))
 LOCAL = {
     "ruff_python_parser": ("ruff_python_ast", "ruff_python_trivia", "ruff_text_size"),
     "ruff_python_ast": ("ruff_python_trivia", "ruff_source_file", "ruff_text_size"),
@@ -121,9 +143,9 @@ def parse_provenance(data):
     value = json.loads(data, object_pairs_hook=unique_object)
     require(isinstance(value, dict) and set(value) == {
         "schema_version", "upstream", "pristine_sources", "policy", "files",
-        "byte_lexer_experiment", "local_sources",
+        "byte_lexer_experiment", "byte_parser_experiment", "local_sources",
     }, "unknown or missing provenance fields")
-    require(type(value["schema_version"]) is int and value["schema_version"] == 2, "unknown schema version")
+    require(type(value["schema_version"]) is int and value["schema_version"] == 3, "unknown schema version")
     require(value["upstream"] == {
         "repository": "https://github.com/astral-sh/ruff", "tag": "0.12.0",
         "commit": COMMIT,
@@ -142,31 +164,43 @@ def parse_provenance(data):
     require(digest(canonical) == PRISTINE_SHA256, "pristine source reference changed")
     files = value["files"]
     require("provenance.json" not in files, "provenance must not inventory itself")
-    require(set(POLICY_FILES).isdisjoint(BYTE_LEXER_FILES), "overlapping patch groups")
-    for group, names in (("policy", POLICY_FILES), ("byte_lexer_experiment", BYTE_LEXER_FILES)):
+    for group, names in (("policy", POLICY_FILES), ("byte_lexer_experiment", BYTE_LEXER_FILES),
+                         ("byte_parser_experiment", BYTE_PARSER_FILES)):
         require(isinstance(value[group], dict) and set(value[group]) == set(names), f"unexpected {group} files")
         require(set(names) <= set(pristine), f"non-upstream {group} files")
         for name in names:
             require(name in files, f"missing {group} inventory: {name}")
+            original = pristine[name]["sha256"]
+            patched = files[name]["sha256"]
+            if group == "policy":
+                patched = POLICY_OUTPUT_SHA256[name]
+                if name not in BYTE_PARSER_FILES:
+                    require(patched == files[name]["sha256"], f"policy hash mapping changed: {name}")
+            elif group == "byte_parser_experiment" and name in POLICY_OUTPUT_SHA256:
+                original = POLICY_OUTPUT_SHA256[name]
             require(value[group][name] == {
-                "original_sha256": pristine[name]["sha256"],
-                "patched_sha256": files[name]["sha256"],
+                "original_sha256": original,
+                "patched_sha256": patched,
             }, f"{group} hash mapping changed: {name}")
     local = value["local_sources"]
-    require(isinstance(local, dict) and set(local) == {BYTE_SOURCE}, "unexpected local source files")
+    require(isinstance(local, dict) and set(local) == {BYTE_SOURCE, BYTE_PARSER_SOURCE}, "unexpected local source files")
     require(set(local).isdisjoint(pristine), "local source claimed as upstream pristine")
-    require(BYTE_SOURCE in files, "missing local source inventory")
-    require(local[BYTE_SOURCE] == {
-        **files[BYTE_SOURCE], "origin": "Ideomancer-authored", "license": "MIT",
-    }, "local source metadata or inventory mismatch")
-    require(files[BYTE_SOURCE]["sha256"] == BYTE_SOURCE_SHA256, "reviewed local source hash changed")
+    for name, expected in ((BYTE_SOURCE, BYTE_SOURCE_SHA256),
+                           (BYTE_PARSER_SOURCE, BYTE_PARSER_SOURCE_SHA256)):
+        require(name in files, f"missing local source inventory: {name}")
+        metadata = {**files[name], "origin": "Ideomancer-authored", "license": "MIT"}
+        if name == BYTE_SOURCE:
+            metadata["previous_sha256"] = F1_BYTE_SOURCE_SHA256
+        require(local[name] == metadata, f"local source metadata or inventory mismatch: {name}")
+        require(files[name]["sha256"] == expected, f"reviewed local source hash changed: {name}")
     require({name for name in files if "/src/" in name} == set(pristine) | set(local), "source set changed")
     require({name for name in pristine if files[name] != pristine[name]}
-            == set(POLICY_FILES) | set(BYTE_LEXER_FILES), "modified upstream source set changed")
+            == set(POLICY_FILES) | set(BYTE_LEXER_FILES) | set(BYTE_PARSER_FILES), "modified upstream source set changed")
     for name, expected in (("patches/ast-only-policy.patch", POLICY_PATCH_SHA256),
-                           ("patches/byte-lexer-experiment.patch", BYTE_PATCH_SHA256)):
+                           ("patches/byte-lexer-experiment.patch", BYTE_PATCH_SHA256),
+                           ("patches/byte-parser-experiment.patch", BYTE_PARSER_PATCH_SHA256)):
         require(name in files and files[name]["sha256"] == expected, f"reviewed patch hash changed: {name}")
-    require(len(files) == 86, "unexpected reviewed file count")
+    require(len(files) == 88, "unexpected reviewed file count")
     # Pin the whole reviewed inventory, not hashes supplied by a mutable sidecar.
     require(digest(data) == PROVENANCE_SHA256, "reviewed provenance digest changed")
     return value
@@ -353,6 +387,17 @@ def validate_policy(sources, originals):
             "duplicate-keyword diagnostic must be guarded before emission")
 
 
+def reverse_parser_patch(patch, sources, mappings):
+    """Restore the post-policy state before any old-policy reversal is allowed."""
+    require(set(sources) == set(mappings) == set(BYTE_PARSER_FILES), "unexpected parser source files")
+    for name, content in sources.items():
+        require(digest(content) == mappings[name]["patched_sha256"], f"parser output source mismatch: {name}")
+    intermediate = reverse_policy_patch(patch, sources)
+    for name, content in intermediate.items():
+        require(digest(content) == mappings[name]["original_sha256"], f"parser intermediate source mismatch: {name}")
+    return intermediate
+
+
 def check_vendor(root):
     root = Path(root)
     require(not root.is_symlink() and not root.parent.is_symlink(), "symlink vendor boundary")
@@ -364,11 +409,19 @@ def check_vendor(root):
     files = {**provenance["files"], "provenance.json": {"bytes": len(data), "sha256": digest(data)}}
     validate_inventory(root, files)
     pristine = provenance["pristine_sources"]
-    patched = {name: (root / name).read_bytes() for name in POLICY_FILES}
-    originals = reverse_policy_patch((root / "patches/ast-only-policy.patch").read_text(), patched)
-    validate_policy(patched, originals)
+    parser_patched = {name: (root / name).read_bytes() for name in BYTE_PARSER_FILES}
+    originals = reverse_parser_patch(
+        (root / "patches/byte-parser-experiment.patch").read_bytes().decode("utf-8"),
+        parser_patched, provenance["byte_parser_experiment"])
+    patched = {name: originals[name] if name in originals else (root / name).read_bytes()
+               for name in POLICY_FILES}
+    policy_originals = reverse_policy_patch(
+        (root / "patches/ast-only-policy.patch").read_bytes().decode("utf-8"), patched)
+    validate_policy(patched, policy_originals)
+    originals.update(policy_originals)
     byte_patched = {name: (root / name).read_bytes() for name in BYTE_LEXER_FILES}
-    originals.update(reverse_policy_patch((root / "patches/byte-lexer-experiment.patch").read_text(), byte_patched))
+    originals.update(reverse_policy_patch(
+        (root / "patches/byte-lexer-experiment.patch").read_bytes().decode("utf-8"), byte_patched))
     for name, expected in pristine.items():
         content = originals[name] if name in originals else (root / name).read_bytes()
         require(len(content) == expected["bytes"] and digest(content) == expected["sha256"], f"pristine source mismatch: {name}")

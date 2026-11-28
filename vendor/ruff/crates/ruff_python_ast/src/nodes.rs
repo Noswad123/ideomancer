@@ -12,6 +12,7 @@ use std::iter::FusedIterator;
 use std::ops::{Deref, DerefMut};
 use std::slice::{Iter, IterMut};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use bitflags::bitflags;
 use itertools::Itertools;
@@ -382,12 +383,90 @@ impl ConversionFlag {
     }
 }
 
+/// Debug-field spelling, either as legacy text gaps or exact source-backed ranges.
+/// Neither representation is a projection of CPython's synthesized debug constant.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct DebugText {
-    /// The text between the `{` and the expression node.
-    pub leading: String,
-    /// The text between the expression and the conversion, the `format_spec`, or the `}`, depending on what's present in the source
-    pub trailing: String,
+pub enum DebugText {
+    Text {
+        /// The text between the `{` and the expression node.
+        leading: String,
+        /// The text between the expression and the conversion, format spec, or `}`.
+        trailing: String,
+    },
+    /// Raw byte ranges, including any comments or malformed comment bytes.
+    Source(DebugSourceRanges),
+}
+
+/// Opaque, process-unique identity for one parse's immutable source binding.
+/// Clones retain identity; this is not a persistent or semantic source identifier.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct DebugSourceId(u64);
+
+impl DebugSourceId {
+    /// Allocates a nonzero identity without wrapping or reusing exhausted IDs.
+    /// A parser must allocate a fresh identity for each independent parse.
+    pub fn fresh() -> Option<Self> {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        NEXT_ID
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .ok()
+            .map(Self)
+    }
+}
+
+/// Adjacent raw byte ranges in one parse's immutable source buffer.
+/// The expression range can itself contain comments and need not be valid UTF-8.
+/// Construction checks layout only: source views must also check the owner and
+/// bounds against the actual backing buffer, and text views must validate UTF-8.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct DebugSourceRanges {
+    owner: DebugSourceId,
+    leading: TextRange,
+    expression: TextRange,
+    trailing: TextRange,
+}
+
+impl DebugSourceRanges {
+    /// Checks adjacency and bounds in the buffer's byte-offset coordinate system.
+    pub fn new(
+        owner: DebugSourceId,
+        leading: TextRange,
+        expression: TextRange,
+        trailing: TextRange,
+        source_len: TextSize,
+    ) -> Option<Self> {
+        if leading.end() != expression.start()
+            || expression.end() != trailing.start()
+            || trailing.end() > source_len
+        {
+            return None;
+        }
+        Some(Self {
+            owner,
+            leading,
+            expression,
+            trailing,
+        })
+    }
+
+    pub fn owner(&self) -> DebugSourceId {
+        self.owner
+    }
+
+    /// The raw spelling between `{` and the expression node, including parentheses.
+    pub fn leading(&self) -> TextRange {
+        self.leading
+    }
+
+    /// The expression node's raw range, not a comment-elided text value.
+    pub fn expression(&self) -> TextRange {
+        self.expression
+    }
+
+    /// The raw spelling through `=` and up to the conversion, format spec, or `}`.
+    pub fn trailing(&self) -> TextRange {
+        self.trailing
+    }
 }
 
 impl ExprFString {
