@@ -91,6 +91,8 @@ src/analysis/python_parity/ruff_compat_batch.rs
 src/analysis/python_parity/ruff_codec_batch.rs
 src/analysis/python_parity/ruff_visitor_batch.rs
 src/analysis/python_ruff.rs
+src/analysis/python_ruff/byte_fact_tests.rs
+src/analysis/python_ruff/byte_facts.rs
 src/analysis/python_ruff/byte_lexer_acceptance.rs
 src/analysis/python_ruff/byte_lexer_tests.rs
 src/analysis/python_ruff/byte_parser_tests.rs

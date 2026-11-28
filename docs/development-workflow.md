@@ -74,14 +74,16 @@ Never use `cargo fmt --all`, which recursively touches local path dependencies.
 Scope Clippy to product code with `--all-targets --no-deps -- -D warnings`.
 The preserved Ruff sources are verified by hash and patch provenance instead of
 product formatting/Clippy policy; upstream compiler warnings remain visible.
-F2 schema 3 passed integrity checks: three patches, with the third nine-file
+Historical F2 schema 3 passed integrity checks: three patches, with the third nine-file
 parser/source/debug patch layered **after** the old policy patch, not three
 disjoint patches. Preserve the old two patches and 65-source pristine map. Verified
 closure is 89 files / 67 Rust sources / 2,219,373 bytes (65 upstream + two authored),
-14 modified / 51 unchanged upstream; 264 source paths verified before docs freeze.
+14 modified / 51 unchanged upstream; 264 source paths verified at F2.
 All 84 vendor tests passed after the final fix. Exact implementation hashes and
 ordered-reversal/checker receipts are in the F2 ledger; review both authored hashes
-and layer order. Current F2 consumer/cleanup passed; receipts are in the ledger.
+and layer order. Vendor bytes are unchanged for F3a; its 266-path source inventory
+passed the checker. F2 consumer/cleanup receipts are historical only;
+current F3a receipts belong in the central ledger below, not inherited PASS labels.
 The following is the **historical F1 schema-2** layout,
 not current-tree integrity evidence: two disjoint reviewed four-file patches, the unchanged
 policy patch (`options.rs`, `expression.rs`, `pattern.rs`, `statement.rs`) and F1's
@@ -140,29 +142,37 @@ delete another session's data or silently claim cleanup succeeded.
 
 ## Edge Cases
 
-### Current direction: all bounded private F2 delivery gates PASS
+### Current direction: all bounded private F3a implementation/delivery gates PASS
 
-The byte Module parser/source/debug implementation passed 743 library tests
-(191 ignored), including all 35 F2 tests, plus 18 adapter / 8 engine tests and all
-185 explicit reference/native/Ruff gates (including known-limit assertions, not
-all parity matches). Product formatting/all-target Clippy, scripts and finalized
-schema-3/source checks passed; exact receipts and the stack regression fix are in
-the ledger. Current independent consumer and guarded cleanup passed; target is
-absent, follow-up `already_clean`, no Cargo afterward. No owned scratch/debug/test
-artifacts remain. The tested snapshot does not attest these final receipt prose
-bytes; use the F2 receipt, not F1 consumer/cache PASS. No Cargo/build checks follow
-this prose-only closeout, which authorizes no further implementation.
-See the primary [F2 ledger](python-analysis.md#f2-byte-module-parser-source-and-debug-experiment)
-for APIs, construction/reduction quotas, debug identity and failure-priority limits.
-Production helper/Python >=3.12 and frontend-5/facts-7 names remain unchanged;
-fingerprints change. F3, full G4, approved version policy and cutover are excluded.
-User-reported HEAD `805edb0` is committed F1, initially clean; F2 is uncommitted
-and unstaged, with no commit or push.
+Bounded private captured-byte fact integration is validated after the user's explicit
+proposal/“continue” authorization. User-reported HEAD `1ef1f0c` contains complete
+F2, initially clean; F3a is uncommitted and unstaged, no commit/push. The central
+[F3a ledger](python-analysis.md#f3a-captured-byte-fact-integration) owns architecture,
+completed Rust/API/oracle, Clippy/Python and source/vendor results, with exact byte
+classifications. Final domain-membership pin validation passed; independent
+consumer after docs freeze and guarded cleanup **passed**. Target is absent,
+follow-up `already_clean`, no Cargo afterward; no owned artifacts retained. The
+ledger records the exact consumer snapshot and cleanup estimate; that snapshot
+does not attest later receipt prose. F2 consumer/cache PASS is historical only.
+
+All **364 normal-text positives passed**. Keep byte groups **117 / 71 / 44 /
+112 / 20** separate as matched/resource/codec/other outcomes; exact results are
+centralized in the ledger. Construction-limit `ResourceLimit` is non-parity. Do not raise/waive
+F2's 256-entry construction quota. Direct original-byte CPython comparisons, not
+repaired text controls or shared-implementation comparisons alone, establish the
+malformed-comment evidence. Full F3/G4/version approval remains open.
+
+Private byte policy is `python-ruff-private-byte-facts-1`; normal frontend-5/facts-7
+names stay fixed, fingerprints change. Production helper/Python >=3.12, public
+API/schema, saved evidence and default are unchanged. This documentation-only task
+runs no commands, scripts, builds or Cargo and performs no cache cleanup; main's
+F3a receipts are centralized above. Post-cleanup final checks are read-only
+Python/Git, never a rebuild. This closeout authorizes no future implementation.
 
 ### Historical F1: lexer goal proved, all delivery gates passed
 
 The following F1 counts, hashes, authorization and cache receipts describe that
-handoff only; the F2 status above supersedes its future-work statements.
+handoff only; the F3a status above supersedes its future-work statements.
 
 F1 implements one shared fallible byte core behind legacy `Lexer(&str)` and the
 doc-hidden experimental byte facade, not a separate lexer or byte parser. Original

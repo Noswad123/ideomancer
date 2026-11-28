@@ -101,39 +101,8 @@ pub(super) fn decode<'a>(
     let bom = bytes.starts_with(b"\xef\xbb\xbf");
     let bytes = if bom { &bytes[3..] } else { bytes };
     let cookie = cookie(bytes, cancel)?;
+    let encoding = select_encoding(cookie, bom, cancel)?;
     let canonical = cookie.map(normal_name);
-    if bom && canonical.is_some_and(|name| name != Some(Encoding::Utf8)) {
-        return Err(Error::Syntax {
-            line: 0,
-            reason: BOM_CONFLICT,
-        });
-    }
-    let encoding = match (cookie, canonical.flatten()) {
-        (None, _) => Encoding::Utf8,
-        (_, Some(encoding)) => encoding,
-        (Some(name), None) => {
-            match codecs312::lookup(name, cancel).map_err(|_| Error::Cancelled)? {
-                Resolution::Supported(Codec::Utf8) => Encoding::Utf8,
-                Resolution::Supported(Codec::Latin1) => Encoding::Latin1,
-                Resolution::Supported(Codec::Ascii) => Encoding::Ascii,
-                Resolution::Supported(Codec::SingleByte(index)) => Encoding::SingleByte(index),
-                Resolution::UnsupportedText => return Err(Error::UnsupportedCodec),
-                Resolution::Unresolved => return Err(Error::UnresolvedCodec),
-                Resolution::NonText => {
-                    return Err(Error::Syntax {
-                        line: 0,
-                        reason: NON_TEXT_CODEC,
-                    })
-                }
-                Resolution::AlwaysFails => {
-                    return Err(Error::Syntax {
-                        line: 0,
-                        reason: UNDEFINED_CODEC,
-                    })
-                }
-            }
-        }
-    };
     if bytes.len() > decoded_limit {
         return Err(Error::ResourceLimit);
     }
@@ -228,6 +197,59 @@ pub(super) fn decode<'a>(
             })
         }
     }
+}
+
+/// Select only the raw UTF-8 source domain for F3a, without validating opaque
+/// comment bytes, stripping a BOM, transcoding, or reserving a decoded buffer.
+pub(super) fn raw_utf8_domain(
+    bytes: &[u8],
+    cancel: &mut impl FnMut() -> bool,
+) -> Result<bool, Error> {
+    checkpoint(cancel)?;
+    let bom = bytes.starts_with(b"\xef\xbb\xbf");
+    let view = if bom { &bytes[3..] } else { bytes };
+    let cookie = cookie(view, cancel)?;
+    Ok(select_encoding(cookie, bom, cancel)? == Encoding::Utf8)
+}
+
+fn select_encoding(
+    cookie: Option<&[u8]>,
+    bom: bool,
+    cancel: &mut impl FnMut() -> bool,
+) -> Result<Encoding, Error> {
+    let canonical = cookie.map(normal_name);
+    if bom && canonical.is_some_and(|name| name != Some(Encoding::Utf8)) {
+        return Err(Error::Syntax {
+            line: 0,
+            reason: BOM_CONFLICT,
+        });
+    }
+    Ok(match (cookie, canonical.flatten()) {
+        (None, _) => Encoding::Utf8,
+        (_, Some(encoding)) => encoding,
+        (Some(name), None) => {
+            match codecs312::lookup(name, cancel).map_err(|_| Error::Cancelled)? {
+                Resolution::Supported(Codec::Utf8) => Encoding::Utf8,
+                Resolution::Supported(Codec::Latin1) => Encoding::Latin1,
+                Resolution::Supported(Codec::Ascii) => Encoding::Ascii,
+                Resolution::Supported(Codec::SingleByte(index)) => Encoding::SingleByte(index),
+                Resolution::UnsupportedText => return Err(Error::UnsupportedCodec),
+                Resolution::Unresolved => return Err(Error::UnresolvedCodec),
+                Resolution::NonText => {
+                    return Err(Error::Syntax {
+                        line: 0,
+                        reason: NON_TEXT_CODEC,
+                    })
+                }
+                Resolution::AlwaysFails => {
+                    return Err(Error::Syntax {
+                        line: 0,
+                        reason: UNDEFINED_CODEC,
+                    })
+                }
+            }
+        }
+    })
 }
 
 fn checkpoint(cancel: &mut impl FnMut() -> bool) -> Result<(), Error> {

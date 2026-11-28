@@ -12,8 +12,8 @@
 //! until CPython's context-dependent PEG error locations are established.
 //! Parameter-internal comments with a lexically active complex-expression prefix
 //! are also excluded, rather than guessing PEG invalid-rule locations.
-use ruff_python_ast::{ExceptHandler, Mod, Parameter, Stmt};
-use ruff_python_parser::{Parsed, Token, TokenKind};
+use ruff_python_ast::{ExceptHandler, Mod, ModModule, Parameter, Stmt};
+use ruff_python_parser::{Parsed, Token, TokenKind, Tokens};
 use ruff_text_size::{Ranged, TextRange, TextSize};
 use std::mem::size_of;
 
@@ -131,9 +131,77 @@ pub(super) fn analyze_with_limits(
     let Mod::Module(module) = parsed.syntax() else {
         return Err(Error::UnsupportedCategory("non-module type-comment input"));
     };
+    analyze_module_with_limits(
+        text.as_bytes(),
+        module,
+        parsed.tokens(),
+        budget,
+        check,
+        limits,
+    )
+}
+
+/// Byte-pipeline admission only: ordinary comments are opaque, but CPython's
+/// type/ignore payload semantics for malformed UTF-8 are not established here.
+/// Call only with tokens from the same diagnostic-free accepted byte module.
+pub(super) fn check_byte_comment_payloads(
+    bytes: &[u8],
+    tokens: &Tokens,
+    check: &mut dyn FnMut() -> bool,
+) -> Result<(), Error> {
+    for token in tokens {
+        if check() {
+            return Err(Error::Cancelled);
+        }
+        if token.kind() != TokenKind::Comment {
+            continue;
+        }
+        let mut tail = bytes
+            .get(token.start().to_usize()..token.end().to_usize())
+            .and_then(|raw| raw.strip_prefix(b"#"))
+            .ok_or(Error::UnsupportedCategory("invalid byte comment range"))?;
+        while matches!(tail.first(), Some(b' ' | b'\t')) {
+            if check() {
+                return Err(Error::Cancelled);
+            }
+            tail = &tail[1..];
+        }
+        if let Some(payload) = tail.strip_prefix(b"type:") {
+            // Checkpoints bound cooperative work around the local UTF-8 view;
+            // validation itself is bounded by the caller's source-size limit.
+            for _ in payload.chunks(256) {
+                if check() {
+                    return Err(Error::Cancelled);
+                }
+            }
+            if std::str::from_utf8(payload).is_err() {
+                return Err(Error::UnsupportedCategory(
+                    "malformed UTF-8 type-comment payload",
+                ));
+            }
+        }
+    }
+    if check() {
+        return Err(Error::Cancelled);
+    }
+    Ok(())
+}
+
+/// Private shared pass, not an engine API. The caller must supply the borrowed
+/// module and tokens from the same source after BOTH diagnostic channels are
+/// empty. Byte callers separately exclude malformed type/ignore payloads before
+/// this pass; ordinary comments remain opaque. No payload parsing or reparse.
+pub(super) fn analyze_module_with_limits(
+    bytes: &[u8],
+    module: &ModModule,
+    tokens: &Tokens,
+    budget: &mut impl FnMut(usize) -> Result<(), Error>,
+    check: &mut dyn FnMut() -> bool,
+    limits: Limits,
+) -> Result<CommentPlan, Error> {
     let mut pass = Pass {
-        text,
-        tokens: parsed.tokens(),
+        bytes,
+        tokens,
         events: Vec::new(),
         budget,
         check,
@@ -150,7 +218,7 @@ pub(super) fn analyze_with_limits(
     // Count before reserving: every push below is covered, without geometric
     // Vec growth or an uncharged second copy of the token/source buffers.
     let mut count = 0usize;
-    let tokens: &[Token] = parsed.tokens();
+    let tokens: &[Token] = tokens;
     for token in tokens {
         pass.tick()?;
         if token.kind() == TokenKind::Comment && pass.comment_kind(token.range())? == Some(false) {
@@ -204,7 +272,7 @@ pub(super) fn analyze_with_limits(
 }
 
 struct Pass<'a, 'b, B> {
-    text: &'a str,
+    bytes: &'a [u8],
     tokens: &'a [Token],
     events: Vec<Event>,
     budget: &'b mut B,
@@ -255,7 +323,7 @@ impl<B: FnMut(usize) -> Result<(), Error>> Pass<'_, '_, B> {
     /// None = ordinary, true = TYPE_IGNORE, false = TYPE_COMMENT. CPython's
     /// suffix boundary is ASCII alphanumeric OR any non-ASCII byte, not XID.
     fn comment_kind(&mut self, range: TextRange) -> Result<Option<bool>, Error> {
-        let bytes = self.text.as_bytes();
+        let bytes = self.bytes;
         let mut start = range.start().to_usize() + 1;
         let end = range.end().to_usize();
         while start < end && matches!(bytes[start], b' ' | b'\t') {
@@ -296,7 +364,7 @@ impl<B: FnMut(usize) -> Result<(), Error>> Pass<'_, '_, B> {
         }
         let mut line = 1;
         let mut cr = false;
-        for byte in &self.text.as_bytes()[..at.to_usize()] {
+        for byte in &self.bytes[..at.to_usize()] {
             self.tick()?;
             if *byte == b'\r' || (*byte == b'\n' && !cr) {
                 line += 1;
@@ -647,6 +715,149 @@ mod tests {
 
     fn plan(text: &str) -> Result<CommentPlan, Error> {
         analyze(text, &parse(text), &mut |_| Ok(()), &mut || false)
+    }
+
+    #[test]
+    fn borrowed_module_pass_preserves_text_plans_and_errors() {
+        let mut cases = parameter_expression_cases();
+        cases.extend(complex_parameter_cases().into_iter().map(|text| (text, 0)));
+        cases.extend([
+            ("x=1 # type: A\n".to_owned(), 0),
+            ("# type: ignore[unit]\nx=1\n".to_owned(), 0),
+            ("def f():\n x=1 # type:A\n".to_owned(), 0),
+            ("pass # type:A\n".to_owned(), 0),
+        ]);
+        for (text, _) in cases {
+            let parsed = parse(&text);
+            let Mod::Module(module) = parsed.syntax() else {
+                panic!()
+            };
+            let expected = analyze(&text, &parsed, &mut |_| Ok(()), &mut || false);
+            let actual = analyze_module_with_limits(
+                text.as_bytes(),
+                module,
+                parsed.tokens(),
+                &mut |_| Ok(()),
+                &mut || false,
+                Limits::default(),
+            );
+            match (actual, expected) {
+                (Ok(actual), Ok(expected)) => {
+                    assert_eq!(actual.working_charge, expected.working_charge);
+                    assert_eq!(actual.normalization_work, expected.normalization_work);
+                    assert_eq!(actual.compatibility_nodes, expected.compatibility_nodes);
+                    assert_eq!(actual.max_depth, expected.max_depth);
+                    assert_eq!(actual.ignore_count, expected.ignore_count);
+                    let rows = |plan: CommentPlan| {
+                        plan.overrides
+                            .into_iter()
+                            .map(|item| (item.kind, item.raw, item.corrected))
+                            .collect::<Vec<_>>()
+                    };
+                    assert_eq!(rows(actual), rows(expected), "{text:?}");
+                }
+                (Err(actual), Err(expected)) => assert_eq!(actual, expected, "{text:?}"),
+                (actual, expected) => panic!("{text:?}: {actual:?} != {expected:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn byte_payload_gate_excludes_only_malformed_type_and_ignore_comments() {
+        use ruff_python_parser::byte::{parse_module_checked, ByteParseLimits};
+
+        for (bytes, excluded) in [
+            (b"# ordinary \xff\r\nx=1 # type:A\r\n".as_slice(), false),
+            (b"#\x0ctype: \xff\nx=1\n".as_slice(), false),
+            (b"# Type: \xff\nx=1\n".as_slice(), false),
+            (b"# type : \xff\nx=1\n".as_slice(), false),
+            (b"x=f'{1 # ordinary \xff\n}'\n".as_slice(), false),
+            (b"# type: ignore[unit]\nx=1\n".as_slice(), false),
+            (b"x=1 # type: \xff\n".as_slice(), true),
+            (b"#\t type: ignore[\xff]\nx=1\n".as_slice(), true),
+            (b"# type: ignore\xff\nx=1\n".as_slice(), true),
+            (b"x=f'{1 # type: ignore[\xff]\n}'\n".as_slice(), true),
+        ] {
+            let mut check = || false;
+            let parsed = parse_module_checked(
+                bytes,
+                ParseOptions::from(Mode::Module)
+                    .with_target_version(PythonVersion::PY312)
+                    .with_ast_only(true),
+                ByteParseLimits::default(),
+                &mut check,
+            )
+            .unwrap();
+            let gate = check_byte_comment_payloads(bytes, parsed.tokens(), &mut || false);
+            if excluded {
+                assert_eq!(
+                    gate,
+                    Err(Error::UnsupportedCategory(
+                        "malformed UTF-8 type-comment payload"
+                    )),
+                    "{bytes:?}"
+                );
+                continue;
+            }
+            gate.unwrap();
+            parsed.with_module(|module, tokens| {
+                let plan = analyze_module_with_limits(
+                    bytes,
+                    module,
+                    tokens,
+                    &mut |_| Ok(()),
+                    &mut || false,
+                    Limits::default(),
+                )
+                .unwrap();
+                if bytes.starts_with(b"# ordinary") {
+                    let raw = module.body[0].range();
+                    assert_eq!(
+                        plan.corrected_range(NodeKind::Assign, raw).end().to_usize(),
+                        bytes.len() - 2
+                    );
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn byte_payload_gate_is_cancellable_and_text_wrapper_checks_both_channels() {
+        let text = format!(
+            "#{}type: ignore[{}]\nx=1\n",
+            " ".repeat(512),
+            "a".repeat(1024)
+        );
+        let parsed = parse(&text);
+        let mut total = 0;
+        check_byte_comment_payloads(text.as_bytes(), parsed.tokens(), &mut || {
+            total += 1;
+            false
+        })
+        .unwrap();
+        for cancel_at in 1..=total {
+            let mut calls = 0;
+            assert_eq!(
+                check_byte_comment_payloads(text.as_bytes(), parsed.tokens(), &mut || {
+                    calls += 1;
+                    calls == cancel_at
+                }),
+                Err(Error::Cancelled)
+            );
+        }
+        for text in ["x=)\n", "type A[T = int] = int\n"] {
+            let parsed = parse_unchecked(
+                text,
+                ParseOptions::from(Mode::Module)
+                    .with_target_version(PythonVersion::PY312)
+                    .with_ast_only(true),
+            );
+            assert!(parsed.has_syntax_errors());
+            assert_eq!(
+                analyze(text, &parsed, &mut |_| Ok(()), &mut || false).unwrap_err(),
+                Error::UnsupportedCategory("type-comment pass requires validated AST")
+            );
+        }
     }
 
     #[test]

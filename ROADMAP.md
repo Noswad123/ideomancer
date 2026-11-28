@@ -23,7 +23,7 @@ or that a whole application is understood. There are no promised dates.
 | I2 | Read-only facts and validated class-model augmentation | Synthetic integration and a bounded real-source explicit-configuration slice accepted | Preserve immutability, identity checks and provenance; broader framework/runtime interpretation remains separate |
 | I3 | Harden and release the consumable engine | **Next: release and history review** | An approved immutable release works as an upstream or mirrored dependency |
 | P0 | Shared parser backend and native JS/TS Tree-sitter migration | Scoped source/facts, rendered-diagram usefulness and external explicit-configuration boundary accepted; release gates separate | Preserve fact/proof/output contracts; no Node discovery prerequisite; package/consumer checks and supported-platform release validation |
-| P1 | Native Python backend | Frontend-5/facts-7 **G2/G3 privately closed** for the admitted Python 3.12 Module-AST lane; **all bounded F2 implementation/delivery gates PASS**, including current consumer/cleanup; production helper retained | [F2 ledger](docs/python-analysis.md#f2-byte-module-parser-source-and-debug-experiment): CPython semantics/admission, debug constants, codecs/type comments, lazy failure priority, resources, F3, full G4, version policy and G5/G6/cutover remain open; no further implementation authorized |
+| P1 | Native Python backend | Frontend-5/facts-7 **G2/G3 privately closed** for the admitted normal Python 3.12 Module-AST lane; **all bounded private F3a implementation/delivery gates PASS**, including consumer / guarded cleanup; production helper retained | [F3a ledger](docs/python-analysis.md#f3a-captured-byte-fact-integration): separate normal/byte corpus receipts; resource non-parity, full F3/G4 admission/failure/debug/codec equivalence, version policy and G5/G6/cutover remain open; F2 receipts historical only; no future implementation authorized |
 | P2 | Rust Tree-sitter backend and language facts | Next parser milestone; Rust analysis not implemented | Model Rust structs, enums, traits, impls, functions and modules honestly; no build scripts or macro execution |
 | I4 | Broader language/model capabilities | Later | Independent use cases justify each extension without weakening the boundary |
 
@@ -38,25 +38,26 @@ Node/Chromium tooling independently of JS/TS discovery.
 
 ### Parser Acceptance
 
-**Current F2 checkpoint:** authorized private byte Module parser/source/debug
-experiment; one existing Ruff grammar/shared fallible core, closed Legacy/Bytes
-provider, accepted AST callbacks only after both diagnostic channels and provider
-finish. Source-backed debug owner/ranges are identity, not semantic values or
-CPython constants. Bounded implementation validation passed: 743 library tests
-(191 ignored), including all 35 F2; preservation/oracles and provenance passed.
-Current consumer and guarded cleanup passed: **all bounded F2 delivery gates PASS**;
-target absent, no Cargo afterward. Finite tests are not CPython parity and this
-closeout authorizes no further implementation. See the primary
-[F2 ledger](docs/python-analysis.md#f2-byte-module-parser-source-and-debug-experiment)
-for construction/reduction bounds, regression fix, exact evidence/hashes and open
-gates. Verified schema-3 closure: 89 vendor files / 67 Rust sources / 2,219,373
-bytes; 264 source paths verified before docs freeze. Production helper/Python >=3.12 and
-frontend-5/facts-7 names remain unchanged; fingerprints change. User-reported HEAD
-`805edb0` is committed F1, initially clean; F2 remains uncommitted and unstaged,
-with no commit or push. The consumer snapshot does not attest final receipt prose.
+**Current F3a checkpoint:** the user authorized private captured-byte fact integration
+via “continue” after the explicit proposal. One checked F2 byte parse feeds the
+shared fact Driver/projection/sink without source repair, whole-source UTF-8
+validation, transcoding or reparse. Private byte policy is
+`python-ruff-private-byte-facts-1`; normal frontend-5/facts-7 names and production
+helper/Python >=3.12 remain, fingerprints change. See the central
+[F3a ledger](docs/python-analysis.md#f3a-captured-byte-fact-integration) for validated
+bounded integration: Rust/API/oracle, Clippy/Python and source/vendor checks passed,
+including all 364 normal positives, exact byte-group classifications and final
+domain-pin validation. Independent consumer and guarded cleanup **passed**;
+byte resource exclusions are not parity and F2 bounds must not be raised/waived.
+User-reported HEAD `1ef1f0c` contains complete F2, initially clean; F3a is
+uncommitted and unstaged, no commit/push. Target absent, no Cargo after cleanup;
+the ledger records the tested snapshot, which does not attest later receipt prose.
+F2 consumer/cache receipts are historical only. Vendor unchanged;
+266-path source closure passed the checker. Full F3/G4/version policy/public
+API/schema/evidence/default/cutover approval is not granted.
 
 **Historical F1 receipts follow.** Authorization, counts, hashes and cleanup below
-describe F1 handoff, not current F2 status.
+describe F1 handoff, not current F3a status.
 
 **Historical F1 checkpoint: bounded lexer goal COMPLETE / PROVED by tests.** One shared
 fallible byte core serves legacy `Lexer(&str)`

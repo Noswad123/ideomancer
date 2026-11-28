@@ -1164,7 +1164,7 @@ fn ruff_facts_work_regions_keep_only_live_file_state_and_owner_high_water() {
         &mut |_, text, parsed, check| {
             let mut driver = Driver {
                 source: &sources[0],
-                source_text: text,
+                source_text: FactSource::Text(text),
                 sink: &mut sink,
                 check,
                 arena: Vec::new(),
@@ -1183,7 +1183,12 @@ fn ruff_facts_work_regions_keep_only_live_file_state_and_owner_high_water() {
                 limits: SemanticLimits::default(),
                 trace: None,
             };
-            driver.consume(text, parsed).unwrap();
+            let Mod::Module(module) = parsed.syntax() else {
+                panic!("validated module");
+            };
+            driver
+                .consume_module(text.as_bytes(), module, parsed.tokens())
+                .unwrap();
             assert!(driver.arena.is_empty() && driver.owners.is_empty());
             assert_eq!(driver.arena_work, 0);
             assert_eq!(driver.owner_slots, 2);
@@ -1228,6 +1233,24 @@ fn ruff_facts_complete_arrays_and_raw_trace_match_trusted_ast_oracle() {
 
 #[cfg(unix)]
 pub(super) fn assert_oracle_sources(sources: Vec<Source>) {
+    assert_oracle_sources_mode(sources, OracleLanes::TextAndBytes);
+}
+
+#[cfg(unix)]
+pub(super) fn assert_byte_oracle_sources(sources: Vec<Source>) {
+    assert_oracle_sources_mode(sources, OracleLanes::BytesOnly);
+}
+
+#[cfg(unix)]
+enum OracleLanes {
+    TextAndBytes,
+    BytesOnly,
+}
+
+#[cfg(unix)]
+fn assert_oracle_sources_mode(sources: Vec<Source>, lanes: OracleLanes) {
+    use ruff_python_parser::lexer::byte::ByteLexFailure;
+
     let python = crate::analysis::python_parity::oracle();
     let helper = include_str!("../../python_extract.py");
     let (helper, autocall) = helper
@@ -1263,7 +1286,7 @@ json.dump(traces, sys.stdout, ensure_ascii=True)
     let request = json!({"sources": sources.iter().map(|s| json!({"path":s.path,"module":s.module,"hex":s.hex})).collect::<Vec<_>>()});
     let mut command = std::process::Command::new(&python);
     command
-        .args(["-I", "-S", "-c", &script])
+        .args(["-I", "-S", "-B", "-c", &script])
         .current_dir("/")
         .env_clear()
         .stdin(std::process::Stdio::piped())
@@ -1277,44 +1300,151 @@ json.dump(traces, sys.stdout, ensure_ascii=True)
     .unwrap();
     let traces: Vec<Value> = serde_json::from_slice(&output).unwrap();
     assert_eq!(traces.len(), sources.len());
+    let mut matched = 0;
+    let mut outcodec = Vec::new();
+    let mut outresource = Vec::new();
     for (index, (source, expected_trace)) in sources.iter().zip(traces).enumerate() {
         let captured = std::slice::from_ref(source);
-        let mut trace = Vec::new();
-        let native = extract_impl(
+        let ast = crate::analysis::extract_captured(&python, captured).unwrap();
+        assert!(ast.complete, "case {index}");
+        if matches!(lanes, OracleLanes::TextAndBytes) {
+            let mut trace = Vec::new();
+            let native = extract_impl(
+                captured,
+                |_| false,
+                SemanticLimits::default(),
+                Some(&mut trace),
+            )
+            .unwrap();
+            assert_eq!(
+                native.files[0].status,
+                FactStatus::AcceptedFacts,
+                "case {index}"
+            );
+            // Module labels are batch preflight, not AST visits. Everything else,
+            // including duplicate fact/warning occurrences, is compared unfiltered.
+            assert_eq!(
+                serde_json::to_value(&trace).unwrap(),
+                expected_trace,
+                "RAW_OBSERVATION case {index}"
+            );
+            assert_eq!(
+                serde_json::to_value(&native.facts).unwrap(),
+                serde_json::to_value(&ast.facts).unwrap(),
+                "complete facts case {index}"
+            );
+            assert_eq!(
+                serde_json::to_value(&native.diagnostics).unwrap(),
+                serde_json::to_value(&ast.diagnostics).unwrap(),
+                "complete warnings case {index}"
+            );
+        }
+        let mut byte_trace = Vec::new();
+        let mut outcomes = Vec::new();
+        let native = extract_lane(
             captured,
             |_| false,
             SemanticLimits::default(),
-            Some(&mut trace),
+            FactLane::Bytes,
+            &mut outcomes,
+            Some(&mut byte_trace),
         )
         .unwrap();
-        assert_eq!(
-            native.files[0].status,
-            FactStatus::AcceptedFacts,
-            "case {index}"
-        );
-        // Module labels are batch preflight, not AST visits. Everything else,
-        // including duplicate fact/warning occurrences, is compared unfiltered.
-        assert_eq!(
-            serde_json::to_value(&trace).unwrap(),
-            expected_trace,
-            "RAW_OBSERVATION case {index}"
-        );
-        let ast = crate::analysis::extract_captured(&python, captured).unwrap();
-        assert!(ast.complete, "case {index}");
-        assert_eq!(
-            serde_json::to_value(&native.facts).unwrap(),
-            serde_json::to_value(&ast.facts).unwrap(),
-            "complete facts case {index}"
-        );
-        assert_eq!(
-            serde_json::to_value(&native.diagnostics).unwrap(),
-            serde_json::to_value(&ast.diagnostics).unwrap(),
-            "complete warnings case {index}"
+        assert_eq!(native.files.len(), 1, "byte case {index}");
+        assert_eq!(outcomes.len(), 1, "byte case {index}");
+        if matches!(lanes, OracleLanes::BytesOnly) {
+            assert_eq!(
+                native.files[0].status,
+                FactStatus::AcceptedFacts,
+                "byte-only case {index}: {:?}; {:?}",
+                native.files[0],
+                outcomes[0]
+            );
+        }
+        match native.files[0].status {
+            FactStatus::AcceptedFacts => {
+                assert!(matches!(outcomes[0], ByteOutcome::Parsed { .. }));
+                assert_eq!(
+                    serde_json::to_value(&native.facts).unwrap(),
+                    serde_json::to_value(&ast.facts).unwrap(),
+                    "byte complete facts case {index}"
+                );
+                assert_eq!(
+                    serde_json::to_value(&native.diagnostics).unwrap(),
+                    serde_json::to_value(&ast.diagnostics).unwrap(),
+                    "byte complete warnings case {index}"
+                );
+                assert_eq!(
+                    serde_json::to_value(&byte_trace).unwrap(),
+                    expected_trace,
+                    "byte RAW_OBSERVATION case {index}"
+                );
+                matched += 1;
+            }
+            status @ (FactStatus::UnsupportedEncoding | FactStatus::ResourceLimit) => {
+                if status == FactStatus::UnsupportedEncoding {
+                    assert!(
+                        !matches!(
+                            super::source::raw_utf8_domain(&source.bytes, &mut || false),
+                            Ok(true)
+                        ),
+                        "byte codec exclusion must be outside raw UTF-8 domain: case {index}"
+                    );
+                    outcodec.push(index);
+                } else {
+                    assert!(
+                        matches!(
+                            outcomes[0],
+                            ByteOutcome::Failed(byte_facts::ByteInputFailure::Input(
+                                ByteLexFailure::ResourceLimit
+                            ))
+                        ),
+                        "byte resource exclusion must be a typed F2 quota: case {index}: {:?}",
+                        outcomes[0]
+                    );
+                    outresource.push(index);
+                }
+                assert!(native.files[0].failure.is_none(), "byte case {index}");
+                assert_eq!(native.facts.len(), 1, "byte baseline case {index}");
+                let baseline: Vec<_> = ast.facts.iter().filter(|f| f.kind == "module").collect();
+                assert_eq!(
+                    serde_json::to_value(&native.facts).unwrap(),
+                    serde_json::to_value(&baseline).unwrap(),
+                    "byte baseline case {index}"
+                );
+                assert!(native.diagnostics.is_empty(), "byte case {index}");
+                assert!(byte_trace.is_empty(), "byte case {index}");
+            }
+            _ => panic!(
+                "unexpected byte oracle failure case {index}: {:?}; {:?}",
+                native.files[0], outcomes[0]
+            ),
+        }
+    }
+    if matches!(lanes, OracleLanes::TextAndBytes) {
+        eprintln!(
+            "Ruff oracle: {} complete-array cases; {} raw-order cases",
+            sources.len(),
+            sources.len()
         );
     }
+    assert_eq!(matched + outcodec.len() + outresource.len(), sources.len());
+    if matches!(lanes, OracleLanes::TextAndBytes) {
+        // Freeze reviewed domain membership: newly resource-limiting a positive
+        // must fail, rather than silently reducing byte comparison coverage.
+        let (codec, resource): (Vec<usize>, &[usize]) = match sources.len() {
+            117 => (vec![], &[18, 36, 37, 40, 79, 80, 81, 82, 84, 110]),
+            71 => (vec![57, 58, 59, 70], &[]),
+            44 => (vec![], &[]),
+            112 => ((0..112).collect(), &[]),
+            20 => (vec![], &[3, 4, 7, 10, 12, 13, 17, 18, 19]),
+            count => panic!("unreviewed positive oracle group: {count}"),
+        };
+        assert_eq!(outcodec, codec, "byte codec domain membership");
+        assert_eq!(outresource, resource, "byte resource domain membership");
+    }
     eprintln!(
-        "Ruff oracle: {} complete-array cases; {} raw-order cases",
-        sources.len(),
-        sources.len()
+        "Ruff byte oracle group ({} cases): matched={matched}; outcodec={} indices (zero-based)={outcodec:?}; outresource={} indices (zero-based)={outresource:?}",
+        sources.len(), outcodec.len(), outresource.len()
     );
 }

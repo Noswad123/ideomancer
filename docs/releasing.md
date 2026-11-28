@@ -18,7 +18,24 @@ manifest, provenance and their permission notice under
 
 ## API / Interfaces
 
-### Current F2 experimental source closure: bounded delivery PASS
+### Current F3a experimental source closure
+
+The authorized private byte-to-facts slice has **266 reviewed source paths**.
+The two new authored modules are `byte_facts.rs` and `byte_fact_tests.rs` under
+`src/analysis/python_ruff/`. Vendor source, manifests, dependency pins, licenses
+and notices are unchanged from F2 at `1ef1f0c`; the schema-3 vendor closure remains
+89 files / 67 Rust sources / 2,219,373 bytes. Production dispatch and version
+policy are unchanged. See the [F3a ledger](python-analysis.md#f3a-captured-byte-fact-integration)
+for **all bounded F3a implementation/delivery gates PASS**, including independent
+consumer and guarded cleanup. Target is absent, no Cargo afterward; the tested
+snapshot does not attest later receipt prose. Do not inherit the historical F2
+receipt below or infer full F3/G4/version/public approval or future implementation
+authorization from this closeout.
+
+### Historical F2 experimental source closure: bounded delivery PASS
+
+The complete F2 receipt below describes that handoff, including its then-current
+HEAD, uncommitted work and cache state. F2 is now committed at `1ef1f0c`.
 
 Authorized private F2 adds checked byte Module parsing/source/debug storage, not
 production dispatch, full CPython admission or a public backend. Bounded implementation

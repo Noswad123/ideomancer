@@ -39,7 +39,23 @@ Git source; there is no separate fork/submodule or registry publication requirem
   admission or CPython compatibility. Registry dependency sources are not vendored
   here; preserve applicable notices for actual selected versions in binary bundles.
 
-### Current F2 provenance and license boundary: bounded delivery PASS
+### Current F3a provenance and license boundary
+
+Private byte-to-facts integration changes authored product code only. The
+266-path source closure retains the unchanged F2 vendor snapshot, dependency pins
+and all existing MIT, Ruff/RustPython, Unicode and PSF/codec notices. No vendor,
+data, manifest or license change accompanies F3a. Current validation/delivery
+receipts mark **all bounded F3a implementation/delivery gates PASS**, including
+independent consumer and guarded cleanup; see the
+[F3a ledger](python-analysis.md#f3a-captured-byte-fact-integration), not the historical
+F2 consumer/cache receipt below. The tested snapshot does not attest later receipt
+prose. This grants no future implementation authorization and is neither production
+cutover nor binary/whole-graph legal clearance.
+
+### Historical F2 provenance and license boundary: bounded delivery PASS
+
+All F2 counts, HEAD/uncommitted observations, tests and cache statements below
+describe the F2 handoff only; F2 is now committed at `1ef1f0c`.
 
 The bounded private byte Module parser/source/debug implementation passed final
 preservation/oracles, scripts and provenance checks; current consumer/cleanup also

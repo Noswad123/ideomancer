@@ -26,6 +26,13 @@ pub(super) fn extract_fact_candidates(
     facts::extract_fact_candidates(sources)
 }
 
+/// Private F3a experiment, deliberately separate from the text candidate/default.
+pub(super) fn extract_byte_fact_candidates(
+    sources: &[Source],
+) -> Result<facts::ByteCandidateReport<'_>, FrontEndError> {
+    facts::extract_byte_fact_candidates(sources)
+}
+
 use super::Source;
 use ruff_python_ast::PythonVersion;
 use ruff_python_parser::{lexer::lex, parse_unchecked, Mode, ParseOptions, TokenKind};

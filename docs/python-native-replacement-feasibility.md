@@ -6,23 +6,30 @@
 contract.** The user authorized this bounded byte-aware Ruff and version-strategy
 investigation after the private G2/G3 implementation checkpoint.
 
-**Current: authorized private F2 byte Module parser/source/debug implementation.**
-The bounded implementation is validated: 743 library tests passed (191 ignored),
-including all 35 F2; preservation/oracles, scripts and provenance checks passed.
-Current consumer validation and guarded cleanup passed: **all bounded F2 delivery
-gates PASS**, target absent, no Cargo afterward. These are not inherited F1 passes;
-the consumer snapshot does not attest final receipt prose. See the primary [F2 ledger](python-analysis.md#f2-byte-module-parser-source-and-debug-experiment)
-for architecture, defaults, construction/reduction envelope, evidence and open gates.
-One existing Ruff grammar/shared fallible core serves closed Legacy/Bytes providers;
-the checked entry exposes AST callbacks only after both diagnostic channels and
-provider finish. Debug Source owner/ranges retain bytes and use identity equality,
-not semantic equality or synthesized CPython constants. Later source faults can
-still win over earlier syntax: lazy CPython failure priority is unresolved, never
-an exception certificate. This is not full admission, F3 or full G4 acceptance.
-User-reported HEAD `805edb0` contains committed F1 and was initially clean; F2 is
-uncommitted and unstaged, no commit/push. This closeout authorizes no further
-implementation. Production helper/Python >=3.12 and frontend-5/facts-7 names remain;
-fingerprints change. Native immutable profiles remain proposed, not approved.
+**Current: all bounded private F3a implementation/delivery gates PASS.**
+The user authorized this bounded integration via “continue” after an explicit
+proposal. User-reported HEAD `1ef1f0c` contains complete F2 and was initially clean;
+F3a is uncommitted and unstaged, no commit/push. See the central
+[F3a ledger](python-analysis.md#f3a-captured-byte-fact-integration) for architecture,
+interfaces, data flow, exclusions, examples and completed delivery receipts. F2's
+consumer/cache passes are historical only, not current F3a validation.
+
+One checked F2 byte parse now feeds the shared fact Driver/projection/sink under
+private `python-ruff-private-byte-facts-1`, without whole-source UTF-8 validation,
+transcoding, source repair or reparse. Bounds remain unchanged; construction-limit
+exclusions are explicit non-parity. Rust/API/oracle, Clippy/Python and source/vendor
+checks passed, including all 364 normal comparisons; the ledger records exact byte
+classifications, not 364 byte parity matches. Final domain-membership pin validation
+passed; independent consumer after docs freeze and guarded cleanup **passed**.
+Target is absent, no Cargo afterward; the ledger's tested snapshot does not attest
+later receipt prose. This closes bounded F3a delivery, not full F3/G4, and grants
+no future implementation authorization.
+Normal frontend-5/facts-7 names and production helper/Python >=3.12 remain;
+fingerprints change. CPython compatibility remains Pending. Debug owner/range
+identity is not semantic equality or synthesized constants; lazy failure priority,
+full G4 and approved version/product policy remain open. No public schema/API,
+saved-evidence or default change/cutover is approved. Immutable profiles remain
+proposed, not approved.
 
 **Historical F1 handoff:** bounded private F1 lexer goal COMPLETE / PROVED by compiled tests;
 all F1 delivery gates PASS, including checkout consumer and guarded cache cleanup.
@@ -37,7 +44,7 @@ replacement, source repair, tool installation, public profile/API changes,
 automatic fallback, a default switch or a narrower production contract. Existing
 frontend-5/facts-7 policies are preserved. Production remains
 `python-static-8-generic-facts` with the explicitly selected Python >=3.12 helper.
-F1 and bounded private F2 parser/source/debug changes are authorized;
+F1, bounded private F2 parser/source/debug and private F3a fact changes are authorized;
 version/product policy still requires separate approval. The historical
 actual pre-F1 HEAD is `fdf4e58` (facts-6 commit, initially clean/ahead one), not the
 `523cd7b` checkpoint. F1 changes were then uncommitted and unstaged; they are now
@@ -241,9 +248,11 @@ string lexer loses lexical state and is not a byte-input solution.
 
 ## Proposed Byte Architecture
 
-The full replacement pipeline below remains a design, not integrated byte facts.
-F1 implements the shared lexical seam and F2 implements the private checked Module
-parser/source/debug seam. Encoding, compatibility and fact integration remain open:
+The full replacement pipeline below remains a design, not production approval.
+F1 implements the shared lexical seam, F2 the private checked Module parser/source/
+debug seam, and F3a integrates private raw-UTF-8 byte facts. Broader encoding,
+compatibility and delivery acceptance remain open; see the F3a ledger for its
+narrower implemented lane and pending validation:
 
 ```text
 captured immutable bytes + original digest
@@ -375,8 +384,8 @@ implications, not locally tested additional interpreter profiles:
 | --- | --- |
 | F0: this feasibility investigation | Source-driven design and reproducible reference observations; distinguish conditional feasibility from a native demonstration |
 | F1: separately bounded lexer experiment | Original malformed comment bytes retained; contextual tokenization, spans, lookahead/rewind/re-lex and ordinary UTF-8 differential preservation demonstrated without a reconstructed source string |
-| F2: authorized parser/source/debug experiment | **All bounded implementation/delivery gates PASS**, including 35 F2 tests, preservation/oracles, schema-3 provenance and current consumer/cleanup; exact receipts in the F2 ledger. Byte-span/debug identity is explicit, no recovery-AST callback. Full CPython semantics/admission, debug constants, type comments/codecs, lazy failure priority and resource equivalence remain open; no further implementation authorized |
-| F3: captured-byte fact integration | Existing 364 positives plus byte witnesses compare full facts/IDs/diagnostics/raw replay; original hashes, decoded offsets, rollback, redaction, budgets and cancellation preserved |
+| F2: historical completed parser/source/debug experiment | Bounded implementation/delivery passed at F2; exact historical receipts in the F2 ledger, not F3a consumer/cache validation. Byte-span/debug identity is explicit, no recovery-AST callback. Full CPython semantics/admission, debug constants, type comments/codecs, lazy failure priority and resource equivalence remain open |
+| F3: captured-byte fact integration | **All bounded private F3a implementation/delivery gates PASS**, including final domain pins, independent consumer and guarded cleanup. All 364 normal comparisons passed; the central ledger separates byte matches from codec/resource exclusions. Original hashes, distinct decoded/raw offsets, rollback, redaction, unchanged bounds and sticky cancellation remain. Not full F3/G4, public/version approval or future implementation authorization |
 | V: approved version contract | Explicit reference membership, patch policy, selection, maintenance and identity semantics; unknown-version behavior approved, no silent production narrowing |
 | G4 replacement acceptance | Remaining codecs, grammar, contextual errors, failures and resource obligations have no unexplained differences in the approved contract |
 | G5/G6 | Separately approved public integration, old-save/capability handling, platform/usefulness/resource acceptance and explicit cutover |

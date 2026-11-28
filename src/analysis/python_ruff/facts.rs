@@ -9,7 +9,6 @@ use projection::{
     Projection, ScopeId,
 };
 use ruff_python_ast::{self as ast, Expr, Mod, Stmt};
-use ruff_python_parser::Parsed;
 use ruff_text_size::{Ranged, TextRange};
 
 const FACT_POLICY: &str = "python-ruff-private-facts-7";
@@ -17,6 +16,78 @@ const OUTPUT: usize = 32 * 1024 * 1024;
 
 #[path = "metadata.rs"]
 mod metadata;
+
+#[path = "byte_facts.rs"]
+mod byte_facts;
+
+#[cfg(test)]
+#[path = "byte_fact_tests.rs"]
+mod byte_fact_tests;
+
+pub(in crate::analysis) use byte_facts::ByteOutcome;
+
+/// Separate private experiment identity; never substitutes for the text policy.
+pub(in crate::analysis) struct ByteCandidateReport<'a> {
+    pub(in crate::analysis) report: CandidateReport<'a>,
+    pub(in crate::analysis) outcomes: Vec<ByteOutcome>,
+}
+
+struct ValidatedString<'a> {
+    range: TextRange,
+    text: &'a str,
+}
+
+#[derive(Clone, Copy)]
+enum FactSource<'a> {
+    Text(&'a str),
+    Bytes {
+        bytes: &'a [u8],
+        strings: &'a [ValidatedString<'a>],
+    },
+}
+
+impl<'a> FactSource<'a> {
+    fn bytes(self) -> &'a [u8] {
+        match self {
+            Self::Text(text) => text.as_bytes(),
+            Self::Bytes { bytes, .. } => bytes,
+        }
+    }
+
+    /// Byte metadata can access only spellings checked/metered by the accepted
+    /// parser owner before its AST callback. No whole-source text is invented.
+    fn text(self, range: TextRange) -> Result<&'a str> {
+        let start = range.start().to_usize();
+        let end = range.end().to_usize();
+        let text = match self {
+            Self::Text(text) => text.get(start..end),
+            Self::Bytes { strings, .. } => {
+                let index = strings.partition_point(|part| part.range.start() <= range.start());
+                index.checked_sub(1).and_then(|index| {
+                    let part = &strings[index];
+                    let base = part.range.start().to_usize();
+                    part.text
+                        .get(start.checked_sub(base)?..end.checked_sub(base)?)
+                })
+            }
+        };
+        text.ok_or(Error::Unsupported("literal source view"))
+    }
+}
+
+type ByteFactConsumer<'a> = dyn FnMut(
+        usize,
+        FactSource<'_>,
+        &ast::ModModule,
+        &ruff_python_parser::Tokens,
+        &mut dyn FnMut() -> bool,
+    ) + 'a;
+
+#[derive(Clone, Copy)]
+enum FactLane {
+    Text,
+    Bytes,
+}
 
 #[derive(Debug, Serialize)]
 pub(in crate::analysis) struct CandidateReport<'a> {
@@ -113,6 +184,7 @@ fn fact_identity<F: FnMut(Checkpoint) -> bool>(cancel: &mut Cancellation<F>) -> 
             include_bytes!("../python_ruff.rs").as_slice(),
         ),
         ("facts.rs", include_bytes!("facts.rs").as_slice()),
+        ("byte_facts.rs", include_bytes!("byte_facts.rs").as_slice()),
         (
             "expressions.rs",
             include_bytes!("expressions.rs").as_slice(),
@@ -166,6 +238,23 @@ pub(in crate::analysis) fn extract_fact_candidates(
     extract_with(sources, |_| start.elapsed() >= crate::analysis::DEADLINE)
 }
 
+pub(in crate::analysis) fn extract_byte_fact_candidates(
+    sources: &[Source],
+) -> std::result::Result<ByteCandidateReport<'_>, FrontEndError> {
+    let start = Instant::now();
+    let mut outcomes = Vec::new();
+    let report = extract_lane(
+        sources,
+        |_| start.elapsed() >= crate::analysis::DEADLINE,
+        SemanticLimits::default(),
+        FactLane::Bytes,
+        &mut outcomes,
+        #[cfg(test)]
+        None,
+    )?;
+    Ok(ByteCandidateReport { report, outcomes })
+}
+
 fn extract_with<F: FnMut(Checkpoint) -> bool>(
     sources: &[Source],
     check: F,
@@ -201,6 +290,25 @@ fn extract_impl<'a, F: FnMut(Checkpoint) -> bool>(
     sources: &'a [Source],
     check: F,
     semantic_limits: SemanticLimits,
+    #[cfg(test)] trace: Option<&mut Vec<Observation>>,
+) -> std::result::Result<CandidateReport<'a>, FrontEndError> {
+    extract_lane(
+        sources,
+        check,
+        semantic_limits,
+        FactLane::Text,
+        &mut Vec::new(),
+        #[cfg(test)]
+        trace,
+    )
+}
+
+fn extract_lane<'a, F: FnMut(Checkpoint) -> bool>(
+    sources: &'a [Source],
+    check: F,
+    semantic_limits: SemanticLimits,
+    lane: FactLane,
+    outcomes: &mut Vec<ByteOutcome>,
     #[cfg(test)] mut trace: Option<&mut Vec<Observation>>,
 ) -> std::result::Result<CandidateReport<'a>, FrontEndError> {
     let mut cancel = Cancellation {
@@ -232,6 +340,15 @@ fn extract_impl<'a, F: FnMut(Checkpoint) -> bool>(
         facts: Vec::new(),
         diagnostics: Vec::new(),
     };
+    if matches!(lane, FactLane::Bytes) {
+        report.identity.policy = "python-ruff-private-byte-facts-1";
+        report.identity.sha256.clear();
+        report.identity.sha256 = digest(
+            &serde_json::to_vec(&report.identity).expect("fixed identity"),
+            &mut cancel,
+            Checkpoint::Identity,
+        );
+    }
     let mut sink = shared::FactSink::new(shared::SinkLimits {
         working: semantic_limits.working,
         ..shared::SinkLimits::default()
@@ -251,82 +368,106 @@ fn extract_impl<'a, F: FnMut(Checkpoint) -> bool>(
         sink.module_baseline(&source.path, &source.module, &mut || false)
             .map_err(|_| FrontEndError::ReportLimit)?;
     }
-    let parser = run_context(
-        sources,
-        Limits::default(),
-        &mut cancel,
-        &mut |index, text, parsed, check| {
-            let mark = sink.mark();
-            let initial = sink.working();
+    let mut consume = |index: usize,
+                       source_text: FactSource<'_>,
+                       module: &ast::ModModule,
+                       tokens: &ruff_python_parser::Tokens,
+                       check: &mut dyn FnMut() -> bool| {
+        let mark = sink.mark();
+        let initial = sink.working();
+        #[cfg(test)]
+        let trace_mark = trace.as_ref().map_or(0, |t| t.len());
+        let mut driver = Driver {
+            source: &sources[index],
+            source_text,
+            sink: &mut sink,
+            check,
+            arena: Vec::new(),
+            lines: Vec::new(),
+            pairs: Vec::new(),
+            keywords: Vec::new(),
+            comments: None,
+            projection: Projection::default(),
+            scope: ScopeId::default(),
+            owners: Vec::new(),
+            nodes: 0,
+            edges: 0,
+            persistent_work: 0,
+            owner_slots: 0,
+            arena_work: 0,
+            limits: semantic_limits,
             #[cfg(test)]
-            let trace_mark = trace.as_ref().map_or(0, |t| t.len());
-            let mut driver = Driver {
-                source: &sources[index],
-                source_text: text,
-                sink: &mut sink,
-                check,
-                arena: Vec::new(),
-                lines: Vec::new(),
-                pairs: Vec::new(),
-                keywords: Vec::new(),
-                comments: None,
-                projection: Projection::default(),
-                scope: ScopeId::default(),
-                owners: Vec::new(),
-                nodes: 0,
-                edges: 0,
-                persistent_work: 0,
-                owner_slots: 0,
-                arena_work: 0,
-                limits: semantic_limits,
+            trace: trace.as_deref_mut(),
+        };
+        let result = driver.consume_module(source_text.bytes(), module, tokens);
+        let file = &mut report.files[index];
+        file.nodes = driver.nodes;
+        file.edges = driver.edges;
+        if let Some(plan) = &driver.comments {
+            file.compatibility_nodes = plan.compatibility_nodes;
+            file.compatibility_work = plan.normalization_work;
+            file.compatibility_depth = plan.max_depth;
+            file.type_ignores = plan.ignore_count;
+        }
+        // Drop all owned normalization/scheduling/scope data before refunding.
+        drop(driver);
+        match result {
+            Ok(()) => {
+                let pending = sink.working() - initial;
+                sink.release(pending);
                 #[cfg(test)]
-                trace: trace.as_deref_mut(),
-            };
-            let result = driver.consume(text, parsed);
-            let file = &mut report.files[index];
-            file.nodes = driver.nodes;
-            file.edges = driver.edges;
-            if let Some(plan) = &driver.comments {
-                file.compatibility_nodes = plan.compatibility_nodes;
-                file.compatibility_work = plan.normalization_work;
-                file.compatibility_depth = plan.max_depth;
-                file.type_ignores = plan.ignore_count;
+                assert_eq!(sink.working(), initial);
+                file.status = FactStatus::AcceptedFacts;
+                file.reason = None;
             }
-            // Drop all owned normalization/scheduling/scope data before refunding.
-            drop(driver);
-            match result {
-                Ok(()) => {
-                    let pending = sink.working() - initial;
-                    sink.release(pending);
-                    #[cfg(test)]
-                    assert_eq!(sink.working(), initial);
-                    file.status = FactStatus::AcceptedFacts;
-                    file.reason = None;
+            Err(error) => {
+                sink.rollback(mark);
+                #[cfg(test)]
+                if let Some(trace) = &mut trace {
+                    trace.truncate(trace_mark);
                 }
-                Err(error) => {
-                    sink.rollback(mark);
-                    #[cfg(test)]
-                    if let Some(trace) = &mut trace {
-                        trace.truncate(trace_mark);
+                (file.status, file.reason) = match error {
+                    Error::Syntax { line, reason } => {
+                        file.failure_line = Some(line);
+                        // Contextual-comment oracles establish placement and
+                        // lines, not every concrete CPython exception class.
+                        // Only the shared inspector supplies certificates.
+                        (FactStatus::SyntaxError, Some(reason))
                     }
-                    (file.status, file.reason) = match error {
-                        Error::Syntax { line, reason } => {
-                            file.failure_line = Some(line);
-                            // Contextual-comment oracles establish placement and
-                            // lines, not every concrete CPython exception class.
-                            // Only the shared inspector supplies certificates.
-                            (FactStatus::SyntaxError, Some(reason))
-                        }
-                        Error::Unsupported(reason) => (FactStatus::UnsupportedSyntax, Some(reason)),
-                        Error::Cancelled | Error::Sink(shared::Failure::Cancelled) => {
-                            (FactStatus::ResourceLimit, Some("deadline"))
-                        }
-                        _ => (FactStatus::ResourceLimit, Some("semantic resource limit")),
-                    };
-                }
+                    Error::Unsupported(reason) => (FactStatus::UnsupportedSyntax, Some(reason)),
+                    Error::Cancelled | Error::Sink(shared::Failure::Cancelled) => {
+                        (FactStatus::ResourceLimit, Some("deadline"))
+                    }
+                    _ => (FactStatus::ResourceLimit, Some("semantic resource limit")),
+                };
             }
-        },
-    )?;
+        }
+    };
+    let parser = match lane {
+        FactLane::Text => run_context(
+            sources,
+            Limits::default(),
+            &mut cancel,
+            &mut |index, text, parsed, check| {
+                if let Mod::Module(module) = parsed.syntax() {
+                    consume(
+                        index,
+                        FactSource::Text(text),
+                        module,
+                        parsed.tokens(),
+                        check,
+                    );
+                }
+            },
+        )?,
+        FactLane::Bytes => byte_facts::run_context(
+            sources,
+            Limits::default(),
+            &mut cancel,
+            &mut consume,
+            outcomes,
+        )?,
+    };
     for (file, parsed) in report.files.iter_mut().zip(parser.files) {
         file.sha256 = parsed.sha256;
         if parsed.admission == Admission::InvalidSource {
@@ -420,7 +561,7 @@ pub(super) enum Observation {
 
 pub(super) struct Driver<'a> {
     source: &'a Source,
-    source_text: &'a str,
+    source_text: FactSource<'a>,
     pub(super) sink: &'a mut shared::FactSink,
     pub(super) check: &'a mut dyn FnMut() -> bool,
     pub(super) arena: Vec<Node>,
@@ -538,8 +679,13 @@ impl Driver<'_> {
         }
     }
 
-    fn consume(&mut self, text: &str, parsed: &Parsed<Mod>) -> Result<()> {
-        self.index(text, parsed)?;
+    fn consume_module(
+        &mut self,
+        bytes: &[u8],
+        module: &ast::ModModule,
+        tokens: &ruff_python_parser::Tokens,
+    ) -> Result<()> {
+        self.index(bytes, tokens)?;
         let plan = {
             let sink = &mut self.sink;
             let check = std::cell::RefCell::new(&mut *self.check);
@@ -551,20 +697,17 @@ impl Driver<'_> {
                     })
             };
             let mut cancelled = || (check.borrow_mut())();
-            if self.limits.nodes == 200_000 && self.limits.depth == 256 {
-                type_comments::analyze(text, parsed, &mut budget, &mut cancelled)
-            } else {
-                type_comments::analyze_with_limits(
-                    text,
-                    parsed,
-                    &mut budget,
-                    &mut cancelled,
-                    type_comments::Limits {
-                        nodes: self.limits.nodes,
-                        depth: self.limits.depth,
-                    },
-                )
-            }
+            type_comments::analyze_module_with_limits(
+                bytes,
+                module,
+                tokens,
+                &mut budget,
+                &mut cancelled,
+                type_comments::Limits {
+                    nodes: self.limits.nodes,
+                    depth: self.limits.depth,
+                },
+            )
         }
         .map_err(|error| match error {
             type_comments::Error::Syntax { line } => Error::Syntax {
@@ -582,18 +725,14 @@ impl Driver<'_> {
             self.check,
             Some(&mut self.persistent_work),
         ))?;
-        let Mod::Module(module) = parsed.syntax() else {
-            return Err(Error::Unsupported("module mode"));
-        };
         self.node(0)?;
         self.statements(&module.body, 0)
     }
 
-    fn index(&mut self, text: &str, parsed: &Parsed<Mod>) -> Result<()> {
-        self.charge((text.len() + 1) * std::mem::size_of::<usize>())?;
-        self.lines = Vec::with_capacity(text.len() + 1);
+    fn index(&mut self, bytes: &[u8], tokens: &ruff_python_parser::Tokens) -> Result<()> {
+        self.charge((bytes.len() + 1) * std::mem::size_of::<usize>())?;
+        self.lines = Vec::with_capacity(bytes.len() + 1);
         self.lines.push(0);
-        let bytes = text.as_bytes();
         let mut i = 0;
         while i < bytes.len() {
             self.tick()?;
@@ -609,7 +748,7 @@ impl Driver<'_> {
         let mut parent = None;
         let mut temporary = 0usize;
         let mut stack_slots = 0;
-        for token in parsed.tokens() {
+        for token in tokens {
             self.tick()?;
             let range = token.range();
             match token.kind() {

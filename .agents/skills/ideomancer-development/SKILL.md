@@ -95,14 +95,16 @@ guidance for coding agents, not an interpretation prompt for analyzed applicatio
 - Vendored Ruff changes: run `python3.12 -B scripts/check_ruff_vendor.py`; review
   immutable pin, checker anchors, provenance, patch reversal, manifests and notices
   together. Never use `cargo fmt --all`: recursive formatting touches path dependencies.
-    F2 schema 3 passed: 89 vendor files / 67 Rust sources / 2,219,373 bytes
+    Historical F2 schema 3 passed: 89 vendor files / 67 Rust sources / 2,219,373 bytes
     (65 upstream + two authored), 14 modified / 51 unchanged upstream;
-    264 source paths verified before docs freeze; 84 vendor tests passed after
+    264 source paths verified at F2; 84 vendor tests passed after
     the final fix. The third nine-file parser/source/debug
     patch layers after the old policy patch; old two patches and pristine 65-source
     map remain unchanged. Review ordered reversals and both authored hashes, not
     three disjoint patches. Exact hashes/results are in the F2 ledger;
-    completed current consumer/cleanup receipts are recorded there too.
+    historical F2 consumer/cleanup receipts are recorded there too. F3a leaves
+    vendor bytes unchanged; its 266-path inventory passed the checker.
+    Never inherit F2 source/consumer/cache PASS as F3a validation.
     Historical F1 schema 2 tracked two disjoint four-file patches: unchanged AST-only policy
    (`options.rs`, `expression.rs`, `pattern.rs`, `statement.rs`) and F1 lexer
    (`lexer.rs`, `lexer/{cursor,indentation,interpolated_string}.rs`). Eight modified
@@ -146,53 +148,51 @@ evidence, CLI and default are unchanged. The same five local crates, dependency
 pins and Git delivery with `publish = false` remain; F1 extends the reviewed
 vendor patch closure. No public migration is approved.
 
-**Current direction: authorized private F2 byte Module parser/source/debug
-experiment: all bounded implementation/delivery gates PASS.** Coordinator
-reports 743 library passes / 191 ignored (including 35 F2 + 23 F1), 18 adapter +
-8 engine passes, 185 explicit reference/native/Ruff gates passed (including known
-limits, not all parity matches), plus formatting/Clippy, scripts and schema-3/source
-checks passed. Ruff's 166 total passes are 149 ordinary + 17 opt-ins across commands,
-not one filter invocation. Current independent consumer and guarded cleanup passed;
-target absent, follow-up `already_clean`, no Cargo afterward. No owned scratch/debug/
-test artifacts remain; `.ideomancer/` JS/global caches/installed binaries untouched.
-Use the current F2 receipts, not inherited F1 consumer/cache PASS. The tested source
-snapshot does not attest final receipt prose. No Cargo/build checks follow this
-docs-only closeout; no further implementation is authorized. User-reported HEAD
-`805edb0` is user-committed F1, initially clean; current F2 is uncommitted and
-unstaged, with no commit or push. See the primary
-[F2 ledger](../../../../docs/python-analysis.md#f2-byte-module-parser-source-and-debug-experiment)
-and `docs/python-native-replacement-feasibility.md`.
+**Current direction: all bounded private F3a implementation/delivery gates PASS.**
+The user authorized this slice via
+“continue” after an explicit proposal. User-reported HEAD `1ef1f0c` contains complete
+F2, initially clean; F3a is uncommitted and unstaged, no commit/push. Use the central
+[F3a ledger](../../../../docs/python-analysis.md#f3a-captured-byte-fact-integration)
+for Architecture/API/Data Flow/Edge Cases/Examples/related paths and completed
+Rust/API/oracle, Clippy/Python and source/vendor receipts. Final domain-pin validation
+passed; independent consumer and guarded cleanup passed. F2 consumer/cache results
+are historical only, never F3a passes.
 
-One existing Ruff grammar/shared fallible `CoreLexer` serves closed Legacy/Bytes
-providers; all effectful grammar propagates typed errors. Eight legacy text entries
-remain. Experimental `parse_module_checked` allows AST callbacks only after both
-diagnostic channels and provider finish; errors expose no AST. Source-backed
-`DebugText::Source` owner plus leading/expression/trailing byte ranges preserve
-opaque comments; legacy Text strings retain content. Source equality is owner/range
-identity, not semantic equality or CPython debug-constant synthesis. Checked text
-views are metered zero-copy; invalid UTF-8 is local, control failures latch.
-Checkpoints restore token prefix/lexical state, not cumulative quotas; re-lex is live.
-Raw BOM offsets remain, first-line columns subtract three; CRLF is one newline.
+- Private root `extract_byte_fact_candidates` returns a `ByteCandidateReport`
+  (`report`, `outcomes`) with policy `python-ruff-private-byte-facts-1`.
+  `ByteOutcome::Parsed` is parser acceptance, not `AcceptedFacts` or CPython parity.
+- Keep one checked F2 byte parse and unchanged defaults; no lexical preflight,
+  whole-source UTF-8 validation/transcoding/repair, AST clone/reparse or vendor API
+  change. Shared source selection excludes non-UTF-8; ordinary comments stay bytes.
+  Malformed type/ignore payloads are explicitly unsupported, not certified failures.
+- Only string-token spellings are staged through the accepted owner's metered
+  views before the AST callback; metadata cannot acquire arbitrary source text.
+  Shared Driver/projection/sink preserve IDs/order/ownership/rollback/redaction.
+  Cancellation stays sticky through finalization; `DebugText::Source` identity is not
+  semantic equality and debug constants are not computed.
+- All **364 normal positive comparisons passed**; preserve them separately
+  from byte groups **117 / 71 / 44 / 112 / 20**. The ledger records exact matched,
+  resource, codec and other outcomes, not one all-parity count. Never raise/waive
+  F2's **256 construction-entry** bound: wide-positive resource rejection is
+  explicit non-parity. Direct original-byte trusted CPython oracles are required;
+  repaired/shared-implementation controls alone do not prove byte facts.
+- Exact byte-domain membership is pinned inline to detect silent resource-domain
+  shrink; the final focused ignored-facts rerun and formatting/Clippy **passed**,
+  without increasing unique gate totals. Main's independent-consumer snapshot
+  and guarded cleanup receipts are in the central ledger. The snapshot does not
+  attest later receipt prose. Target absent, follow-up `already_clean`, no Cargo
+  afterward; no owned artifacts retained. Do not rebuild after cleanup.
+  This docs-only task runs no commands/scripts/builds/Cargo and
+  performs no cleanup. Final Python/Git checks are read-only; this closeout grants
+  no future implementation authorization.
 
-Lexer defaults: 2 MiB input / 32M work / 32 MiB conservative cumulative allocation /
-200000 tokens / depth 256 / 1024 checkpoints / 10000 diagnostics. Parser defaults:
-200000 work / depth 256 / 4096 diagnostics / 32 MiB cumulative charges. Depth bounds
-both active grammar/reduction depth and nonrefundable construction entries per
-complete top-level statement; nested suites/speculation share the quota. The
-derived node-bearing layer envelope is `4 * depth + 1` (1025 default), not measured
-AST height 256, a hard stack/RSS bound or deadline. Recovery pattern conversion is
-precharged before folding; never expose a recovery AST callback.
-
-Later source faults can still win over earlier syntax: explicit unresolved control,
-never a fabricated exception certificate. Scope excludes codecs/type-comment payload
-semantics, lazy CPython priority, F3/facts dispatch, full G4, version policy and
-cutover. Production helper/Python >=3.12 and frontend-5/facts-7 names remain;
-fingerprints change. Immutable profiles remain proposed, not approved; no fallback,
-Python probe, fake version or old-save upgrade. Tests are finite bounded evidence,
-not CPython parity.
+Production helper/Python >=3.12, public schema/API, saved evidence and default
+remain unchanged. Normal frontend-5/facts-7 names remain; fingerprints change.
+CPython compatibility stays Pending; full F3/G4, version/product approval and cutover
+remain open. No fallback, Python probe, fake version or old-save upgrade is approved.
 
 **Historical F1 handoff receipts follow.** Counts, hashes, authorization, HEAD and
-cache statements describe F1 only, superseded by current bounded F2 authorization.
+cache statements describe F1 only, not current F3a validation or authorization.
 
 **Historical direction:** contract-preserving full replacement selected; bounded
 private F1 lexer goal **COMPLETE / PROVED by compiled tests; all delivery gates PASS**,

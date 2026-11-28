@@ -172,15 +172,24 @@ impl Driver<'_> {
         }
         let reserved = literals::retention_work(limit);
         self.charge(reserved)?;
-        // The validated callback supplies exactly source.bytes with its BOM
-        // stripped. Reuse that UTF-8 view, not another scan or decoded AST value.
+        // Text offsets address the decoder view; byte offsets address the exact
+        // original capture, including BOM. Byte strings were checked/metered
+        // before the AST callback; opaque comments never need a text view.
         let source = self.source_text;
         let Shape::Text(parts) = &self.arena[id].shape else {
             unreachable!()
         };
+        for part in parts {
+            if (self.check)() {
+                return Err(Error::Cancelled);
+            }
+            source.text(part.range)?;
+        }
         let retained = literals::retain_text(
             parts.iter().map(|part| literals::Part {
-                content: &source[part.range.start().to_usize()..part.range.end().to_usize()],
+                content: source
+                    .text(part.range)
+                    .expect("validated immutable literal range"),
                 raw: part.raw,
             }),
             limit,
@@ -463,9 +472,17 @@ impl Driver<'_> {
         let Shape::Text(parts) = &self.arena[id].shape else {
             unreachable!()
         };
+        for part in parts {
+            if (self.check)() {
+                return Err(Error::Cancelled);
+            }
+            source.text(part.range)?;
+        }
         let result = literals::method(literals::decode(
             parts.iter().map(|part| literals::Part {
-                content: &source[part.range.start().to_usize()..part.range.end().to_usize()],
+                content: source
+                    .text(part.range)
+                    .expect("validated immutable literal range"),
                 raw: part.raw,
             }),
             &mut *self.check,

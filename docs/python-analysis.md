@@ -22,14 +22,15 @@ or Flask support and does not remove basic non-web Python callable discovery,
 local service/network candidate views, or the existing Python agent path.
 
 Production remains `python-static-8-generic-facts` with the trusted Python >=3.12
-helper. The user selected contract-preserving full replacement and authorized the
-bounded private F2 parser/source/debug experiment following F1. Start with the
-[current F2 ledger](#f2-byte-module-parser-source-and-debug-experiment) and
+helper. The user selected contract-preserving full replacement and authorized
+bounded private F3a captured-byte fact integration via “continue” after an explicit
+proposal. Start with the
+[current F3a ledger](#f3a-captured-byte-fact-integration) and
 [feasibility ADR](python-native-replacement-feasibility.md); the
 [frontend-5/facts-7 visitor contract](#ruff-visitor-contract-batch-frontend-5--private-facts-7)
 and private G2/G3 closure are unchanged. Earlier results/cleanup receipts remain
 historical, not current-tree validation or cache status. User-reported HEAD is
-`805edb0`: F1 was user-committed and initially clean; F2 is uncommitted. Earlier
+`1ef1f0c`: F2 is complete and committed, initially clean; F3a is uncommitted. Earlier
 HEAD/uncommitted-work statements below describe their checkpoints.
 
 Explicit `network`/`services` views stay local for one API or callable workflow
@@ -86,7 +87,7 @@ The finite completion ledger is:
 | P1-G1 | Generic expression and ordinary-body coverage: containers/operators/indexing, call-free defaults, conditions, loops and context managers; hidden calls/warnings, owner restoration, spans and one counted walk remain exact. | Implemented and locally validated for the bounded G1 subset below |
 | P1-G2 | Close the generic visitor inventory: remaining statements, targets/writes/imports, arbitrary callees/splats, comprehensions/lambdas/generators, await/yield/walrus, all headers and literal/identifier forms. Every target-version node has a normalization/traversal rule and cross-family oracle cases. | **PRIVATE IMPLEMENTATION COMPLETE/CLOSED** for current admitted Python 3.12 Module-AST lane: closed class/field inventory + full-output/raw-replay coverage, 364 matching positives and completed preservation checkpoint; not complete Python compatibility or G4–G6/cutover |
 | P1-G3 | Preserve every existing discovery/framework side output: decorators, CLI/job/API entry facts, route diagnostics and FastAPI host/prefix/include/mutation metadata, including aliases and literal-retention limits. | **PRIVATE IMPLEMENTATION COMPLETE/CLOSED** for the same admitted lane, including metadata/diagnostic/cap coverage and completed preservation: 108 Ruff (17 opt-in), 685 library (191 ignored), 18 adapter / 8 engine, 165 reference + 3 native; no new framework semantics or G4–G6/cutover approval |
-| P1-G4 | Close grammar/version/encoding/failure differences: original-byte digests, decoding/cookies, physical layout and exact observable parse diagnostics. No unexplained valid-file rejection or invalid-file acceptance in the approved compatibility suite. | Open: all bounded private F2 implementation/delivery gates PASS, including consumer and guarded cleanup below. CPython semantics/admission, debug constants, lazy failure priority, codecs/type comments, resource equivalence, F3 and approved version policy remain open; production helper retained |
+| P1-G4 | Close grammar/version/encoding/failure differences: original-byte digests, decoding/cookies, physical layout and exact observable parse diagnostics. No unexplained valid-file rejection or invalid-file acceptance in the approved compatibility suite. | Open: all bounded private F3a implementation/delivery gates PASS, including independent consumer and guarded cleanup; exact byte classifications and receipts are in the F3a ledger. F2 receipts historical only; full F3/G4 admission/failure/resource/version equivalence and production migration remain open |
 | P1-G5 | Integrate distinct native identity, evidence/snapshots, CLI/library dispatch, workflow revalidation and capabilities. Preserve old-save reading/rendering; rediscovery invalidates stale claims. Native operation must not probe Python. | Pending; public migration design required |
 | P1-G6 | Existing-engine usefulness and operational/cutover acceptance: class/callable/API/network/services views, adapter proofs, saved-source reuse, supported platforms/toolchain/package/resource checks, then explicit replacement approval. | Pending |
 
@@ -1924,13 +1925,210 @@ rebuilding; the pre-documentation receipt does not self-attest these edited byte
 - `scripts/{generate,check,test}_python_codecs312.py`: offline isolated reproduction and profile gates
 - [Development workflow](development-workflow.md), [release boundary](releasing.md), [third-party notices](third-party-notices.md)
 
-#### F2 byte Module parser, source and debug experiment
+#### F3a captured-byte fact integration
 
 ##### Overview
 
-**All F2 delivery gates PASS for the bounded private implementation.**
-User-reported HEAD `805edb0` contains committed F1 and was initially clean; current
-F2 work is uncommitted and unstaged; no commit or push was made. F2 extends the byte seam into the existing Ruff Module
+**Current: all bounded private F3a implementation/delivery gates PASS.**
+Final domain-membership pin validation passed. The user authorized captured-byte fact integration
+via “continue” after the explicit bounded proposal. User-reported HEAD `1ef1f0c`
+contains complete F2 and was initially clean; F3a is uncommitted and unstaged. No commit or push
+is part of this documentation update. F2's consumer/cache receipts below are
+**historical only**, not F3a validation or current cache status.
+
+Production `python-static-8-generic-facts`, the selected Python >=3.12 helper,
+public API/schema, saved evidence and defaults remain unchanged. Normal syntax
+frontend-5 and facts-7 policy names stay fixed; implementation fingerprints change.
+The separate byte policy is `python-ruff-private-byte-facts-1`. Reports still mark
+CPython compatibility **Pending**; this is neither full G4 nor version-policy,
+production or cutover approval.
+
+##### Architecture
+
+`facts.rs` owns a child `byte_facts.rs` pipeline using the existing F2 checked
+Module parser and the same semantic `Driver`, projection and transactional sink
+as normal text facts. There is no lexical preflight, AST clone, reparse, second
+grammar or vendor API change. F2 parser/lexer defaults remain unchanged. Vendor
+closure remains **89 files / 67 Rust sources / 2,219,373 bytes**; F3a source closure
+is **266 paths**, adding `byte_facts.rs` and `byte_fact_tests.rs`; main's source and
+vendor checks passed. Scripts, vendor and data are unchanged against `1ef1f0c`.
+
+##### API / Interfaces
+
+- Private root `python_ruff::extract_byte_fact_candidates(sources: &[Source])`
+  returns `Result<facts::ByteCandidateReport<'_>, FrontEndError>` with
+  `{ report: CandidateReport, outcomes: Vec<ByteOutcome> }`. This is not an
+  `engine::v1` or CLI selector and never publishes Evidence.
+- `ByteOutcome` distinguishes `NotParsed`, typed `Failed`, parser `Rejected` and
+  `Parsed`. `Parsed` records parser acceptance/statistics, **not** compatibility or
+  fact admission; consult `report.files[*].status` for `AcceptedFacts`.
+- Rejected outcomes retain fixed-size syntax/version diagnostic **counts and
+  statistics**, not parser-owned diagnostic vectors/strings across the batch
+  (P2 review fix). Source/view/control failures stay typed, never Python exception
+  certificates.
+- `FactSource::Bytes` provides original bytes and staged `ValidatedString` views.
+  Metadata can slice only those checked string-token spellings, not arbitrary
+  source text. The table contains zero-copy borrowed references, precharged under
+  the **32 MiB compatibility working cap**.
+
+##### Data Flow
+
+1. Validate captured-source/input bounds and preserve the module baseline. Hash
+   **all original bytes**, including BOM/cookies, even after cancellation.
+2. Reject raw NUL before parsing, without a new exception certificate. Shared
+   `source::raw_utf8_domain` / `select_encoding` apply BOM/cookie selection and the
+   existing codec registry: UTF-8 aliases are classified; non-UTF-8 codecs are
+   excluded, not newly added. This gate does **not** validate whole-source UTF-8,
+   transcode, strip the backing BOM or repair source.
+3. Run one `parse_module_checked` with unchanged F2 default limits. Both parser
+   diagnostic channels and provider finish must succeed before accepted-AST use.
+4. Token-only `failures::inspect_accepted_bytes` shares Unicode-15, decimal-4300
+   and literal/format guards. Ordinary comments remain bytes, not dummy text.
+   Malformed type-comment/ignore payloads reject explicitly as unsupported before
+   facts. The shared attachment pass takes bytes/module/tokens; normal text
+   wrappers use the same pass.
+5. Stage only string-token spellings through the accepted owner's metered
+   `source_text` **before** its immutable AST callback. Borrow the validated AST
+   once and run the shared Driver/projection/sink: full facts, IDs, diagnostics,
+   helper-order replay, ownership, rollback and redaction are retained.
+6. Finalize transactionally. Cancellation is sticky across parser, compatibility,
+   semantic and final checkpoints; final cancellation invalidates prior nonbaseline
+   facts, warnings and test trace. Rejected files retain only their module baseline.
+
+##### Edge Cases
+
+- Text-lane offsets address decoded UTF-8; byte-lane offsets address original raw
+  bytes, including BOM. These coordinate domains must not be interchanged.
+- F2's **256 construction-entry quota per top-level statement** can reject ordinary
+  wide positive fixtures as `ResourceLimit`. That is an explicit **non-parity**
+  outcome, not byte parity; do not raise or waive the bound to pass the corpus.
+  Cooperative quotas/cancellation are not hard RSS, stack or deadline guarantees.
+- `DebugText::Source` equality is owner/range identity, not semantic equality.
+  F3a does not compute synthesized CPython debug constants: existing fact traversal
+  visits expressions only. Malformed ordinary comment admission does not establish
+  malformed type/ignore payload semantics or lazy CPython failure precedence.
+- No new Python exception certificates, codec coverage, public native identity,
+  saved-evidence capabilities, full G4/version approval or production default change
+  are claimed. G2/G3 closure remains limited to the admitted normal Module-AST lane.
+
+##### Example usage
+
+Private synthetic test pattern only (not a public backend):
+
+```rust,ignore
+let sources = [Source {
+    path: "unit.py".into(),
+    module: "unit".into(),
+    bytes: b"# \xff\ncall()\n".to_vec(),
+    hex: "2320ff0a63616c6c28290a".into(),
+}];
+let byte = extract_byte_fact_candidates(&sources)?;
+assert_eq!(byte.report.identity.policy, "python-ruff-private-byte-facts-1");
+assert_eq!(byte.report.files[0].status, FactStatus::AcceptedFacts);
+```
+
+The malformed ordinary comment is passed unchanged. A `Parsed` outcome alone is
+insufficient; inspect fact status. Non-UTF-8 cookie selection and malformed
+type/ignore payloads remain explicit exclusions.
+
+##### Validation receipts — main-owned; bounded delivery PASS
+
+These are main-reported results, not checks run by the docs-only editor. The
+bounded F3a integration is validated, **not full F3/G4 or public/version approval**.
+The independent consumer and guarded cleanup passed as recorded below; its tested
+source snapshot does not attest these later receipt prose bytes or a Git commit.
+Normal-text preservation and byte-corpus outcomes remain separate; resource and
+codec exclusions are not matches.
+
+| Item | Completed F3a receipt |
+| --- | --- |
+| Rust preservation / APIs | **770 library passed / 192 ignored**, including **21 F3a ordinary + six new shared compatibility tests** and preservation of all **35 F2 / 23 F1** tests; **18 adapter + 8 engine passed** |
+| Explicit reference / native / Ruff oracles | **165 + 3 + 18 = 186 passed**, including known-limit assertions, **not all parity matches**. Private Ruff total **194 = 176 ordinary + 18 opt-ins**, across commands, not one invocation |
+| Normal-text preservation | All **364** complete fact/ID/diagnostic/raw-order comparisons **passed** |
+| New original-byte oracle | **63/63 matched** trusted CPython **3.12.11** complete facts/IDs/diagnostics/raw order: seven malformed sequences × nine contexts (standalone, suite, trailing, parentheses, f-string, debug, nested debug, metadata, BOM/CRLF); direct original bytes, no repaired controls |
+| Formatting / Clippy | Package formatting and all-target Clippy **`--no-deps -- -D warnings` passed** |
+| Python scripts | **336 discovered: 323 passed / 13 isolation-required skips**; isolated byte / visitor / codec **23 / 43 / 24 passed**, no skips; combined lanes cover **336 unique tests**, not 336 discovery-lane passes |
+| Reference / data checks | Passed: byte **219 outcomes / 20 debug cases / 53 relationships**; visitor **20 cases / 111 classes / 147 node-bearing fields / 130 observable-input obligations / 17 structural witnesses / 10 ordering obligations**; codecs **70 audited / 62 ASCII-identity tables / 445 names / 326 aliases**, with license checks; Unicode-15 checks including **190,293 name probes** |
+| Source / vendor integrity and review | Checks passed: **266 source paths**, unchanged vendor **89 files / 67 Rust sources / 2,219,373 bytes**. No material P1/P2 findings after fixed-size `Rejected` summaries closed the P2 retention issue |
+| Final inline domain-membership pins | **11 focused ignored-facts tests passed**, covering all five existing groups (364 cases) plus 63 new originals with exact matched/excluded/resource membership pinned against silent resource-domain shrink. Package formatting and all-target Clippy passed again. This rerun adds **no unique gates**; the explicit total remains **186** |
+| Independent checkout consumer | **PASS:** fresh **105-package** consumer lock, one `native_typescript_public_api_offline` test, five contained Ruff crates, `tree_sitter_language` **0.1.5**, source-hash rechecks; F3a receipt, not inherited F2 validation |
+| Guarded final cleanup / retained artifacts | **PASS:** repository matched, **zero blocking processes / zero protected outputs**, normal `debug`/`tmp` only; apply removed **1,387,151,360 estimated allocated bytes (~1.29 GiB)**; target absent, follow-up **`already_clean`**, no Cargo afterward; no owned artifacts retained |
+| Final review / unchanged inputs | Independent review found no material P1/P2 findings after diagnostic-retention fix; Git diff whitespace check passed, privacy-term scan empty. Vendor, scripts, manifests and `Cargo.lock` unchanged against `1ef1f0c` |
+
+Exact existing-corpus byte classifications (indices are local to each group):
+
+| Group size | Complete fact/raw-order matches | Outside raw-UTF-8 codec profile | Typed F2-default `ResourceLimit` |
+| --- | ---: | --- | --- |
+| 117 | 107 | 0 | 10: **18, 36, 37, 40, 79, 80, 81, 82, 84, 110** |
+| 71 | 67 | 4: **57, 58, 59, 70** | 0 |
+| 44 | 44 | 0 | 0 |
+| 112 codec | 0 | **112 (all)** | 0 |
+| 20 visitor | 11 | 0 | 9: **3, 4, 7, 10, 12, 13, 17, 18, 19** |
+| **364 total** | **229** | **116** | **19** |
+
+There are **no unexplained failures** in these classifications. Together with
+the **63** new malformed-comment originals, **292 byte positive comparisons**
+matched complete outputs, **not 364 byte parity matches**. The 19 resource cases
+retain unchanged F2 default quotas; neither they nor the 116 codec exclusions are
+parity. The initial focused run had **20 tests total: 19 passed and one incorrect test expectation**
+of `UnsupportedSyntax` for an invalid escape that the parser rejects as
+`SyntaxError`; the test was corrected, then the rejection-summary test was added,
+giving **21 ordinary tests plus one ignored oracle gate**, all passed. No F3a Cargo stack
+regression occurred; F2's stack-regression record below is historical.
+
+Full F3/G4, version-policy, public integration and cutover acceptance remain open.
+Since the full 770-library run, only test-domain pins changed in Rust; the final
+11-test rerun and formatting/Clippy validated that test-only change, with core
+implementation unchanged. Main then ran the independent consumer after the
+documentation freeze and completed guarded cleanup, without edits during the
+consumer run. These are F3a receipts, not inherited F2 passes.
+
+**Main-reported F3a consumer snapshot:**
+`python3.12 -B scripts/check_checkout_consumer.py --source-dir . --target-dir target --offline`
+passed with the resolution/API/containment/hash results above. Tested SHA-256
+`4b075550b1199e9fa17ae005e56f542d048c05a80039fe0e355ba78cea32e8a6`
+covers **266 paths / 12,082,722 bytes**, explicitly
+`source_snapshot_not_git_commit`. It is **not** an actual Git revision or an
+attestation of these later final-receipt prose bytes. The unique owned consumer
+`TMPDIR` was removed and its cache parent is empty.
+
+Guarded `feature_cache.py` preflight matched this repository with zero blockers
+and protected outputs; `--apply` completed the cache-only removal above. Target
+is absent and follow-up reported `already_clean`. **No Cargo ran after cleanup;
+no Cargo/build/test commands follow this receipt-only update.** No owned artifacts
+were retained; global caches, installed outputs and existing `.ideomancer/` JS
+artifacts were untouched. Main's final Python/Git verification is read-only,
+without rebuilding. HEAD remains user-reported `1ef1f0c`; F3a is uncommitted and
+unstaged, with no commit or push. This bounded closeout **does not authorize
+future implementation** or full F3/G4/version/public integration/cutover decisions.
+
+##### Related files
+
+- `src/analysis/python_ruff.rs`: private root entry and unchanged normal policies.
+- `src/analysis/python_ruff/{facts,byte_facts,byte_fact_tests}.rs`: report types,
+  shared Driver/sink integration, byte admission and synthetic/oracle usages.
+- `src/analysis/python_ruff/{source,failures,type_comments,metadata,literals}.rs`:
+  selection, token guards, attachment, staged views and bounded literal handling.
+- `src/analysis/python_facts.rs`, `src/analysis/python_native/projection.rs`:
+  shared records, IDs, transactional sink and projection.
+- `vendor/ruff/crates/ruff_python_parser/src/byte.rs`: unchanged F2 checked entry;
+  [F2 historical ledger](#f2-byte-module-parser-source-and-debug-experiment),
+  [feasibility ADR](python-native-replacement-feasibility.md),
+  [development workflow](development-workflow.md).
+
+#### F2 byte Module parser, source and debug experiment
+
+**Historical F2 checkpoint in full:** authorization, HEAD/uncommitted observations,
+counts, hashes, consumer and cache statements below describe F2 handoff only.
+F2 is now user-committed at `1ef1f0c`; separately authorized F3a is recorded above.
+F2 receipts neither validate F3a nor attest current cache/consumer status.
+
+##### Overview
+
+**All F2 delivery gates passed for the bounded private implementation at handoff.**
+At that checkpoint, user-reported HEAD `805edb0` contained committed F1 and was
+initially clean; F2 work was uncommitted and unstaged, with no commit or push.
+F2 extends the byte seam into the existing Ruff Module
 grammar, not a second parser or full CPython admission. Production
 `python-static-8-generic-facts`, selected Python >=3.12 helper, public API, saved
 evidence and dispatch are untouched. Frontend-5/facts-7 policy names stay fixed;
@@ -2030,7 +2228,7 @@ failing test passed focused, then the full library rerun passed **743 tests**
 (191 ignored) after the fix. This finite regression result is not a hard
 stack-bound guarantee.
 
-| Main-owned closeout item | Current state |
+| F2 main-owned closeout item | Historical state at F2 handoff |
 | --- | --- |
 | Library / API preservation | **743 library passed / 191 ignored; 18 adapter + 8 engine passed**, after the stack regression fix |
 | Explicit reference / native / Ruff oracles | **165 + 3 + 17 = 185 passed**, including known-limit assertions, **not all parity matches** |
@@ -2063,14 +2261,16 @@ removal recorded above; `target/` is absent and read-only follow-up reported
 `already_clean`. **No Cargo ran after cleanup; no Cargo/build checks follow this
 receipt-only update.** No owned debug/test artifacts or Python/Cargo scratch remain.
 Existing `.ideomancer/` JS artifacts, global caches and installed binaries were
-untouched. These are current F2 receipts, not inherited F1 consumer/cache passes.
+untouched. These were F2 receipts, not inherited F1 consumer/cache passes; they
+do not attest F3a or current cache state.
 
 All delivery gates pass **only for the bounded private implementation**. Full
 CPython semantics/admission, contextual type comments, codecs, synthesized debug
 constants, lazy failure priority, resource equivalence, approved version policy,
-F3, full G4 and public cutover remain open. This closeout **does not authorize
-further implementation**. HEAD remains user-committed F1 `805edb0`; current F2 is
-uncommitted and unstaged, with no commit or push.
+F3, full G4 and public cutover remained open at F2 handoff. That closeout did not
+itself authorize further implementation; the user subsequently authorized F3a
+separately. At F2 handoff HEAD was user-committed F1 `805edb0`, with F2 uncommitted
+and unstaged. F2 is now committed at user-reported `1ef1f0c`.
 
 ##### Example usage
 

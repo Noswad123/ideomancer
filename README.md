@@ -178,25 +178,28 @@ modes/constructors; the AST-only predicate adds class-first and later-sequence
 child admission, not singleton-first admission. The independent
 missing-separator controls pass in both modes/constructors, not by weakening tests.
 
-**Current: authorized private F2 byte Module parser/source/debug experiment.**
-The bounded implementation is validated: 743 library tests passed (191 ignored),
-including 35 F2 tests; preservation/oracles and schema-3 provenance checks passed.
-**All bounded F2 delivery gates PASS**, including current consumer validation and
-guarded cleanup; target absent, no Cargo afterward. One existing Ruff grammar and shared fallible
-lexer serve a closed Legacy/Bytes provider; the checked byte entry permits AST
-callbacks only after both diagnostic channels and provider finish succeed.
-Source-backed debug spans preserve original bytes, not synthesized CPython constants;
-identity equality is not semantic equality. See the primary
-[F2 architecture/evidence/limits ledger](docs/python-analysis.md#f2-byte-module-parser-source-and-debug-experiment).
-This is not full CPython admission, F3/facts integration, full G4 or cutover,
-and does not authorize further implementation.
-Production `python-static-8-generic-facts` and selected Python >=3.12 helper remain
-unchanged; frontend-5/facts-7 names remain, fingerprints change. Immutable native
-profiles remain proposed, not approved. User-reported HEAD `805edb0` contains
-committed F1 (initially clean); current F2 is uncommitted and unstaged, no commit/push.
+**Current: all bounded private F3a implementation/delivery gates PASS.** A separate
+private `extract_byte_fact_candidates` uses one checked F2 byte parse and the shared
+fact Driver/projection/sink, without whole-source UTF-8 validation, transcoding,
+repair or reparsing. Byte policy is `python-ruff-private-byte-facts-1`; normal
+frontend-5/facts-7 names remain, fingerprints change. See the central
+[F3a architecture and receipt ledger](docs/python-analysis.md#f3a-captured-byte-fact-integration)
+for completed Rust/API/oracle, Clippy/Python and source/vendor checks, exact byte
+classifications and resource non-parity. All 364 normal comparisons passed;
+byte results are not 364 parity matches. Final domain-pin validation passed;
+independent consumer and guarded cleanup passed, with target absent and no Cargo
+afterward. Exact snapshot/cleanup receipts and their limits are in the ledger;
+the tested snapshot does not attest this later receipt prose. F2 consumer/cache
+passes are historical only, not F3a validation.
+User-reported HEAD `1ef1f0c` contains complete F2 (initially clean); F3a is
+uncommitted and unstaged, separately authorized via “continue” after the explicit
+proposal. No commit/push or future implementation is authorized by this closeout.
+Production `python-static-8-generic-facts`, the selected Python >=3.12 helper,
+public API/schema, saved evidence and default remain unchanged. CPython
+compatibility stays Pending; full G4, version policy and cutover are not approved.
 
 **Historical F1 handoff receipts follow:** counts, hashes, cache and authorization
-statements describe F1 only, superseded by the bounded F2 authorization above.
+statements describe F1 only, not current F3a validation or authorization.
 
 **Historical direction: contract-preserving full replacement; bounded private F1
 lexer goal COMPLETE / PROVED by compiled tests; all delivery gates PASS.** One shared fallible
@@ -353,12 +356,15 @@ Personal/company Git-based distribution is the approved delivery model; no
 crates.io/registry publication is required (`publish = false`). The five local
 Ruff source crates, notices and maintained patches travel in `vendor/ruff`
 with that checkout: no external fork, submodule or published Ruff version is needed.
-F2 schema-3 provenance passed: **89 vendor files / 67 Rust sources / 2,219,373 bytes**
+Historical F2 schema-3 provenance passed: **89 vendor files / 67 Rust sources / 2,219,373 bytes**
 (65 upstream + two authored; 14 modified / 51 unchanged upstream),
 with a third nine-file patch layered after the old policy patch. The old two
 patches and 65-source pristine map remain unchanged; **264 source paths** were
-verified. Current consumer and guarded cleanup passed; exact snapshot, hashes and
-receipt limits are in the F2 ledger. The snapshot does not attest these final
+verified at F2. Vendor bytes are unchanged for F3a; its 266-path source closure
+passed main's checker; independent consumer and guarded cleanup passed. See the
+[F3a ledger](docs/python-analysis.md#f3a-captured-byte-fact-integration).
+F2's historical snapshot, hashes and receipt limits are in the F2 ledger; they
+do not validate F3a. The snapshot does not attest these final
 receipt prose bytes. **Historical F1 schema-2 provenance** covered **87 vendor files / 66 Rust sources /
 1,972,891 bytes**: eight modified upstream, 57 unchanged and one authored MIT byte
 facade, separately hashed rather than labeled pristine upstream. The 65-source

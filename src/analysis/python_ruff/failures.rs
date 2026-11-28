@@ -1,7 +1,7 @@
 //! Finite CPython failure certificates over Ruff tokens, never recovery ASTs.
 use super::unicode15;
 use ruff_python_ast::Mod;
-use ruff_python_parser::{LexicalErrorType, ParseErrorType, Parsed, TokenKind};
+use ruff_python_parser::{LexicalErrorType, ParseError, ParseErrorType, Parsed, TokenKind, Tokens};
 use ruff_text_size::Ranged;
 use serde::Serialize;
 
@@ -40,6 +40,8 @@ pub(super) struct Detected {
 pub(super) enum Error {
     Cancelled,
     ResourceLimit,
+    /// An accepted byte token has no valid local UTF-8 spelling.
+    InvalidSource,
 }
 
 #[derive(Clone, Copy)]
@@ -96,8 +98,44 @@ pub(super) fn inspect(
             return Ok(None);
         }
     }
-    let tokens = parsed.tokens();
-    if tokens.len() > 200_000 || text.len() > 2 * 1024 * 1024 {
+    match inspect_tokens(
+        text.as_bytes(),
+        parsed.tokens(),
+        parsed.errors(),
+        budget,
+        check,
+    ) {
+        // Preserve the text inspector's unresolved result for mismatched ranges.
+        Err(Error::InvalidSource) => Ok(None),
+        result => result,
+    }
+}
+
+/// Private admission guard, not an engine API. The caller supplies tokens from
+/// an accepted byte Module parse with both diagnostic channels empty. This walks
+/// no AST and never certifies a CPython exception for byte input.
+pub(super) fn inspect_accepted_bytes(
+    bytes: &[u8],
+    tokens: &Tokens,
+    budget: &mut impl FnMut(usize) -> Result<(), Error>,
+    check: &mut dyn FnMut() -> bool,
+) -> Result<Option<Detected>, Error> {
+    tick(check)?;
+    let mut result = inspect_tokens(bytes, tokens, &[], budget, check)?;
+    if let Some(detected) = &mut result {
+        detected.failure = None;
+    }
+    Ok(result)
+}
+
+fn inspect_tokens(
+    bytes: &[u8],
+    tokens: &Tokens,
+    errors: &[ParseError],
+    budget: &mut impl FnMut(usize) -> Result<(), Error>,
+    check: &mut dyn FnMut() -> bool,
+) -> Result<Option<Detected>, Error> {
+    if tokens.len() > 200_000 || bytes.len() > 2 * 1024 * 1024 {
         return Err(Error::ResourceLimit);
     }
     budget(256 * std::mem::size_of::<Frame>())?;
@@ -108,13 +146,12 @@ pub(super) fn inspect(
     // Non-overlapping token ranges certify every diagnostic independently, even
     // when CPython's decode order differs from Ruff's diagnostic order.
     let mut malformed = Vec::<(usize, usize)>::new();
-    if !parsed.errors().is_empty() {
+    if !errors.is_empty() {
         budget(tokens.len() * std::mem::size_of::<(usize, usize)>())?;
         malformed
             .try_reserve_exact(tokens.len())
             .map_err(|_| Error::ResourceLimit)?;
     }
-    let bytes = text.as_bytes();
     let mut cursor = 0;
     let mut line = 1;
     let mut first = None;
@@ -126,11 +163,11 @@ pub(super) fn inspect(
         let range = token.range();
         let start = range.start().to_usize();
         let end = range.end().to_usize();
-        let Some(raw) = text.get(start..end) else {
-            return Ok(None);
+        let Some(raw_bytes) = bytes.get(start..end) else {
+            return Err(Error::InvalidSource);
         };
         if start < cursor {
-            return Ok(None);
+            return Err(Error::InvalidSource);
         }
         while cursor < start {
             if cursor % 256 == 0 {
@@ -143,26 +180,32 @@ pub(super) fn inspect(
             }
             cursor += 1;
         }
-        let mut push = None;
-        match token.kind() {
-            TokenKind::Comment => {
-                let mut tail = &raw.as_bytes()[1..];
+        if token.kind() == TokenKind::Comment {
+            let Some(mut tail) = raw_bytes.strip_prefix(b"#") else {
+                return Err(Error::InvalidSource);
+            };
+            while matches!(tail.first(), Some(b' ' | b'\t')) {
+                tick(check)?;
+                tail = &tail[1..];
+            }
+            if let Some(mut tail) = tail.strip_prefix(b"type:") {
                 while matches!(tail.first(), Some(b' ' | b'\t')) {
                     tick(check)?;
                     tail = &tail[1..];
                 }
-                if let Some(mut tail) = tail.strip_prefix(b"type:") {
-                    while matches!(tail.first(), Some(b' ' | b'\t')) {
-                        tick(check)?;
-                        tail = &tail[1..];
-                    }
-                    let ignore = tail.starts_with(b"ignore")
-                        && tail
-                            .get(6)
-                            .is_none_or(|byte| !byte.is_ascii_alphanumeric() && byte.is_ascii());
-                    actual_type_comment |= !ignore;
-                }
+                let ignore = tail.starts_with(b"ignore")
+                    && tail
+                        .get(6)
+                        .is_none_or(|byte| !byte.is_ascii_alphanumeric() && byte.is_ascii());
+                actual_type_comment |= !ignore;
             }
+            continue;
+        }
+        // Comments never acquire a text representation. Semantic spelling checks
+        // use only local, checked views of non-comment tokens.
+        let raw = std::str::from_utf8(raw_bytes).map_err(|_| Error::InvalidSource)?;
+        let mut push = None;
+        match token.kind() {
             TokenKind::Name if !raw.is_ascii() => {
                 if !unicode15::valid_identifier(raw, check).map_err(|_| Error::Cancelled)? {
                     failure_sites += 1;
@@ -242,7 +285,7 @@ pub(super) fn inspect(
                 };
                 if let Some(reason) = invalid {
                     failure_sites += 1;
-                    if !parsed.errors().is_empty() {
+                    if !errors.is_empty() {
                         malformed.push((start, end));
                     }
                     if middle {
@@ -317,7 +360,7 @@ pub(super) fn inspect(
     if !frames.is_empty() {
         return Ok(None);
     }
-    for error in parsed.errors() {
+    for error in errors {
         tick(check)?;
         let start = error.location.start().to_usize();
         let end = error.location.end().to_usize();
@@ -420,6 +463,112 @@ mod tests {
 
     fn failure(exception: Exception, line: usize) -> Option<Failure> {
         Some(Failure { exception, line })
+    }
+
+    #[test]
+    fn accepted_byte_guards_share_text_policy_without_certificates() {
+        for (text, _, _) in matrix() {
+            let parsed = parse(&text);
+            if !parsed.has_no_syntax_errors() {
+                continue;
+            }
+            let expected = inspect(&text, &parsed, &mut |_| Ok(()), &mut || false)
+                .unwrap()
+                .map(|detected| (None::<Failure>, detected.reason));
+            let actual = inspect_accepted_bytes(
+                text.as_bytes(),
+                parsed.tokens(),
+                &mut |_| Ok(()),
+                &mut || false,
+            )
+            .unwrap()
+            .map(|detected| (detected.failure, detected.reason));
+            assert_eq!(actual, expected, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn accepted_bytes_keep_comments_opaque_and_noncomments_checked() {
+        use ruff_python_parser::byte::{parse_module_checked, ByteParseLimits};
+
+        for bytes in [
+            b"# ordinary \xff\r\nx=1\n".as_slice(),
+            b"x=f'{1 # ordinary \xff\n}'\n".as_slice(),
+            b"# ordinary \xff\nx=\xe1\xb2\x89\n".as_slice(),
+        ] {
+            let mut check = || false;
+            let parsed = parse_module_checked(
+                bytes,
+                ParseOptions::from(Mode::Module)
+                    .with_target_version(PythonVersion::PY312)
+                    .with_ast_only(true),
+                ByteParseLimits::default(),
+                &mut check,
+            )
+            .unwrap();
+            let result =
+                inspect_accepted_bytes(bytes, parsed.tokens(), &mut |_| Ok(()), &mut || false)
+                    .unwrap();
+            if bytes.ends_with(b"\xe1\xb2\x89\n") {
+                let detected = result.unwrap();
+                assert_eq!(detected.reason, "invalid Unicode 15 identifier");
+                assert!(detected.failure.is_none());
+            } else {
+                assert!(result.is_none());
+            }
+        }
+        let parsed = parse("x='a'\n");
+        let invalid = b"x='\xff'\n";
+        assert!(matches!(
+            inspect_accepted_bytes(invalid, parsed.tokens(), &mut |_| Ok(()), &mut || false),
+            Err(Error::InvalidSource)
+        ));
+        assert!(matches!(
+            inspect_accepted_bytes(b"x=", parsed.tokens(), &mut |_| Ok(()), &mut || false),
+            Err(Error::InvalidSource)
+        ));
+        assert!(inspect("x=", &parsed, &mut |_| Ok(()), &mut || false)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn accepted_byte_guards_preserve_control_failures() {
+        let text = format!("x='{}'\n", "a".repeat(4096));
+        let parsed = parse(&text);
+        let mut calls = 0;
+        assert!(matches!(
+            inspect_accepted_bytes(
+                text.as_bytes(),
+                parsed.tokens(),
+                &mut |_| Ok(()),
+                &mut || {
+                    calls += 1;
+                    calls == 20
+                }
+            ),
+            Err(Error::Cancelled)
+        ));
+        assert!(matches!(
+            inspect_accepted_bytes(
+                text.as_bytes(),
+                parsed.tokens(),
+                &mut |_| Err(Error::ResourceLimit),
+                &mut || false,
+            ),
+            Err(Error::ResourceLimit)
+        ));
+        let deep = format!("{}1{}", "(".repeat(257), ")".repeat(257));
+        let parsed = parse(&deep);
+        assert!(matches!(
+            inspect_accepted_bytes(
+                deep.as_bytes(),
+                parsed.tokens(),
+                &mut |_| Ok(()),
+                &mut || false,
+            ),
+            Err(Error::ResourceLimit)
+        ));
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
